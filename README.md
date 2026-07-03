@@ -7,6 +7,9 @@ The template is the source of truth for model generation. The DLD is used to
 author and review the template, but generation should not infer missing
 behavior from the DLD.
 
+> **New here?** Read [docs/pipeline_overview.md](docs/pipeline_overview.md) for a
+> diagrammed explanation of the whole flow and what each piece does.
+
 ## IPs
 
 - `arbitration_ip`: hierarchical port/tenant/SQ arbitration with pending

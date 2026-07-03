@@ -23,6 +23,13 @@ behavior from the DLD.
   and decode-error handling.
 - `interrupt_controller_ip`: source sampling, pending/filter/priority,
   delivery, ACK, EOI, and software interrupt behavior.
+- `mailbox_ip`: multi-channel inter-processor messaging with per-channel
+  FIFOs, doorbell generation, and masked interrupt aggregation.
+- `spi_master_ip`: SPI master with TX/RX byte FIFOs, a bit-shift transfer
+  engine, chip-select framing, and masked interrupts.
+- `i3c_ip`: I3C master with a queued command engine, bit-level SDR transfer
+  engine, in-band-interrupt (IBI) detection/arbitration, and masked
+  interrupts.
 
 ## Flow
 

@@ -318,7 +318,7 @@ sequenceDiagram
     G-->>R: pass → promote to golden template
     R->>R: write src/<ip>.py + tests/test_<ip>.py
     R->>V: run full flow
-    V-->>U: ✅ all 8 IPs green, tests pass
+    V-->>U: ✅ all 9 IPs green, tests pass
 ```
 
 Concretely:
@@ -332,9 +332,9 @@ Concretely:
    (register the model in `common.py` + `ip.py`).
 6. `python tools\validate_dld_flow.py` → green.
 
-This is exactly the path used to add `mailbox_ip` and `spi_master_ip`: two brand
--new DLDs went through extraction, review, modeling, and testing, and the whole
-8-IP suite validated with 43 passing tests.
+This is exactly the path used to add `mailbox_ip`, `spi_master_ip`, and
+`i3c_ip`: brand-new DLDs went through extraction, review, modeling, and
+testing, and the whole 9-IP suite validated with 47 passing tests.
 
 ---
 

@@ -27,6 +27,7 @@ IP_ARTIFACTS: Dict[str, IpArtifact] = {
     ),
     "mailbox_ip": IpArtifact("mailbox_ip", "docs/mailbox_ip_dld.md", "templates/mailbox_ip.template.yaml"),
     "spi_master_ip": IpArtifact("spi_master_ip", "docs/spi_master_ip_dld.md", "templates/spi_master_ip.template.yaml"),
+    "i3c_ip": IpArtifact("i3c_ip", "docs/i3c_ip_dld.md", "templates/i3c_ip.template.yaml"),
 }
 
 

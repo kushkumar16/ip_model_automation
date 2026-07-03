@@ -1,0 +1,2 @@
+# Normalize line endings on checkin; let Git handle EOL per-platform on checkout.
+* text=auto

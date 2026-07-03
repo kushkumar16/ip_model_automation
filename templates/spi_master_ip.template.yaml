@@ -1,0 +1,330 @@
+ip:
+  name: spi_master_ip
+  domain: soc_peripheral
+  description: SPI master controller with TX/RX byte FIFOs, a bit-shift transfer engine, chip-select framing, and masked interrupts.
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: clear_fifos_config_status_and_irqs
+
+interfaces:
+  - name: register_if
+    type: apb_axi_lite
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: spi_cfg_access
+        fields: [addr, write_data, read_data]
+        handshake: valid_ready
+        timing_notes: config writes update shadow state before a transfer starts
+  - name: spi_bus_if
+    type: spi_serial
+    direction: output
+    clock_domain: bus_clk
+    transactions:
+      - name: byte_transfer
+        fields: [sclk, mosi, miso, cs_n]
+        handshake: serial_shift
+        timing_notes: each bit takes one shift period derived from the baud divider
+  - name: interrupt_if
+    type: interrupt
+    direction: output
+    clock_domain: bus_clk
+    transactions:
+      - name: transfer_irq
+        fields: [irq_vector, irq_level]
+        handshake: level
+        timing_notes: asserted until software clears status
+
+commands:
+  - name: CONFIG_TRANSFER
+    description: Software programs baud divider, mode, and chip-select.
+    fields: [baud_div, mode, cs_select]
+    valid_conditions: [register_access_valid]
+    completion_conditions: [config_applied]
+    error_conditions: [invalid_mode]
+    functional_effects: [update_transfer_config]
+    timing_effects: [register_decode_delay]
+  - name: WRITE_TX
+    description: Software pushes a byte into the transmit FIFO.
+    fields: [byte]
+    valid_conditions: [tx_fifo_has_space]
+    completion_conditions: [byte_enqueued]
+    error_conditions: [tx_fifo_full]
+    functional_effects: [enqueue_tx_byte]
+    timing_effects: [register_decode_delay]
+  - name: READ_RX
+    description: Software reads a byte from the receive FIFO.
+    fields: []
+    valid_conditions: [rx_fifo_non_empty]
+    completion_conditions: [byte_returned]
+    error_conditions: [rx_fifo_empty]
+    functional_effects: [dequeue_rx_byte]
+    timing_effects: [register_decode_delay]
+  - name: CLEAR_INTERRUPT
+    description: Software clears transfer-done and threshold interrupt status.
+    fields: []
+    valid_conditions: [register_access_valid]
+    completion_conditions: [interrupt_cleared]
+    error_conditions: []
+    functional_effects: [clear_interrupt_status]
+    timing_effects: [register_decode_delay]
+
+fsm_processes:
+  - name: register_access
+    purpose: Accept software reads/writes, update config, and load the TX FIFO.
+    simpy_process: true
+    states: [RESET, IDLE, DECODE_ACCESS, WRITE_CONFIG, READ_STATUS, ACCESS_ERROR]
+    transitions:
+      - from: IDLE
+        to: DECODE_ACCESS
+        condition: bus_valid
+        actions: [decode_register]
+        latency_cycles: 2
+      - from: DECODE_ACCESS
+        to: WRITE_CONFIG
+        condition: is_write
+        actions: [update_shadow_config, load_tx_fifo]
+        latency_cycles: 2
+    functional_responsibilities: [program_baud_mode_cs, load_tx_fifo]
+    interfaces_touched: [register_if]
+    queues_used: [tx_fifo]
+    resources_used: [register_bus_port]
+  - name: transmit_engine
+    purpose: Pull the next byte from the TX FIFO and start a shift.
+    simpy_process: true
+    states: [IDLE, LOAD_BYTE, ASSERT_CS, SHIFT_REQUEST, WAIT_SHIFT_DONE]
+    transitions:
+      - from: IDLE
+        to: LOAD_BYTE
+        condition: tx_fifo_non_empty
+        actions: [load_byte, assert_cs]
+        latency_cycles: 1
+      - from: LOAD_BYTE
+        to: SHIFT_REQUEST
+        condition: byte_loaded
+        actions: [request_shift]
+        latency_cycles: 1
+    functional_responsibilities: [load_tx_byte, frame_chip_select]
+    interfaces_touched: [spi_bus_if]
+    queues_used: [tx_fifo, shift_queue]
+    resources_used: [spi_bus_port]
+  - name: shift_engine
+    purpose: Shift a byte bit by bit over the SPI bus and sample MISO.
+    simpy_process: true
+    states: [IDLE, SHIFT_BIT, SAMPLE_MISO, BYTE_COMPLETE, DEASSERT_CS]
+    transitions:
+      - from: IDLE
+        to: SHIFT_BIT
+        condition: shift_requested
+        actions: [drive_mosi_bit]
+        latency_cycles: 1
+      - from: SHIFT_BIT
+        to: BYTE_COMPLETE
+        condition: all_bits_shifted
+        actions: [capture_received_byte]
+        latency_cycles: 1
+    functional_responsibilities: [serialize_byte, sample_miso]
+    interfaces_touched: [spi_bus_if]
+    queues_used: [shift_queue, rx_byte_queue]
+    resources_used: [spi_bus_port]
+  - name: receive_engine
+    purpose: Capture shifted-in bytes into the RX FIFO.
+    simpy_process: true
+    states: [IDLE, RECEIVE_BYTE, CHECK_SPACE, ENQUEUE, OVERFLOW]
+    transitions:
+      - from: RECEIVE_BYTE
+        to: CHECK_SPACE
+        condition: byte_captured
+        actions: [check_rx_space]
+        latency_cycles: 1
+      - from: CHECK_SPACE
+        to: ENQUEUE
+        condition: rx_fifo_has_space
+        actions: [enqueue_rx_byte]
+        latency_cycles: 1
+      - from: CHECK_SPACE
+        to: OVERFLOW
+        condition: rx_fifo_full
+        actions: [count_overflow]
+        latency_cycles: 1
+    functional_responsibilities: [capture_rx_byte, handle_overflow]
+    interfaces_touched: [spi_bus_if]
+    queues_used: [rx_byte_queue, rx_fifo]
+    resources_used: []
+  - name: interrupt_control
+    purpose: Raise transfer-done and threshold interrupts with masking and clear.
+    simpy_process: true
+    states: [IDLE, EVALUATE_EVENTS, APPLY_MASK, ASSERT_IRQ, WAIT_SW_CLEAR, DEASSERT_IRQ]
+    transitions:
+      - from: EVALUATE_EVENTS
+        to: APPLY_MASK
+        condition: transfer_event_pending
+        actions: [apply_mask]
+        latency_cycles: 2
+      - from: APPLY_MASK
+        to: ASSERT_IRQ
+        condition: unmasked_event
+        actions: [assert_irq]
+        latency_cycles: 2
+    functional_responsibilities: [detect_transfer_done, drive_interrupt]
+    interfaces_touched: [interrupt_if]
+    queues_used: [interrupt_pending_queue]
+    resources_used: [interrupt_line]
+
+resources:
+  - name: register_bus_port
+    type: bus_port
+    capacity: 1
+    bandwidth: one_access_per_tick
+    latency_cycles: 1
+    arbitration: bus_order
+    sharing_scope: global
+  - name: spi_bus_port
+    type: serial_port
+    capacity: 1
+    bandwidth: one_bit_per_shift
+    latency_cycles: 1
+    arbitration: transfer_order
+    sharing_scope: global
+  - name: interrupt_line
+    type: irq_line
+    capacity: 1
+    bandwidth: level
+    latency_cycles: 1
+    arbitration: mask_priority
+    sharing_scope: global
+
+queues:
+  - name: tx_fifo
+    producer: register_access
+    consumer: transmit_engine
+    depth: 8
+    blocking_behavior: backpressure
+    ordering: fifo
+  - name: shift_queue
+    producer: transmit_engine
+    consumer: shift_engine
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+  - name: rx_byte_queue
+    producer: shift_engine
+    consumer: receive_engine
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+  - name: rx_fifo
+    producer: receive_engine
+    consumer: register_access
+    depth: 8
+    blocking_behavior: drop_on_full
+    ordering: fifo
+  - name: interrupt_pending_queue
+    producer: shift_engine
+    consumer: interrupt_control
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo
+
+fsm_relationships:
+  fsm_count: 5
+  parallel_processes:
+    - [register_access, transmit_engine, shift_engine, receive_engine, interrupt_control]
+  sequential_paths:
+    - name: transfer_path
+      path: [transmit_engine.LOAD_BYTE, shift_engine.SHIFT_BIT, shift_engine.BYTE_COMPLETE, receive_engine.ENQUEUE, interrupt_control.ASSERT_IRQ]
+      description: A byte is loaded, shifted, captured, and then raises a transfer-done interrupt.
+    - name: config_to_transfer_path
+      path: [register_access.WRITE_CONFIG, transmit_engine.LOAD_BYTE]
+      description: Configuration must be applied before a transfer starts.
+  gating_relationships:
+    - source: tx_fifo
+      gates: transmit_engine.LOAD_BYTE
+      stall_reason: tx_fifo_empty
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from SPI Master IP DLD.
+  fsm_process_delays:
+    - fsm: register_access
+      mode: parallel_process
+      operations:
+        - {name: decode, cycles: 2, ns: 4}
+        - {name: write_config, cycles: 2, ns: 4}
+        - {name: read_status, cycles: 1, ns: 2}
+    - fsm: transmit_engine
+      mode: parallel_process
+      operations:
+        - {name: load_byte, cycles: 1, ns: 2}
+        - {name: assert_chip_select, cycles: 1, ns: 2}
+        - {name: shift_request, cycles: 1, ns: 2}
+    - fsm: shift_engine
+      mode: parallel_process
+      operations:
+        - {name: shift_bit, cycles: 1, ns: 2}
+        - {name: sample_miso, cycles: 1, ns: 2}
+        - {name: byte_complete, cycles: 1, ns: 2}
+    - fsm: receive_engine
+      mode: parallel_process
+      operations:
+        - {name: receive_byte, cycles: 1, ns: 2}
+        - {name: space_check, cycles: 1, ns: 2}
+        - {name: enqueue, cycles: 1, ns: 2}
+    - fsm: interrupt_control
+      mode: parallel_process
+      operations:
+        - {name: evaluate_events, cycles: 2, ns: 4}
+        - {name: apply_mask, cycles: 2, ns: 4}
+        - {name: assert_irq, cycles: 2, ns: 4}
+  end_to_end_paths:
+    - name: byte_load_to_transfer_done_irq
+      cycles: 18
+      ns: 36
+      path: [load_byte, assert_chip_select, shift_bit, sample_miso, byte_complete, evaluate_events, apply_mask, assert_irq]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [transfer_config, tx_fifo_state, rx_fifo_state, transfer_status, interrupt_mask, transition_counts]
+  apis: [configure, write_tx, read_rx, clear_interrupt, run, get_metrics]
+  invariants:
+    - A byte is shifted only after it is loaded from the TX FIFO.
+    - Received bytes are captured only after a byte shift completes.
+    - A transfer-done interrupt stays asserted until software clears it.
+  ignored_payload_details: [bit_level_waveforms]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [shift_delay, load_delay, capture_delay, interrupt_delay]
+  metrics: [transmitted_bytes, received_bytes, transfers_completed, rx_overflows, interrupt_count, masked_interrupts, clear_latency]
+
+test_scenarios:
+  - name: single_byte_transfer_completes_and_interrupts
+    description: A queued byte is shifted, captured, and raises a transfer-done interrupt.
+    input_sequence: [CONFIG_TRANSFER, WRITE_TX_ONE_BYTE]
+    expected_functional_behavior: [byte_transmitted, byte_received, transfer_done_interrupt]
+    expected_performance_properties: [transfer_latency_measured]
+    fsm_coverage: [register_access.WRITE_CONFIG, transmit_engine.LOAD_BYTE, shift_engine.BYTE_COMPLETE, receive_engine.ENQUEUE, interrupt_control.ASSERT_IRQ]
+  - name: rx_overflow_is_counted
+    description: Receiving more bytes than RX FIFO depth counts overflows.
+    input_sequence: [CONFIG_TRANSFER, WRITE_TX_BURST_NO_DRAIN]
+    expected_functional_behavior: [rx_overflow_counted]
+    expected_performance_properties: [overflow_observed]
+    fsm_coverage: [receive_engine.CHECK_SPACE, receive_engine.OVERFLOW]
+  - name: masked_interrupt_suppresses_irq
+    description: A masked transfer event does not assert the interrupt output.
+    input_sequence: [CONFIG_TRANSFER_MASKED, WRITE_TX_ONE_BYTE]
+    expected_functional_behavior: [masked_interrupt_counted, no_interrupt]
+    expected_performance_properties: [mask_suppresses_irq]
+    fsm_coverage: [interrupt_control.APPLY_MASK, shift_engine.SHIFT_BIT]

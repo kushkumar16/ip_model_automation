@@ -1,0 +1,325 @@
+ip:
+  name: mailbox_ip
+  domain: soc_ipc
+  description: Inter-processor mailbox with per-channel message FIFOs, doorbell generation, and masked interrupt notification.
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: clear_fifos_config_status_and_irqs
+
+interfaces:
+  - name: register_if
+    type: apb_axi_lite
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: mailbox_cfg_access
+        fields: [addr, write_data, read_data]
+        handshake: valid_ready
+        timing_notes: writes update shadow config before taking effect
+  - name: sender_if
+    type: message_write
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: send_message
+        fields: [channel_id, message, valid]
+        handshake: valid_ready
+        timing_notes: accepted only when channel FIFO has space
+  - name: receiver_if
+    type: message_read
+    direction: output
+    clock_domain: bus_clk
+    transactions:
+      - name: read_message
+        fields: [channel_id, message, ready]
+        handshake: valid_ready
+        timing_notes: messages observed in FIFO order
+  - name: interrupt_if
+    type: interrupt
+    direction: output
+    clock_domain: bus_clk
+    transactions:
+      - name: doorbell_irq
+        fields: [irq_target, irq_level]
+        handshake: level
+        timing_notes: asserted until software clears status
+
+commands:
+  - name: CONFIG_CHANNEL
+    description: Software enables a channel and programs its interrupt mask.
+    fields: [channel_id, enable, mask]
+    valid_conditions: [register_access_valid]
+    completion_conditions: [config_applied]
+    error_conditions: [invalid_channel]
+    functional_effects: [update_channel_config]
+    timing_effects: [register_decode_delay]
+  - name: SEND_MESSAGE
+    description: Sender writes a message into a channel FIFO.
+    fields: [channel_id, message]
+    valid_conditions: [channel_enabled, fifo_has_space]
+    completion_conditions: [message_enqueued]
+    error_conditions: [fifo_full]
+    functional_effects: [enqueue_message, raise_doorbell]
+    timing_effects: [push_delay]
+  - name: READ_MESSAGE
+    description: Receiver reads the oldest message from a channel FIFO.
+    fields: [channel_id]
+    valid_conditions: [fifo_non_empty]
+    completion_conditions: [message_delivered]
+    error_conditions: [fifo_empty]
+    functional_effects: [dequeue_message, free_space]
+    timing_effects: [pop_delay]
+  - name: CLEAR_INTERRUPT
+    description: Software clears a channel doorbell status.
+    fields: [channel_id]
+    valid_conditions: [register_access_valid]
+    completion_conditions: [doorbell_cleared]
+    error_conditions: []
+    functional_effects: [clear_doorbell_status]
+    timing_effects: [register_decode_delay]
+
+fsm_processes:
+  - name: register_access
+    purpose: Accept software register reads and writes and update shadow config.
+    simpy_process: true
+    states: [RESET, IDLE, DECODE_ACCESS, WRITE_CONFIG, READ_STATUS, ACCESS_ERROR]
+    transitions:
+      - from: IDLE
+        to: DECODE_ACCESS
+        condition: bus_valid
+        actions: [decode_register]
+        latency_cycles: 2
+      - from: DECODE_ACCESS
+        to: WRITE_CONFIG
+        condition: is_write
+        actions: [update_shadow_config]
+        latency_cycles: 2
+    functional_responsibilities: [program_channel_enable, program_interrupt_mask]
+    interfaces_touched: [register_if]
+    queues_used: [config_update_queue]
+    resources_used: [register_bus_port]
+  - name: message_push
+    purpose: Accept sender messages and enqueue them into the channel FIFO.
+    simpy_process: true
+    states: [IDLE, ACCEPT_MESSAGE, CHECK_SPACE, ENQUEUE, REJECT_FULL]
+    transitions:
+      - from: IDLE
+        to: ACCEPT_MESSAGE
+        condition: sender_valid
+        actions: [latch_message]
+        latency_cycles: 1
+      - from: CHECK_SPACE
+        to: ENQUEUE
+        condition: fifo_has_space
+        actions: [enqueue_message, signal_doorbell]
+        latency_cycles: 1
+      - from: CHECK_SPACE
+        to: REJECT_FULL
+        condition: fifo_full
+        actions: [drop_message]
+        latency_cycles: 1
+    functional_responsibilities: [enqueue_message, apply_backpressure]
+    interfaces_touched: [sender_if]
+    queues_used: [message_fifo, doorbell_queue]
+    resources_used: []
+  - name: message_pop
+    purpose: Deliver the oldest message to the receiver and free FIFO space.
+    simpy_process: true
+    states: [IDLE, CHECK_PENDING, DEQUEUE, DELIVER, EMPTY_WAIT]
+    transitions:
+      - from: CHECK_PENDING
+        to: DEQUEUE
+        condition: fifo_non_empty
+        actions: [dequeue_message]
+        latency_cycles: 1
+      - from: DEQUEUE
+        to: DELIVER
+        condition: receiver_ready
+        actions: [deliver_message, free_space]
+        latency_cycles: 1
+    functional_responsibilities: [deliver_message, release_backpressure]
+    interfaces_touched: [receiver_if]
+    queues_used: [message_fifo]
+    resources_used: []
+  - name: doorbell
+    purpose: Convert message arrivals into per-channel doorbell events.
+    simpy_process: true
+    states: [IDLE, RAISE_DOORBELL, RECORD_EVENT, WAIT_ACK]
+    transitions:
+      - from: IDLE
+        to: RAISE_DOORBELL
+        condition: enqueue_completed
+        actions: [raise_doorbell]
+        latency_cycles: 1
+      - from: RAISE_DOORBELL
+        to: RECORD_EVENT
+        condition: doorbell_raised
+        actions: [record_doorbell]
+        latency_cycles: 1
+    functional_responsibilities: [generate_doorbell]
+    interfaces_touched: [interrupt_if]
+    queues_used: [doorbell_queue, interrupt_pending_queue]
+    resources_used: []
+  - name: interrupt_notify
+    purpose: Aggregate doorbells into a masked interrupt output.
+    simpy_process: true
+    states: [IDLE, COLLECT_DOORBELLS, APPLY_MASK, ASSERT_IRQ, WAIT_SW_CLEAR, DEASSERT_IRQ]
+    transitions:
+      - from: COLLECT_DOORBELLS
+        to: APPLY_MASK
+        condition: doorbell_pending
+        actions: [apply_mask]
+        latency_cycles: 2
+      - from: APPLY_MASK
+        to: ASSERT_IRQ
+        condition: unmasked_doorbell
+        actions: [assert_irq]
+        latency_cycles: 2
+    functional_responsibilities: [aggregate_doorbells, drive_interrupt]
+    interfaces_touched: [interrupt_if]
+    queues_used: [interrupt_pending_queue]
+    resources_used: [interrupt_line]
+
+resources:
+  - name: register_bus_port
+    type: bus_port
+    capacity: 1
+    bandwidth: one_access_per_tick
+    latency_cycles: 1
+    arbitration: bus_order
+    sharing_scope: global
+  - name: interrupt_line
+    type: irq_line
+    capacity: 1
+    bandwidth: level
+    latency_cycles: 1
+    arbitration: mask_priority
+    sharing_scope: global
+
+queues:
+  - name: config_update_queue
+    producer: register_access
+    consumer: register_access
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+  - name: message_fifo
+    producer: message_push
+    consumer: message_pop
+    depth: 8
+    blocking_behavior: backpressure
+    ordering: fifo_per_channel
+  - name: doorbell_queue
+    producer: message_push
+    consumer: doorbell
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo
+  - name: interrupt_pending_queue
+    producer: doorbell
+    consumer: interrupt_notify
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo
+
+fsm_relationships:
+  fsm_count: 5
+  parallel_processes:
+    - [register_access, message_push, message_pop, doorbell, interrupt_notify]
+  sequential_paths:
+    - name: message_to_interrupt_path
+      path: [message_push.ENQUEUE, doorbell.RAISE_DOORBELL, interrupt_notify.ASSERT_IRQ]
+      description: A message must be enqueued before its doorbell raises an interrupt.
+    - name: message_delivery_path
+      path: [message_push.ENQUEUE, message_pop.DEQUEUE, message_pop.DELIVER]
+      description: Enqueued messages are delivered to the receiver in FIFO order.
+  gating_relationships:
+    - source: message_fifo
+      gates: message_push.ENQUEUE
+      stall_reason: fifo_full
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from Mailbox IP DLD.
+  fsm_process_delays:
+    - fsm: register_access
+      mode: parallel_process
+      operations:
+        - {name: decode, cycles: 2, ns: 4}
+        - {name: write_config, cycles: 2, ns: 4}
+        - {name: read_status, cycles: 1, ns: 2}
+    - fsm: message_push
+      mode: parallel_process
+      operations:
+        - {name: accept_message, cycles: 1, ns: 2}
+        - {name: space_check, cycles: 1, ns: 2}
+        - {name: enqueue, cycles: 1, ns: 2}
+    - fsm: message_pop
+      mode: parallel_process
+      operations:
+        - {name: pending_check, cycles: 1, ns: 2}
+        - {name: dequeue, cycles: 1, ns: 2}
+        - {name: deliver, cycles: 1, ns: 2}
+    - fsm: doorbell
+      mode: parallel_process
+      operations:
+        - {name: raise_doorbell, cycles: 1, ns: 2}
+        - {name: record_event, cycles: 1, ns: 2}
+    - fsm: interrupt_notify
+      mode: parallel_process
+      operations:
+        - {name: collect_doorbells, cycles: 2, ns: 4}
+        - {name: apply_mask, cycles: 2, ns: 4}
+        - {name: assert_irq, cycles: 2, ns: 4}
+  end_to_end_paths:
+    - name: message_enqueue_to_irq
+      cycles: 11
+      ns: 22
+      path: [accept_message, space_check, enqueue, raise_doorbell, record_event, collect_doorbells, apply_mask, assert_irq]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [channel_config, message_fifos, doorbell_status, interrupt_mask, transition_counts]
+  apis: [configure_channel, send_message, read_message, clear_interrupt, run, get_metrics]
+  invariants:
+    - Messages are delivered in FIFO order per channel.
+    - A message is enqueued only when the channel FIFO has space.
+    - A doorbell interrupt stays asserted until software clears it.
+  ignored_payload_details: [message_contents]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [push_delay, pop_delay, doorbell_delay, interrupt_delay]
+  metrics: [enqueued_messages, delivered_messages, dropped_on_full, doorbells, interrupt_count, masked_doorbells, clear_latency]
+
+test_scenarios:
+  - name: message_enqueue_delivers_and_interrupts
+    description: A sent message is delivered to the receiver and raises a doorbell interrupt.
+    input_sequence: [CONFIG_CHANNEL_0, SEND_MESSAGE_0, READ_MESSAGE_0]
+    expected_functional_behavior: [message_delivered, doorbell_interrupt_asserted]
+    expected_performance_properties: [enqueue_to_interrupt_latency_measured]
+    fsm_coverage: [register_access.WRITE_CONFIG, message_push.ENQUEUE, message_pop.DELIVER, doorbell.RAISE_DOORBELL, interrupt_notify.ASSERT_IRQ]
+  - name: full_fifo_applies_backpressure
+    description: Sending beyond FIFO depth drops or stalls messages on a full channel.
+    input_sequence: [CONFIG_CHANNEL_0, SEND_MESSAGE_BURST]
+    expected_functional_behavior: [dropped_on_full_counted]
+    expected_performance_properties: [backpressure_observed]
+    fsm_coverage: [message_push.CHECK_SPACE, message_push.REJECT_FULL]
+  - name: masked_doorbell_suppresses_interrupt
+    description: A masked channel records a doorbell but does not assert the interrupt.
+    input_sequence: [CONFIG_CHANNEL_0_MASKED, SEND_MESSAGE_0]
+    expected_functional_behavior: [masked_doorbell_counted, no_interrupt]
+    expected_performance_properties: [mask_suppresses_irq]
+    fsm_coverage: [interrupt_notify.APPLY_MASK, message_pop.CHECK_PENDING]

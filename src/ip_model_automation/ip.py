@@ -8,6 +8,8 @@ from .common import Command, Descriptor, IP_ARTIFACTS, IpArtifact, list_ips, res
 from .completion_ip import CompletionIpModel
 from .gdma_ip import GdmaIpModel
 from .interrupt_controller_ip import InterruptControllerIpModel
+from .mailbox_ip import MailboxIpModel
+from .spi_master_ip import SpiMasterIpModel
 from .timer_ip import TimerIpModel
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "IP_ARTIFACTS",
     "InterruptControllerIpModel",
     "IpArtifact",
+    "MailboxIpModel",
+    "SpiMasterIpModel",
     "TimerIpModel",
     "list_ips",
     "resolve_artifacts",

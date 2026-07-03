@@ -1,14 +1,48 @@
 ---
 name: ip-model-generation
-description: Generate, review, or repair Python SimPy transaction-level delay models and unit tests for hardware IPs from reviewed DLD-derived IP template YAML files. Use when the task mentions IP DLDs, HW IP modeling, FSM/process modeling, SimPy delay/performance models, template-driven LLM generation, scaffold generation, prompt packs, or validation of generated IP models/tests.
+description: Parse hardware IP DLDs into template YAML, then generate, review, or repair Python SimPy transaction-level delay models and unit tests from those templates. Use when the task mentions IP DLDs, DLD-to-template extraction, HW IP modeling, FSM/process modeling, SimPy delay/performance models, template-driven LLM generation, scaffold generation, prompt packs, or validation of generated IP models/tests.
 ---
 
 # IP Model Generation
 
-Use this skill when generating or validating SimPy models from reviewed
-`*.template.yaml` files.
+Use this skill when generating or validating SimPy models from HW IP DLDs. It
+covers the full flow `docs/<ip>_dld.md -> reviewed template -> model -> tests`.
+If you already have a reviewed `*.template.yaml`, skip to the "Template ->
+Model" workflow below.
 
-## Workflow
+## Stage 0: DLD -> Reviewed Template
+
+DLDs vary in format and often omit details. Never invent missing behavior;
+surface it in the gaps report.
+
+1. Extract a draft template and a gaps report from the DLD:
+
+   ```powershell
+   python tools\dld_to_template.py docs\<ip_name>_dld.md
+   ```
+
+   This writes `templates\<ip_name>.template.draft.yaml` and
+   `reports\<ip_name>.gaps.md`.
+
+2. Read `reports\<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker in the
+   draft using only behavior the DLD states. Where the DLD leaves a detail open
+   (see its "Open Items"), pick a conservative, clearly-labeled default and
+   record it in the gaps report instead of silently inventing behavior.
+3. Lint and check DLD coverage of the draft:
+
+   ```powershell
+   python tools\template_lint.py templates\<ip_name>.template.draft.yaml
+   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md
+   ```
+
+4. When both pass and no `TODO_REVIEW` remains, promote the draft to the golden
+   template `templates\<ip_name>.template.yaml`, then re-run
+   `check_template_coverage.py ... --strict` on the promoted file.
+
+Read `references/dld_extraction_rules.md` for the expected DLD conventions and
+the "stated vs inferred" rule.
+
+## Template -> Model Workflow
 
 1. Treat the reviewed template as the source of truth.
 2. Run template lint before model generation:
@@ -29,6 +63,13 @@ Use this skill when generating or validating SimPy models from reviewed
 
    ```powershell
    python tools\validate_ip_flow.py
+   ```
+
+   To validate the DLD front-end as well (every DLD has a lint-passing,
+   DLD-covering template, then the model/test flow):
+
+   ```powershell
+   python tools\validate_dld_flow.py
    ```
 
 ## Prompt Packs

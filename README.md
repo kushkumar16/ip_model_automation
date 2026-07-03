@@ -25,11 +25,40 @@ behavior from the DLD.
 
 ```text
 DLD markdown
-  -> reviewed IP template YAML
-  -> template lint gate
+  -> dld_to_template extraction  (draft template + gaps report)
+  -> review/fill TODO_REVIEW     (only DLD-stated behavior)
+  -> DLD coverage + lint gate    (promote to reviewed template)
   -> SimPy scaffold generation
   -> model implementation from template
   -> unit tests and validation
+```
+
+The DLD is the only source for *authoring* the template; the reviewed template
+is the source of truth for *model generation*. Missing DLD details are surfaced
+in a gaps report, never silently invented.
+
+## DLD To Template
+
+DLDs vary in format and often omit details. Extract a draft template plus a gaps
+report from a DLD:
+
+```powershell
+python tools\dld_to_template.py docs\<ip_name>_dld.md
+```
+
+This writes `templates\<ip_name>.template.draft.yaml` and
+`reports\<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker using only
+DLD-stated behavior, then check the draft covers the DLD and promote it:
+
+```powershell
+python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md --strict
+```
+
+Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
+then the model/test flow):
+
+```powershell
+python tools\validate_dld_flow.py
 ```
 
 ## Daily Validation
@@ -96,10 +125,18 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 ## Adding A New IP
 
 1. Write `docs/<ip_name>_dld.md`.
-2. Create `templates/<ip_name>.template.yaml`.
-3. Run:
+2. Extract a draft template and gaps report, then fill every `TODO_REVIEW`
+   using only DLD-stated behavior:
 
    ```powershell
+   python tools\dld_to_template.py docs\<ip_name>_dld.md
+   ```
+
+3. Check DLD coverage, then promote the draft to
+   `templates\<ip_name>.template.yaml`:
+
+   ```powershell
+   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md --strict
    python tools\template_lint.py templates\<ip_name>.template.yaml
    ```
 
@@ -119,9 +156,14 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 
 ## Key Files
 
-- `docs/*_dld.md`: human-readable IP design documents.
+- `docs/*_dld.md`: human-readable IP design documents (template authoring source).
 - `templates/*.template.yaml`: source of truth for model generation.
+- `templates/*.template.draft.yaml`: extractor output awaiting review (gitignored).
+- `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored).
 - `schemas/ip_model_template.schema.json`: machine-checkable template contract.
+- `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
+- `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).
+- `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.

@@ -2,14 +2,29 @@ name: ip_generation_loop
 description: Template-driven loop for generating and validating SimPy IP models.
 
 inputs:
+  dld_glob: docs/*_dld.md
   template_glob: templates/*.template.yaml
+  draft_glob: templates/*.template.draft.yaml
   model_dir: src/ip_model_automation
   tests_dir: tests
   prompt_pack_dir: prompt_packs
+  reports_dir: reports
 
 agent_contract: agents/ip_model_generation_agent.md
 
 stages:
+  - name: parse_dld
+    command: python tools/dld_to_template.py {dld}
+    required: true
+    notes: Extract draft template + gaps report from the DLD.
+  - name: review_template
+    command: external_agent_or_manual_edit
+    required: false
+    notes: Agent replaces every TODO_REVIEW in the draft using only DLD-stated behavior, then promotes the draft to {template}.
+  - name: check_dld_coverage
+    command: python tools/check_template_coverage.py {template} {dld} --strict
+    required: true
+    notes: Template must cover DLD FSMs/count and contain no TODO_REVIEW.
   - name: lint_template
     command: python tools/template_lint.py {template}
     required: true
@@ -27,18 +42,25 @@ stages:
     command: python tools/report_model_coverage.py
     required: true
   - name: full_validation
-    command: python tools/validate_ip_flow.py
+    command: python tools/validate_dld_flow.py
     required: true
+    notes: Runs the DLD->template coverage gate then the model/test flow.
 
 loop_policy:
   max_iterations: 3
   stop_on_first_pass: true
+  fail_on_missing_draft: true
+  fail_on_unresolved_todo_review: true
+  fail_on_uncovered_dld_fsm: true
   fail_on_missing_prompt_pack: true
   fail_on_scaffold_shape_error: true
   fail_on_uncovered_fsm: true
   fail_on_unit_test_failure: true
 
 pass_criteria:
+  - draft template and gaps report generated from DLD
+  - promoted template has no TODO_REVIEW markers
+  - template covers every DLD FSM and matching fsm_count
   - template lint passes
   - scaffold generation passes
   - prompt pack generation passes

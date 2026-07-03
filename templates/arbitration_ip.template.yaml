@@ -1,0 +1,371 @@
+ip:
+  name: arbitration_ip
+  domain: nvme_controller
+  description: Selects eligible commands through port, tenant, and SQ arbitration and issues them downstream.
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_policy_state_and_grant_counters
+
+interfaces:
+  - name: ingress_queue_if
+    type: internal_queue
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: command_peek
+        fields: [port_id, tenant_id, sq_id, source_id, cmd_id, opcode, size_kb, priority, age]
+        handshake: valid_ready
+        timing_notes: queue entry is not removed during peek
+      - name: command_pop
+        fields: [port_id, tenant_id, sq_id, cmd_id]
+        handshake: valid_ready
+        timing_notes: pop occurs only after grant and downstream ready
+  - name: issue_if
+    type: command_issue
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: issue_command
+        fields: [cmd_descriptor, selected_port, selected_tenant, selected_sq, pending_cmd_count, device_burst_available, tenant_burst_available, sq_burst_available, issue_count, selection_reason]
+        handshake: valid_ready
+        timing_notes: issue_count is min(pending_cmd_count, device_burst, tenant_burst, sq_burst)
+  - name: qos_credit_if
+    type: credit_status
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: eligibility_check
+        fields: [tenant_alive, read_iops_credit, write_iops_credit, read_bw_credit, write_bw_credit]
+        handshake: sampled
+        timing_notes: sampled during candidate evaluation
+
+commands:
+  - name: READ
+    description: Read command candidate.
+    fields: [port_id, tenant_id, sq_id, source_id, cmd_id, size_kb, priority]
+    valid_conditions: [port_pending, tenant_pending, sq_pending, tenant_alive, downstream_ready]
+    completion_conditions: [issued_to_downstream]
+    error_conditions: [tenant_inactive, malformed_descriptor]
+    functional_effects: [update_sq_bitmap, update_tenant_bitmap, update_port_bitmap, pop_selected_sq]
+    timing_effects: [bitmap_update, port_scan, tenant_scan, sq_scan, issue_pop]
+  - name: WRITE
+    description: Write command candidate.
+    fields: [port_id, tenant_id, sq_id, source_id, cmd_id, size_kb, priority]
+    valid_conditions: [port_pending, tenant_pending, sq_pending, tenant_alive, downstream_ready]
+    completion_conditions: [issued_to_downstream]
+    error_conditions: [tenant_inactive, malformed_descriptor]
+    functional_effects: [update_sq_bitmap, update_tenant_bitmap, update_port_bitmap, pop_selected_sq]
+    timing_effects: [bitmap_update, port_scan, tenant_scan, sq_scan, issue_pop]
+  - name: FLUSH
+    description: Ordered command candidate.
+    fields: [port_id, tenant_id, sq_id, source_id, cmd_id, priority]
+    valid_conditions: [port_pending, tenant_pending, sq_pending, ordering_barrier_clear, downstream_ready]
+    completion_conditions: [issued_to_downstream]
+    error_conditions: [ordering_barrier_timeout]
+    functional_effects: [preserve_ordering, update_bitmaps, pop_selected_sq]
+    timing_effects: [bitmap_update, port_scan, tenant_scan, sq_scan, issue_pop]
+
+fsm_processes:
+  - name: arbiter_main
+    purpose: Scans queues, selects eligible command, and issues grants.
+    simpy_process: true
+    states:
+      - name: RESET
+        description: Initialize pointers and counters.
+      - name: IDLE
+        description: Wait for queue activity or downstream availability.
+      - name: PORT_SCAN
+        description: Evaluate pending ports in RR/WRR order.
+      - name: TENANT_SCAN
+        description: Evaluate pending tenants linked to the selected port.
+      - name: SQ_SCAN
+        description: Evaluate pending SQs linked to the selected tenant.
+      - name: GRANT
+        description: Select one SQ and pass selected SQ metadata to issue pipeline.
+      - name: STALL
+        description: Track backpressure or no-eligible reason.
+    transitions:
+      - from: RESET
+        to: IDLE
+        condition: reset_deasserted
+        actions: [clear_state]
+        latency_cycles: 1
+      - from: IDLE
+        to: PORT_SCAN
+        condition: any_port_pending
+        actions: [update_pending_bitmaps]
+        latency_cycles: 1
+      - from: PORT_SCAN
+        to: TENANT_SCAN
+        condition: eligible_port_found
+        actions: [record_selected_port]
+        latency_cycles: 1
+      - from: TENANT_SCAN
+        to: SQ_SCAN
+        condition: eligible_tenant_found
+        actions: [record_selected_tenant]
+        latency_cycles: 1
+      - from: SQ_SCAN
+        to: GRANT
+        condition: eligible_sq_found
+        actions: [record_selected_sq]
+        latency_cycles: 1
+      - from: PORT_SCAN
+        to: STALL
+        condition: no_eligible_port
+        actions: [increment_no_eligible_stall]
+        latency_cycles: 1
+      - from: GRANT
+        to: IDLE
+        condition: selected_sq_accepted_by_issue_pipeline
+        actions: [send_selected_sq_to_issue_pipeline]
+        latency_cycles: 0
+    interfaces_touched: [ingress_queue_if, issue_if, qos_credit_if]
+    queues_used: [sq_ingress_queues]
+    resources_used: [issue_slots]
+  - name: issue_pipeline
+    purpose: Reads selected SQ pending count, applies burst min calculation, and sends request downstream.
+    simpy_process: true
+    states: [RESET, WAIT_SELECTION, READ_PENDING_COUNT, READ_BURST, CALC_ISSUE_COUNT, ISSUE_REQUEST, ISSUE_STALL, UPDATE_BURST]
+    transitions:
+      - from: WAIT_SELECTION
+        to: READ_PENDING_COUNT
+        condition: selected_sq_valid
+        actions: [accept_selected_sq]
+        latency_cycles: 1
+      - from: READ_PENDING_COUNT
+        to: READ_BURST
+        condition: pending_count_available
+        actions: [read_pending_cmd_count]
+        latency_cycles: 3
+      - from: READ_BURST
+        to: CALC_ISSUE_COUNT
+        condition: burst_state_available
+        actions: [read_device_tenant_sq_burst]
+        latency_cycles: 4
+      - from: CALC_ISSUE_COUNT
+        to: ISSUE_REQUEST
+        condition: issue_count_nonzero_and_downstream_ready
+        actions: [compute_min_issue_count]
+        latency_cycles: 2
+      - from: CALC_ISSUE_COUNT
+        to: ISSUE_STALL
+        condition: issue_count_zero
+        actions: [increment_burst_stall]
+        latency_cycles: 1
+      - from: ISSUE_REQUEST
+        to: UPDATE_BURST
+        condition: downstream_accepts_request
+        actions: [pop_issue_count_commands]
+        latency_cycles: 3
+      - from: UPDATE_BURST
+        to: WAIT_SELECTION
+        condition: burst_debited
+        actions: [debit_device_tenant_sq_burst, update_pending_bitmaps]
+        latency_cycles: 2
+    interfaces_touched: [issue_if]
+    queues_used: [sq_ingress_queues]
+    resources_used: [issue_slots]
+  - name: policy_update
+    purpose: Maintains round-robin, weighted order, and age metadata.
+    simpy_process: true
+    states: [RESET, WAIT_GRANT, UPDATE_POINTER, UPDATE_AGE]
+    transitions:
+      - from: WAIT_GRANT
+        to: UPDATE_POINTER
+        condition: grant_accepted
+        actions: [advance_port_tenant_sq_pointers]
+        latency_cycles: 0
+      - from: UPDATE_POINTER
+        to: UPDATE_AGE
+        condition: pointer_updated
+        actions: [age_unselected_queues]
+        latency_cycles: 0
+      - from: UPDATE_AGE
+        to: WAIT_GRANT
+        condition: age_updated
+        actions: []
+        latency_cycles: 0
+    interfaces_touched: []
+    queues_used: [sq_ingress_queues]
+    resources_used: []
+
+resources:
+  - name: issue_slots
+    type: issue_port
+    capacity: 1
+    bandwidth: one_command_per_dispatch_tick
+    latency_cycles: 1
+    arbitration: configured_policy
+    sharing_scope: global
+
+queues:
+  - name: sq_ingress_queues
+    producer: nvme_frontend
+    consumer: arbitration_ip
+    depth: null
+    blocking_behavior: stall
+    ordering: fifo_per_sq
+
+topology:
+  port_mode: dual
+  ports:
+    port0:
+      tenants: [T0, T1]
+    port1:
+      tenants: [T2, T3]
+  tenants:
+    T0:
+      sqs: [SQ0, SQ1]
+    T1:
+      sqs: [SQ0, SQ1, SQ2, SQ3]
+    T2:
+      sqs: [SQ0, SQ1]
+    T3:
+      sqs: [SQ0]
+  pending_bitmaps:
+    port: port_pending_bitmap[port_id]
+    tenant: tenant_pending_bitmap[port_id][tenant_id]
+    sq: sq_pending_bitmap[tenant_id][sq_id]
+  burst:
+    device_burst_available: 1024
+    tenant_burst_available: {T0: 1024, T1: 1024, T2: 1024, T3: 1024}
+    sq_burst_available:
+      T0: {SQ0: 1024, SQ1: 1024}
+      T1: {SQ0: 1024, SQ1: 1024, SQ2: 1024, SQ3: 1024}
+      T2: {SQ0: 1024, SQ1: 1024}
+      T3: {SQ0: 1024}
+    issue_count_rule: min(pending_cmd_count, device_burst_available, tenant_burst_available, sq_burst_available)
+
+qos:
+  policies: [ROUND_ROBIN, WEIGHTED_ROUND_ROBIN, STRICT_PRIORITY]
+  default_policy: WEIGHTED_ROUND_ROBIN
+  hierarchy: [port, tenant, sq]
+  weights:
+    ports: {port0: 1, port1: 1}
+    tenants: {T0: 1, T1: 4, T2: 2, T3: 1}
+    sqs: {SQ0: 4, SQ1: 2, SQ2: 1, SQ3: 1}
+  eligibility_owner: arbitration_ip_check_only
+  token_debit_owner: completion_ip_or_qos_service
+
+fsm_relationships:
+  fsm_count: 3
+  parallel_processes:
+    - [arbiter_main, policy_update, issue_pipeline]
+  sequential_paths:
+    - name: command_issue_path
+      path: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, issue_pipeline.READ_PENDING_COUNT, issue_pipeline.READ_BURST, issue_pipeline.CALC_ISSUE_COUNT, issue_pipeline.ISSUE_REQUEST]
+      description: Pipeline 1 selects one SQ; pipeline 2 computes issue_count and sends downstream request.
+    - name: policy_update_path
+      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER, policy_update.UPDATE_AGE]
+      description: Accepted grant updates policy state for the next scan.
+  gating_relationships:
+    - source: issue_if.issue_ready
+      gates: arbiter_main.ISSUE
+      stall_reason: output_backpressure
+    - source: port_pending_bitmap
+      gates: arbiter_main.PORT_SCAN
+      stall_reason: no_port_pending
+    - source: tenant_pending_bitmap
+      gates: arbiter_main.TENANT_SCAN
+      stall_reason: no_tenant_pending
+    - source: sq_pending_bitmap
+      gates: arbiter_main.SQ_SCAN
+      stall_reason: no_sq_pending
+    - source: min_burst_and_pending_count
+      gates: issue_pipeline.ISSUE_REQUEST
+      stall_reason: burst_stall
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from Arbitration IP DLD.
+  fsm_process_delays:
+    - fsm: arbiter_main
+      mode: parallel_process
+      operations:
+        - {name: bitmap_update, cycles: 3, ns: 6}
+        - {name: port_scan, cycles: 4, ns: 8}
+        - {name: tenant_scan, cycles: 6, ns: 12}
+        - {name: sq_scan, cycles: 8, ns: 16}
+        - {name: grant_selected_sq, cycles: 2, ns: 4}
+        - {name: backpressure_retry, cycles: 1, ns: 2}
+    - fsm: policy_update
+      mode: parallel_helper
+      operations:
+        - {name: pointer_update, cycles: 1, ns: 2}
+        - {name: age_update, cycles: 2, ns: 4}
+        - {name: weighted_order_rebuild, cycles: 8, ns: 16}
+    - fsm: issue_pipeline
+      mode: parallel_process
+      operations:
+        - {name: selection_accept, cycles: 1, ns: 2}
+        - {name: pending_count_read, cycles: 3, ns: 6}
+        - {name: burst_read, cycles: 4, ns: 8}
+        - {name: min_burst_calculation, cycles: 2, ns: 4}
+        - {name: downstream_issue_request, cycles: 3, ns: 6}
+        - {name: burst_debit, cycles: 2, ns: 4}
+  end_to_end_paths:
+    - name: no_stall_command_issue
+      cycles: 23
+      ns: 46
+      path: [port_scan, tenant_scan, sq_scan, grant_selected_sq]
+    - name: new_command_to_issue
+      cycles: 38
+      ns: 76
+      path: [bitmap_update, port_scan, tenant_scan, sq_scan, grant_selected_sq, selection_accept, pending_count_read, burst_read, min_burst_calculation, downstream_issue_request, burst_debit]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [sq_queues, port_pending_bitmap, tenant_pending_bitmap, sq_pending_bitmap, device_burst_available, tenant_burst_available, sq_burst_available, weighted_order, rr_pointer, issued_trace, downstream_requests, selection_trace, stall_counters, fsm_state, transition_counts]
+  apis: [configure_topology, configure_policy, configure_burst, enqueue_command, query_pending_bitmaps, set_issue_ready, run, get_metrics, get_issued_trace]
+  invariants:
+    - Commands are popped only when issue_ready is true.
+    - Port arbitration happens before tenant arbitration.
+    - Tenant arbitration happens before SQ arbitration.
+    - Issue count is min of SQ pending count, device burst, tenant burst, and SQ burst.
+    - Weighted round-robin order is deterministic for equal bitmap availability.
+    - Queue entries remain pending during downstream backpressure.
+  ignored_payload_details: [data_payload_bytes]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [bitmap_update, port_scan, tenant_scan, sq_scan, pending_count_read, burst_read, min_burst_calculation, issue_latency, downstream_backpressure]
+  metrics: [grants, stalls, no_port_pending_stalls, no_tenant_pending_stalls, no_sq_pending_stalls, burst_stalls, downstream_requests, issued_commands, output_backpressure_cycles, queue_depth, selected_port, selected_tenant, selected_sq, issue_count]
+
+test_scenarios:
+  - name: weighted_order_four_tenants
+    description: Weights 1,4,2,1 select T0,T1,T1,T1,T1,T2,T2,T3 when all queues are non-empty.
+    input_sequence: [port0_T0_SQ0_READ, port0_T1_SQ0_READ, port1_T2_SQ0_READ, port1_T3_SQ0_READ]
+    expected_functional_behavior: [weighted_order_respected]
+    expected_performance_properties: [no_output_stall]
+    fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]
+  - name: hierarchical_bitmap_selection
+    description: Port, tenant, and SQ bitmaps drive hierarchical selection from pending command to issued command.
+    input_sequence: [port1_T2_SQ1_READ]
+    expected_functional_behavior: [port1_pending_set, T2_pending_set, SQ1_pending_set, selected_port1_T2_SQ1]
+    expected_performance_properties: [bitmap_update_latency_applied, hierarchical_scan_latency_applied]
+    fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN]
+  - name: burst_min_issue_count
+    description: Pipeline 2 uses min(pending, device burst, tenant burst, SQ burst) for downstream issue count.
+    input_sequence: [port0_T1_SQ0_8_READS, device_burst_6, tenant_burst_T1_3, sq_burst_T1_SQ0_5]
+    expected_functional_behavior: [issue_count_is_3, three_commands_popped, burst_counters_debited_by_3]
+    expected_performance_properties: [pending_count_read_latency, burst_read_latency, min_calculation_latency]
+    fsm_coverage: [issue_pipeline.READ_PENDING_COUNT, issue_pipeline.READ_BURST, issue_pipeline.CALC_ISSUE_COUNT, issue_pipeline.ISSUE_REQUEST, issue_pipeline.UPDATE_BURST]
+  - name: downstream_backpressure
+    description: Candidate remains queued when issue_ready is false.
+    input_sequence: [T0_READ, issue_ready_low]
+    expected_functional_behavior: [no_pop_until_ready]
+    expected_performance_properties: [output_stall_incremented]
+    fsm_coverage: [arbiter_main.STALL]

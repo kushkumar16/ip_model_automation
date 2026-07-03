@@ -1,0 +1,350 @@
+ip:
+  name: axi_interconnect_ip
+  domain: soc_fabric
+  description: Routes AXI read/write transactions between multiple masters and slaves.
+  clock_domains:
+    - name: axi_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_buffers_outstanding_tables_and_error_queues
+
+interfaces:
+  - name: master_axi_if
+    type: axi_master_side
+    direction: input
+    clock_domain: axi_clk
+    transactions:
+      - name: aw_w_ar
+        fields: [master_id, axi_id, addr, length, qos]
+        handshake: valid_ready
+        timing_notes: AW/W/AR channels may progress independently
+  - name: slave_axi_if
+    type: axi_slave_side
+    direction: output
+    clock_domain: axi_clk
+    transactions:
+      - name: routed_transaction
+        fields: [slave_id, master_id, axi_id, addr, length]
+        handshake: valid_ready_response
+        timing_notes: responses route by outstanding table lookup
+
+commands:
+  - name: READ_TRANSACTION
+    description: AXI AR routed to a slave and R routed back to origin master.
+    fields: [master_id, axi_id, addr, length, qos]
+    valid_conditions: [address_mapped, outstanding_credit_available]
+    completion_conditions: [last_r_beat_routed]
+    error_conditions: [decode_error, response_error]
+  - name: WRITE_TRANSACTION
+    description: AXI AW/W routed to a slave and B response returned.
+    fields: [master_id, axi_id, addr, length, qos]
+    valid_conditions: [address_mapped, outstanding_credit_available, write_data_available]
+    completion_conditions: [b_response_routed]
+    error_conditions: [decode_error, response_error]
+
+fsm_processes:
+  - name: write_address_ingress
+    purpose: Captures AW, decodes address, checks credits, and queues write requests.
+    simpy_process: true
+    states: [RESET, WAIT_AW, CAPTURE_AW, DECODE_ADDR, CHECK_OUTSTANDING, ENQUEUE_WRITE_REQ, AW_STALL, AW_ERROR]
+    transitions:
+      - from: CAPTURE_AW
+        to: DECODE_ADDR
+        condition: aw_valid
+        actions: [decode_address]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if]
+    queues_used: [aw_ingress_queue, slave_write_request_queue]
+    resources_used: [address_decoder, outstanding_table]
+  - name: write_data_ingress
+    purpose: Captures W beats and buffers data metadata.
+    simpy_process: true
+    states: [RESET, WAIT_W, CAPTURE_W_BEAT, BUFFER_W_BEAT, WAIT_LAST, W_STALL, W_ERROR]
+    transitions:
+      - from: CAPTURE_W_BEAT
+        to: BUFFER_W_BEAT
+        condition: buffer_space_available
+        actions: [buffer_w_beat]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if]
+    queues_used: [w_data_buffer]
+    resources_used: []
+  - name: slave_write_arbitration
+    purpose: Selects writes per slave port.
+    simpy_process: true
+    states: [SCAN_MASTERS, CHECK_POLICY, GRANT_WRITE, ISSUE_AW, ISSUE_W, SLAVE_BACKPRESSURE, NO_WRITE_ELIGIBLE]
+    transitions:
+      - from: CHECK_POLICY
+        to: GRANT_WRITE
+        condition: write_candidate_found
+        actions: [grant_slave_write]
+        latency_cycles: 1
+    interfaces_touched: [slave_axi_if]
+    queues_used: [slave_write_request_queue]
+    resources_used: [slave_write_port]
+  - name: write_join_ordering
+    purpose: Matches write address and write data streams and enforces ordering before slave issue.
+    simpy_process: true
+    states: [WAIT_AW_AND_W, CHECK_ORDER, MERGE_WRITE, READY_FOR_SLAVE_ARB, ORDER_STALL]
+    transitions:
+      - from: WAIT_AW_AND_W
+        to: CHECK_ORDER
+        condition: aw_and_w_available
+        actions: [match_aw_w]
+        latency_cycles: 4
+      - from: CHECK_ORDER
+        to: MERGE_WRITE
+        condition: ordering_allows_issue
+        actions: [merge_write_metadata]
+        latency_cycles: 4
+      - from: CHECK_ORDER
+        to: ORDER_STALL
+        condition: ordering_blocks_issue
+        actions: [increment_order_stall]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if]
+    queues_used: [aw_ingress_queue, w_data_buffer, slave_write_request_queue]
+    resources_used: [outstanding_table]
+  - name: write_response_routing
+    purpose: Routes B responses using outstanding table.
+    simpy_process: true
+    states: [WAIT_B, LOOKUP_OUTSTANDING, ROUTE_B, UPDATE_CREDITS, B_STALL, B_ERROR]
+    transitions:
+      - from: LOOKUP_OUTSTANDING
+        to: ROUTE_B
+        condition: outstanding_match_found
+        actions: [route_b_to_master]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if, slave_axi_if]
+    queues_used: [response_queue]
+    resources_used: [outstanding_table]
+  - name: read_address_ingress
+    purpose: Captures AR, decodes address, checks credits, and queues read requests.
+    simpy_process: true
+    states: [RESET, WAIT_AR, CAPTURE_AR, DECODE_ADDR, CHECK_OUTSTANDING, ENQUEUE_READ_REQ, AR_STALL, AR_ERROR]
+    transitions:
+      - from: CAPTURE_AR
+        to: DECODE_ADDR
+        condition: ar_valid
+        actions: [decode_address]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if]
+    queues_used: [ar_ingress_queue, slave_read_request_queue]
+    resources_used: [address_decoder, outstanding_table]
+  - name: slave_read_arbitration
+    purpose: Selects reads per slave port.
+    simpy_process: true
+    states: [SCAN_MASTERS, CHECK_POLICY, GRANT_READ, ISSUE_AR, SLAVE_BACKPRESSURE, NO_READ_ELIGIBLE]
+    transitions:
+      - from: CHECK_POLICY
+        to: GRANT_READ
+        condition: read_candidate_found
+        actions: [grant_slave_read]
+        latency_cycles: 1
+    interfaces_touched: [slave_axi_if]
+    queues_used: [slave_read_request_queue]
+    resources_used: [slave_read_port]
+  - name: read_data_routing
+    purpose: Routes R beats and releases credit on final beat.
+    simpy_process: true
+    states: [WAIT_R, LOOKUP_OUTSTANDING, ROUTE_R_BEAT, CHECK_LAST, UPDATE_CREDITS, R_STALL, R_ERROR]
+    transitions:
+      - from: LOOKUP_OUTSTANDING
+        to: ROUTE_R_BEAT
+        condition: outstanding_match_found
+        actions: [route_r_to_master]
+        latency_cycles: 1
+    interfaces_touched: [master_axi_if, slave_axi_if]
+    queues_used: [response_queue]
+    resources_used: [outstanding_table]
+  - name: decode_error_response
+    purpose: Generates local error responses for unmapped or disabled address regions.
+    simpy_process: true
+    states: [WAIT_ERROR_REQ, BUILD_ERROR_RESP, ROUTE_ERROR, ERROR_RESP_STALL]
+    transitions:
+      - from: WAIT_ERROR_REQ
+        to: BUILD_ERROR_RESP
+        condition: decode_error_detected
+        actions: [build_decode_error]
+        latency_cycles: 3
+      - from: BUILD_ERROR_RESP
+        to: ROUTE_ERROR
+        condition: error_response_ready
+        actions: [route_error_to_master]
+        latency_cycles: 3
+    interfaces_touched: [master_axi_if]
+    queues_used: [response_queue]
+    resources_used: []
+
+resources:
+  - name: address_decoder
+    type: combinational_or_pipeline
+    capacity: 1
+    bandwidth: one_decode_per_tick
+    latency_cycles: 1
+    arbitration: shared
+    sharing_scope: global
+  - name: outstanding_table
+    type: table
+    capacity: 16
+    bandwidth: lookup_update_per_tick
+    latency_cycles: 1
+    arbitration: per_master
+    sharing_scope: global
+
+queues:
+  - name: aw_ingress_queue
+    producer: master_axi_if
+    consumer: write_address_ingress
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo_per_master
+  - name: slave_write_request_queue
+    producer: write_address_ingress
+    consumer: slave_write_arbitration
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo_per_slave
+  - name: slave_read_request_queue
+    producer: read_address_ingress
+    consumer: slave_read_arbitration
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo_per_slave
+
+fsm_relationships:
+  fsm_count: 9
+  parallel_processes:
+    - [write_address_ingress, write_data_ingress, write_join_ordering, slave_write_arbitration, write_response_routing]
+    - [read_address_ingress, slave_read_arbitration, read_data_routing, decode_error_response]
+  sequential_paths:
+    - name: write_transaction_path
+      path: [write_address_ingress.DECODE_ADDR, write_data_ingress.BUFFER_W_BEAT, slave_write_arbitration.GRANT_WRITE, slave_write_arbitration.ISSUE_W, write_response_routing.ROUTE_B]
+      description: AW/W metadata must be available before slave write issue and B response routing.
+    - name: read_transaction_path
+      path: [read_address_ingress.DECODE_ADDR, slave_read_arbitration.GRANT_READ, slave_read_arbitration.ISSUE_AR, read_data_routing.ROUTE_R_BEAT]
+      description: AR decode and arbitration precede read data routing.
+  gating_relationships:
+    - source: outstanding_credit
+      gates: write_address_ingress.ENQUEUE_WRITE_REQ
+      stall_reason: outstanding_full
+    - source: slave_ready
+      gates: slave_read_arbitration.ISSUE_AR
+      stall_reason: slave_backpressure
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from AXI Interconnect IP DLD.
+  fsm_process_delays:
+    - fsm: write_address_ingress
+      mode: parallel_process
+      operations:
+        - {name: aw_capture, cycles: 2, ns: 4}
+        - {name: address_decode, cycles: 5, ns: 10}
+        - {name: outstanding_check, cycles: 3, ns: 6}
+        - {name: enqueue_write, cycles: 2, ns: 4}
+    - fsm: write_data_ingress
+      mode: parallel_process
+      operations:
+        - {name: w_beat_capture, cycles: 1, ns: 2}
+        - {name: w_buffer_write, cycles: 2, ns: 4}
+        - {name: last_beat_close, cycles: 1, ns: 2}
+    - fsm: slave_write_arbitration
+      mode: parallel_process
+      operations:
+        - {name: write_master_scan, cycles: 10, ns: 20}
+        - {name: write_grant, cycles: 2, ns: 4}
+        - {name: aw_issue, cycles: 2, ns: 4}
+        - {name: w_issue_per_beat, cycles: 2, ns: 4}
+    - fsm: write_join_ordering
+      mode: parallel_process
+      operations:
+        - {name: aw_w_match, cycles: 4, ns: 8}
+        - {name: ordering_check, cycles: 4, ns: 8}
+        - {name: merge_write, cycles: 2, ns: 4}
+    - fsm: write_response_routing
+      mode: parallel_process
+      operations:
+        - {name: b_capture, cycles: 1, ns: 2}
+        - {name: b_outstanding_lookup, cycles: 4, ns: 8}
+        - {name: route_b, cycles: 3, ns: 6}
+        - {name: write_credit_release, cycles: 1, ns: 2}
+    - fsm: read_address_ingress
+      mode: parallel_process
+      operations:
+        - {name: ar_capture, cycles: 2, ns: 4}
+        - {name: address_decode, cycles: 5, ns: 10}
+        - {name: outstanding_check, cycles: 3, ns: 6}
+        - {name: enqueue_read, cycles: 2, ns: 4}
+    - fsm: slave_read_arbitration
+      mode: parallel_process
+      operations:
+        - {name: read_master_scan, cycles: 10, ns: 20}
+        - {name: read_grant, cycles: 2, ns: 4}
+        - {name: ar_issue, cycles: 2, ns: 4}
+    - fsm: read_data_routing
+      mode: parallel_process
+      operations:
+        - {name: r_capture, cycles: 1, ns: 2}
+        - {name: r_outstanding_lookup, cycles: 4, ns: 8}
+        - {name: route_r_beat, cycles: 3, ns: 6}
+        - {name: read_credit_release, cycles: 1, ns: 2}
+    - fsm: decode_error_response
+      mode: parallel_process
+      operations:
+        - {name: build_error_response, cycles: 3, ns: 6}
+        - {name: route_error_response, cycles: 3, ns: 6}
+  end_to_end_paths:
+    - name: minimum_write_control
+      cycles: 45
+      ns: 90
+      path: [aw_capture, address_decode, outstanding_check, enqueue_write, write_master_scan, write_grant, aw_issue, route_b]
+    - name: minimum_read_control
+      cycles: 35
+      ns: 70
+      path: [ar_capture, address_decode, outstanding_check, enqueue_read, read_master_scan, read_grant, ar_issue, route_r_beat]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [address_map, outstanding_table, aw_queues, w_buffers, ar_queues, response_queues, decode_errors, transition_counts]
+  apis: [add_route, submit_read, submit_write, set_slave_ready, run, get_responses, get_metrics]
+  invariants:
+    - Unmapped addresses generate local decode errors.
+    - Responses route to the originating master using outstanding metadata.
+    - Outstanding credits are released only after final response.
+  ignored_payload_details: [write_data_payload, read_data_payload]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [decode_latency, arbitration_wait, slave_latency, response_routing]
+  metrics: [read_latency, write_latency, decode_errors, outstanding_depth, port_utilization]
+
+test_scenarios:
+  - name: route_read_and_write
+    description: Mapped read/write transactions route to selected slave and responses return to origin master.
+    input_sequence: [MAP_S0, WRITE_M0, READ_M1]
+    expected_functional_behavior: [responses_to_origin_masters]
+    expected_performance_properties: [latency_measured]
+    fsm_coverage: [write_address_ingress.DECODE_ADDR, slave_write_arbitration.GRANT_WRITE, read_address_ingress.DECODE_ADDR, slave_read_arbitration.GRANT_READ]
+  - name: write_data_join_and_response_path
+    description: Write data beats join AW metadata before slave issue and B response routing.
+    input_sequence: [MAP_S0, WRITE_AW_M0, WRITE_W_BEATS_M0, SLAVE_B_RESP]
+    expected_functional_behavior: [write_metadata_merged, b_response_to_origin_master]
+    expected_performance_properties: [write_join_latency_measured, write_response_latency_measured]
+    fsm_coverage: [write_data_ingress.BUFFER_W_BEAT, write_join_ordering.MERGE_WRITE, write_response_routing.ROUTE_B]
+  - name: read_response_and_decode_error_paths
+    description: Read data returns through outstanding lookup and unmapped accesses generate local error response.
+    input_sequence: [MAP_S0, READ_M1, SLAVE_R_RESP, READ_UNMAPPED]
+    expected_functional_behavior: [read_response_to_origin_master, decode_error_generated]
+    expected_performance_properties: [read_response_latency_measured, decode_error_latency_measured]
+    fsm_coverage: [read_data_routing.ROUTE_R_BEAT, decode_error_response.BUILD_ERROR_RESP, decode_error_response.ROUTE_ERROR]

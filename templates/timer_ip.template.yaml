@@ -1,0 +1,344 @@
+ip:
+  name: timer_ip
+  domain: soc_utility
+  description: Provides free-running, one-shot, periodic, compare, watchdog, and interrupt timer services.
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: null
+    - name: timer_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_counters_compare_status_and_irqs
+
+interfaces:
+  - name: register_if
+    type: apb_axi_lite
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: timer_cfg_access
+        fields: [addr, write_data, read_data]
+        handshake: valid_ready
+        timing_notes: writes update shadow state before synchronization
+  - name: tick_if
+    type: clock_tick
+    direction: input
+    clock_domain: timer_clk
+    transactions:
+      - name: raw_tick
+        fields: [tick_valid]
+        handshake: event
+        timing_notes: prescaler converts raw ticks to effective ticks
+  - name: interrupt_if
+    type: interrupt
+    direction: output
+    clock_domain: timer_clk
+    transactions:
+      - name: irq
+        fields: [channel_id, irq_level]
+        handshake: level_or_pulse
+        timing_notes: asserted after compare/watchdog event
+
+commands:
+  - name: TIMER_CONFIG
+    description: Software updates timer mode, compare, reload, or prescaler.
+    fields: [channel_id, mode, compare, reload, prescale]
+    valid_conditions: [register_access_valid]
+    completion_conditions: [config_applied]
+    error_conditions: [invalid_channel, invalid_mode]
+  - name: TIMER_TICK
+    description: Effective timer tick after prescaling.
+    fields: [channel_id]
+    valid_conditions: [channel_enabled, not_debug_frozen]
+    completion_conditions: [counter_updated]
+    error_conditions: []
+  - name: WATCHDOG_KICK
+    description: Watchdog heartbeat reload.
+    fields: [source_id]
+    valid_conditions: [watchdog_enabled]
+    completion_conditions: [watchdog_counter_reloaded]
+    error_conditions: [watchdog_disabled]
+
+fsm_processes:
+  - name: register_access
+    purpose: Accepts software register reads and writes.
+    simpy_process: true
+    states: [RESET, IDLE, DECODE_ACCESS, WRITE_SHADOW, READ_RETURN, ACCESS_ERROR]
+    transitions:
+      - from: IDLE
+        to: DECODE_ACCESS
+        condition: bus_valid
+        actions: [decode_register]
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [register_update_queue]
+    resources_used: [register_bus_port]
+  - name: configuration_synchronizer
+    purpose: Moves shadow configuration into timer clock domain.
+    simpy_process: true
+    states: [WAIT_UPDATE, SYNC_STAGE_0, SYNC_STAGE_1, APPLY_CONFIG, ACK_UPDATE]
+    transitions:
+      - from: WAIT_UPDATE
+        to: SYNC_STAGE_0
+        condition: shadow_update_pending
+        actions: []
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [register_update_queue]
+    resources_used: [sync_pipeline]
+  - name: prescaler
+    purpose: Emits effective ticks per channel.
+    simpy_process: true
+    states: [RESET, WAIT_RAW_TICK, INCREMENT_DIVIDER, EMIT_EFFECTIVE_TICK, LOAD_NEW_DIVIDER]
+    transitions:
+      - from: INCREMENT_DIVIDER
+        to: EMIT_EFFECTIVE_TICK
+        condition: divider_reached
+        actions: [emit_effective_tick]
+        latency_cycles: 0
+    interfaces_touched: [tick_if]
+    queues_used: [effective_tick_queue]
+    resources_used: []
+  - name: counter
+    purpose: Updates channel counters and mode behavior.
+    simpy_process: true
+    states: [RESET, DISABLED, LOAD, COUNT, COMPARE_PENDING, RELOAD, STOPPED]
+    transitions:
+      - from: COUNT
+        to: COMPARE_PENDING
+        condition: counter_matches_compare
+        actions: [publish_compare_event]
+        latency_cycles: 0
+    interfaces_touched: [tick_if]
+    queues_used: [effective_tick_queue, compare_event_queue]
+    resources_used: []
+  - name: compare_event
+    purpose: Converts compare matches into events.
+    simpy_process: true
+    states: [WAIT_COUNTER_UPDATE, CHECK_COMPARE, EVENT_ASSERT, EVENT_HOLD, EVENT_CLEAR]
+    transitions:
+      - from: CHECK_COMPARE
+        to: EVENT_ASSERT
+        condition: compare_match
+        actions: [set_interrupt_status]
+        latency_cycles: 1
+    interfaces_touched: [interrupt_if]
+    queues_used: [compare_event_queue, interrupt_pending_queue]
+    resources_used: []
+  - name: interrupt_aggregation
+    purpose: Applies masks and drives timer interrupt output.
+    simpy_process: true
+    states: [IDLE, COLLECT_EVENTS, APPLY_MASK, ASSERT_IRQ, WAIT_SW_CLEAR, DEASSERT_IRQ]
+    transitions:
+      - from: APPLY_MASK
+        to: ASSERT_IRQ
+        condition: unmasked_event_pending
+        actions: [assert_irq]
+        latency_cycles: 1
+    interfaces_touched: [interrupt_if]
+    queues_used: [interrupt_pending_queue]
+    resources_used: [interrupt_line]
+  - name: watchdog
+    purpose: Tracks heartbeat absence and timeout.
+    simpy_process: true
+    states: [RESET, DISABLED, ARMED, WAIT_KICK_OR_TIMEOUT, KICK_RELOAD, TIMEOUT, RECOVERY_WAIT]
+    transitions:
+      - from: WAIT_KICK_OR_TIMEOUT
+        to: TIMEOUT
+        condition: timeout_expired
+        actions: [publish_watchdog_event]
+        latency_cycles: 0
+    interfaces_touched: [interrupt_if]
+    queues_used: [watchdog_kick_queue, interrupt_pending_queue]
+    resources_used: []
+  - name: debug_freeze
+    purpose: Broadcasts debug freeze/resume state to timer counters.
+    simpy_process: true
+    states: [RUN, FREEZE_REQUEST, FROZEN, RESUME_REQUEST]
+    transitions:
+      - from: RUN
+        to: FREEZE_REQUEST
+        condition: debug_halt_asserted
+        actions: [broadcast_freeze_request]
+        latency_cycles: 2
+      - from: FREEZE_REQUEST
+        to: FROZEN
+        condition: counters_ack_freeze
+        actions: [hold_counters]
+        latency_cycles: 2
+      - from: FROZEN
+        to: RESUME_REQUEST
+        condition: debug_halt_deasserted
+        actions: [broadcast_resume_request]
+        latency_cycles: 2
+      - from: RESUME_REQUEST
+        to: RUN
+        condition: counters_ack_resume
+        actions: [resume_counters]
+        latency_cycles: 2
+    interfaces_touched: []
+    queues_used: []
+    resources_used: []
+
+resources:
+  - name: register_bus_port
+    type: bus_port
+    capacity: 1
+    bandwidth: one_access_per_tick
+    latency_cycles: 1
+    arbitration: bus_order
+    sharing_scope: global
+  - name: interrupt_line
+    type: irq_line
+    capacity: 1
+    bandwidth: level_or_pulse
+    latency_cycles: 1
+    arbitration: mask_priority
+    sharing_scope: global
+
+queues:
+  - name: register_update_queue
+    producer: register_access
+    consumer: configuration_synchronizer
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+  - name: effective_tick_queue
+    producer: prescaler
+    consumer: counter
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo_per_channel
+  - name: compare_event_queue
+    producer: counter
+    consumer: compare_event
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo
+  - name: interrupt_pending_queue
+    producer: compare_event
+    consumer: interrupt_aggregation
+    depth: 8
+    blocking_behavior: stall
+    ordering: priority
+
+fsm_relationships:
+  fsm_count: 8
+  parallel_processes:
+    - [register_access, configuration_synchronizer, prescaler, counter, compare_event, interrupt_aggregation, watchdog, debug_freeze]
+  sequential_paths:
+    - name: timer_event_path
+      path: [register_access.WRITE_SHADOW, configuration_synchronizer.APPLY_CONFIG, prescaler.EMIT_EFFECTIVE_TICK, counter.COUNT, compare_event.EVENT_ASSERT, interrupt_aggregation.ASSERT_IRQ]
+      description: Config must synchronize before ticks update counters and generate interrupts.
+    - name: watchdog_timeout_path
+      path: [watchdog.WAIT_KICK_OR_TIMEOUT, watchdog.TIMEOUT, interrupt_aggregation.ASSERT_IRQ]
+      description: Watchdog timeout publishes an interrupt event.
+  gating_relationships:
+    - source: debug_freeze
+      gates: counter.COUNT
+      stall_reason: debug_frozen
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from Timer IP DLD.
+  fsm_process_delays:
+    - fsm: register_access
+      mode: parallel_process
+      operations:
+        - {name: decode, cycles: 2, ns: 4}
+        - {name: read_write, cycles: 2, ns: 4}
+    - fsm: configuration_synchronizer
+      mode: parallel_process
+      operations:
+        - {name: two_stage_sync, cycles: 2, ns: 4}
+        - {name: apply_config, cycles: 2, ns: 4}
+        - {name: ack_update, cycles: 1, ns: 2}
+    - fsm: prescaler
+      mode: parallel_process
+      operations:
+        - {name: raw_tick_observe, cycles: 1, ns: 2}
+        - {name: divider_increment, cycles: 1, ns: 2}
+        - {name: effective_tick_emit, cycles: 1, ns: 2}
+    - fsm: counter
+      mode: parallel_process
+      operations:
+        - {name: load, cycles: 1, ns: 2}
+        - {name: count_update, cycles: 1, ns: 2}
+        - {name: reload_or_stop, cycles: 1, ns: 2}
+    - fsm: compare_event
+      mode: parallel_process
+      operations:
+        - {name: compare_check, cycles: 2, ns: 4}
+        - {name: event_assert, cycles: 1, ns: 2}
+    - fsm: interrupt_aggregation
+      mode: parallel_process
+      operations:
+        - {name: collect_events, cycles: 2, ns: 4}
+        - {name: apply_mask, cycles: 2, ns: 4}
+        - {name: assert_irq, cycles: 2, ns: 4}
+    - fsm: watchdog
+      mode: parallel_process
+      operations:
+        - {name: kick_reload, cycles: 2, ns: 4}
+        - {name: timeout_detect, cycles: 1, ns: 2}
+        - {name: timeout_publish, cycles: 2, ns: 4}
+    - fsm: debug_freeze
+      mode: parallel_helper
+      operations:
+        - {name: freeze_request, cycles: 2, ns: 4}
+        - {name: freeze_ack, cycles: 2, ns: 4}
+        - {name: resume_ack, cycles: 2, ns: 4}
+  end_to_end_paths:
+    - name: register_write_to_active_config
+      cycles: 9
+      ns: 18
+      path: [decode, read_write, two_stage_sync, apply_config, ack_update]
+    - name: effective_tick_to_irq
+      cycles: 11
+      ns: 22
+      path: [effective_tick_emit, count_update, compare_check, event_assert, collect_events, apply_mask, assert_irq]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [register_shadow, active_config, counters, compare_events, interrupt_status, watchdog_state, transition_counts]
+  apis: [write_register, configure_timer, tick, kick_watchdog, clear_interrupt, run, get_interrupts, get_metrics]
+  invariants:
+    - Register writes affect counters only after synchronization.
+    - One-shot timers stop after compare event.
+    - Periodic timers reload after compare event.
+  ignored_payload_details: []
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [sync_latency, prescaler_delay, compare_delay, interrupt_delay]
+  metrics: [compare_events, interrupt_count, watchdog_timeouts, config_latency, clear_latency]
+
+test_scenarios:
+  - name: periodic_timer_reloads
+    description: Periodic channel asserts events repeatedly after compare and reload.
+    input_sequence: [CONFIG_PERIODIC_CH0, RUN_TICKS]
+    expected_functional_behavior: [multiple_compare_events]
+    expected_performance_properties: [interrupt_latency_measured]
+    fsm_coverage: [configuration_synchronizer.APPLY_CONFIG, prescaler.EMIT_EFFECTIVE_TICK, counter.COMPARE_PENDING, interrupt_aggregation.ASSERT_IRQ]
+  - name: register_compare_and_watchdog_paths
+    description: Register access configures compare behavior and watchdog timeout publishes interrupt event.
+    input_sequence: [REGISTER_WRITE_COMPARE, RUN_TO_COMPARE, ARM_WATCHDOG, MISS_KICK]
+    expected_functional_behavior: [compare_event_asserted, watchdog_timeout_event]
+    expected_performance_properties: [register_latency_measured, watchdog_latency_measured]
+    fsm_coverage: [register_access.WRITE_SHADOW, compare_event.EVENT_ASSERT, watchdog.TIMEOUT]
+  - name: debug_freeze_holds_counter
+    description: Debug freeze request prevents counter progress until resume.
+    input_sequence: [CONFIG_PERIODIC_CH0, ASSERT_DEBUG_FREEZE, RUN_TICKS, DEASSERT_DEBUG_FREEZE]
+    expected_functional_behavior: [counter_holds_while_frozen, counter_resumes_after_resume]
+    expected_performance_properties: [freeze_resume_latency_measured]
+    fsm_coverage: [debug_freeze.FREEZE_REQUEST, debug_freeze.FROZEN, debug_freeze.RESUME_REQUEST]

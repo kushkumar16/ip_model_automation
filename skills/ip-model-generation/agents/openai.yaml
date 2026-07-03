@@ -1,0 +1,4 @@
+interface:
+  display_name: "IP Model Generation"
+  short_description: "Generate SimPy IP models from DLD-derived templates."
+  default_prompt: "Use this skill to turn a reviewed IP template into a SimPy model, tests, and validation-ready artifacts."

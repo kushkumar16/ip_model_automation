@@ -1,0 +1,305 @@
+ip:
+  name: completion_ip
+  domain: nvme_controller
+  description: Tracks command completion, applies QoS token rules, and emits host-facing completions.
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_pending_queues_tokens_and_metrics
+
+interfaces:
+  - name: accepted_cmd_if
+    type: command_accept
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: accept_command
+        fields: [cmd_id, tenant_id, source_id, opcode, size_kb, arrival_time, nominal_service_latency, status_hint]
+        handshake: valid_ready
+        timing_notes: command enters per-tenant pending queue when accepted
+  - name: qos_config_if
+    type: configuration
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: tenant_config
+        fields: [tenant_alive, limit_type, read_iops_per_sec, write_iops_per_sec, read_bw_kb_per_sec, write_bw_kb_per_sec, max_burst_read_iops, max_burst_write_iops, max_burst_read_bw, max_burst_write_bw]
+        handshake: register_write_or_static_config
+        timing_notes: sampled at reset and on config update
+  - name: completion_queue_if
+    type: completion_output
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: emit_completion
+        fields: [cmd_id, tenant_id, status, latency]
+        handshake: valid_ready
+        timing_notes: completion is held when cpl_ready is low
+
+commands:
+  - name: READ
+    description: Read completion candidate.
+    fields: [tenant_id, cmd_id, size_kb, status]
+    valid_conditions: [service_latency_elapsed, tenant_alive, read_tokens_available, output_ready]
+    completion_conditions: [completion_emitted]
+    error_conditions: [tenant_inactive, read_token_starvation]
+  - name: WRITE_DEFAULT
+    description: Write completion in default token mode.
+    fields: [tenant_id, cmd_id, size_kb, status]
+    valid_conditions: [service_latency_elapsed, tenant_alive, write_tokens_available, output_ready]
+    completion_conditions: [completion_emitted]
+    error_conditions: [tenant_inactive, write_token_starvation]
+  - name: WRITE_WWV
+    description: Write completion that also consumes read-side tokens by configured ratio.
+    fields: [tenant_id, cmd_id, size_kb, status]
+    valid_conditions: [service_latency_elapsed, tenant_alive, write_tokens_available, read_equivalent_tokens_available, output_ready]
+    completion_conditions: [completion_emitted]
+    error_conditions: [tenant_inactive, write_token_starvation, read_equivalent_token_starvation]
+  - name: FLUSH
+    description: Ordered completion command.
+    fields: [tenant_id, cmd_id, status]
+    valid_conditions: [ordering_conditions_met, output_ready]
+    completion_conditions: [completion_emitted]
+    error_conditions: [ordering_timeout]
+
+fsm_processes:
+  - name: accept
+    purpose: Accepts command descriptors into per-tenant pending queues.
+    simpy_process: true
+    states: [RESET, READY, ENQUEUE, BACKPRESSURE]
+    transitions:
+      - from: RESET
+        to: READY
+        condition: reset_deasserted
+        actions: [clear_pending_queues]
+        latency_cycles: 1
+      - from: READY
+        to: ENQUEUE
+        condition: incoming_valid_and_queue_space
+        actions: [enqueue_command]
+        latency_cycles: 1
+      - from: READY
+        to: BACKPRESSURE
+        condition: incoming_valid_and_queue_full
+        actions: [increment_queue_full_stall]
+        latency_cycles: 1
+      - from: BACKPRESSURE
+        to: READY
+        condition: queue_space_available
+        actions: []
+        latency_cycles: 0
+    interfaces_touched: [accepted_cmd_if]
+    queues_used: [tenant_pending_queues]
+    resources_used: []
+  - name: completion_scheduler
+    purpose: Selects pending commands, checks token availability, and emits completions.
+    simpy_process: true
+    states: [RESET, IDLE, SELECT_TENANT, CHECK_TOKENS, WAIT_TOKENS, EMIT, STALL_OUTPUT]
+    transitions:
+      - from: IDLE
+        to: SELECT_TENANT
+        condition: any_pending_command
+        actions: [load_weighted_tenant_order]
+        latency_cycles: 1
+      - from: SELECT_TENANT
+        to: CHECK_TOKENS
+        condition: candidate_found
+        actions: [peek_candidate]
+        latency_cycles: 1
+      - from: CHECK_TOKENS
+        to: EMIT
+        condition: required_tokens_available_and_output_ready
+        actions: [debit_tokens]
+        latency_cycles: 1
+      - from: CHECK_TOKENS
+        to: WAIT_TOKENS
+        condition: required_tokens_unavailable
+        actions: [increment_token_stall]
+        latency_cycles: 1
+      - from: EMIT
+        to: SELECT_TENANT
+        condition: more_candidates
+        actions: [pop_candidate, publish_completion, update_metrics]
+        latency_cycles: 1
+      - from: EMIT
+        to: STALL_OUTPUT
+        condition: output_not_ready
+        actions: [hold_completion, increment_output_stall]
+        latency_cycles: 1
+      - from: WAIT_TOKENS
+        to: SELECT_TENANT
+        condition: next_dispatch_tick_or_refill
+        actions: []
+        latency_cycles: 1
+    interfaces_touched: [completion_queue_if]
+    queues_used: [tenant_pending_queues]
+    resources_used: [completion_output_port]
+  - name: refill
+    purpose: Refills base tokens, applies burst rules, and snapshots metrics.
+    simpy_process: true
+    states: [WAIT_WINDOW, ASSESS_USAGE, REFILL_BASE, APPLY_BURST, PUBLISH_METRICS]
+    transitions:
+      - from: WAIT_WINDOW
+        to: ASSESS_USAGE
+        condition: window_timer_expired
+        actions: [snapshot_window_usage]
+        latency_cycles: 0
+      - from: ASSESS_USAGE
+        to: REFILL_BASE
+        condition: usage_snapshot_done
+        actions: [restore_base_tokens]
+        latency_cycles: 0
+      - from: REFILL_BASE
+        to: APPLY_BURST
+        condition: base_tokens_restored
+        actions: [apply_soft_limit_burst]
+        latency_cycles: 0
+      - from: APPLY_BURST
+        to: PUBLISH_METRICS
+        condition: burst_rules_done
+        actions: [write_window_metrics]
+        latency_cycles: 0
+      - from: PUBLISH_METRICS
+        to: WAIT_WINDOW
+        condition: metrics_published
+        actions: []
+        latency_cycles: 0
+    interfaces_touched: [qos_config_if]
+    queues_used: []
+    resources_used: []
+
+resources:
+  - name: completion_output_port
+    type: completion_port
+    capacity: 1
+    bandwidth: one_completion_per_dispatch_tick
+    latency_cycles: 1
+    arbitration: weighted_round_robin
+    sharing_scope: global
+
+queues:
+  - name: tenant_pending_queues
+    producer: accepted_cmd_if
+    consumer: completion_scheduler
+    depth: null
+    blocking_behavior: stall
+    ordering: fifo_per_tenant
+
+qos:
+  window_ms: 10
+  dispatch_tick_ms: 1
+  bandwidth_token_bytes: 512
+  token_scale: 2.0
+  write_token_modes: [DEFAULT, WWV]
+  default_write_token_mode: WWV
+  wwv_default_ratios:
+    write_iops: 3.0
+    read_iops: 2.0
+    write_bw: 3.0
+    read_bw: 2.0
+  tenant_limit_types: [SOFT, HARD]
+  soft_limit_behavior: may_consume_accumulated_burst_tokens
+  hard_limit_behavior: cannot_consume_burst_tokens
+  token_debit_order: base_tokens_before_burst_tokens
+  burst_token_classes: [read, write, read_bw, write_bw]
+
+fsm_relationships:
+  fsm_count: 3
+  parallel_processes:
+    - [accept, completion_scheduler, refill]
+  sequential_paths:
+    - name: command_completion_path
+      path: [accept.ENQUEUE, completion_scheduler.SELECT_TENANT, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
+      description: Command must be accepted before scheduler can check tokens and emit completion.
+    - name: token_refill_path
+      path: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.APPLY_BURST, refill.PUBLISH_METRICS]
+      description: Refill updates token state observed by scheduler.
+  gating_relationships:
+    - source: token_availability
+      gates: completion_scheduler.EMIT
+      stall_reason: token_stall
+    - source: completion_queue_if.cpl_ready
+      gates: completion_scheduler.EMIT
+      stall_reason: output_backpressure
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from Completion IP DLD.
+  fsm_process_delays:
+    - fsm: accept
+      mode: parallel_process
+      operations:
+        - {name: enqueue, cycles: 4, ns: 8}
+        - {name: queue_full_retry, cycles: 1, ns: 2}
+    - fsm: completion_scheduler
+      mode: parallel_process
+      operations:
+        - {name: tenant_select, cycles: 8, ns: 16}
+        - {name: token_check, cycles: 5, ns: 10}
+        - {name: completion_emit, cycles: 4, ns: 8}
+        - {name: output_stall_retry, cycles: 1, ns: 2}
+    - fsm: refill
+      mode: periodic_process
+      operations:
+        - {name: refill_window, cycles: 5000000, ns: 10000000}
+        - {name: usage_assessment, cycles: 20, ns: 40}
+        - {name: base_refill, cycles: 10, ns: 20}
+        - {name: burst_apply, cycles: 20, ns: 40}
+        - {name: metrics_publish, cycles: 10, ns: 20}
+  end_to_end_paths:
+    - name: no_stall_completion
+      cycles: 21
+      ns: 42
+      path: [enqueue, tenant_select, token_check, completion_emit]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [tenant_pending_queues, tenant_tokens, tenant_burst_tokens, tenant_limit_type, tenant_alive, completed_commands, window_metrics, stall_counters, fsm_state, transition_counts]
+  apis: [configure_tenant, accept_command, set_completion_ready, run, get_completed, get_metrics]
+  invariants:
+    - A completion is emitted only after required tokens are debited.
+    - WWV writes consume write tokens and read-equivalent tokens.
+    - Hard-limit tenants cannot consume burst tokens.
+  ignored_payload_details: [nvme_completion_entry_bit_layout, data_payload_bytes]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [nominal_service_latency, token_wait, output_backpressure, queue_wait]
+  metrics: [completed_read_cmds, completed_write_cmds, latency, throughput, utilization, queue_depth, token_stalls, output_stalls]
+
+test_scenarios:
+  - name: wwv_write_debits_read_budget
+    description: A write in WWV mode consumes write tokens and read-equivalent tokens by configured ratio.
+    input_sequence: [T0_WRITE_4K]
+    expected_functional_behavior: [completion_emitted_when_both_token_classes_available]
+    expected_performance_properties: [read_iops_tokens_reduced, write_iops_tokens_reduced]
+    fsm_coverage: [accept.ENQUEUE, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
+  - name: hard_limit_blocks_burst
+    description: Hard-limit tenant cannot complete using accumulated burst tokens.
+    input_sequence: [T0_WRITE_4K_WITH_ONLY_BURST_READ_TOKENS]
+    expected_functional_behavior: [completion_not_emitted]
+    expected_performance_properties: [token_stall_incremented]
+    fsm_coverage: [completion_scheduler.WAIT_TOKENS]
+  - name: output_backpressure_holds_completion
+    description: Ready completion remains pending while completion output is blocked.
+    input_sequence: [T0_READ_4K, cpl_ready_low]
+    expected_functional_behavior: [completion_not_popped_until_ready]
+    expected_performance_properties: [output_stall_incremented]
+    fsm_coverage: [completion_scheduler.STALL_OUTPUT]
+  - name: refill_restores_token_window
+    description: Refill window restores base tokens, applies burst rules, and publishes metrics.
+    input_sequence: [TOKEN_WINDOW_EXPIRES]
+    expected_functional_behavior: [base_tokens_restored, burst_rules_applied]
+    expected_performance_properties: [window_metric_snapshot_recorded]
+    fsm_coverage: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.APPLY_BURST, refill.PUBLISH_METRICS]

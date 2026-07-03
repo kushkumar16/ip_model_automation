@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IP Model Template",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "ip",
+    "interfaces",
+    "commands",
+    "fsm_processes",
+    "fsm_relationships",
+    "timing_model",
+    "functionality_model",
+    "performance_model",
+    "test_scenarios"
+  ],
+  "properties": {
+    "ip": {
+      "type": "object",
+      "required": ["name", "domain", "description", "clock_domains", "reset"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "domain": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "clock_domains": {"type": "array", "minItems": 1},
+        "reset": {"type": "object"}
+      }
+    },
+    "interfaces": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/interface"}},
+    "commands": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/command"}},
+    "fsm_processes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/fsm"}},
+    "fsm_relationships": {"$ref": "#/$defs/fsm_relationships"},
+    "timing_model": {"$ref": "#/$defs/timing_model"},
+    "resources": {"type": "array"},
+    "queues": {"type": "array"},
+    "qos": {"type": "object"},
+    "functionality_model": {"$ref": "#/$defs/functionality_model"},
+    "performance_model": {"$ref": "#/$defs/performance_model"},
+    "test_scenarios": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/test_scenario"}}
+  },
+  "$defs": {
+    "interface": {
+      "type": "object",
+      "required": ["name", "type", "direction", "transactions"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "direction": {"type": "string", "minLength": 1},
+        "clock_domain": {"type": "string"},
+        "transactions": {"type": "array", "minItems": 1}
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "name",
+        "description",
+        "fields",
+        "valid_conditions",
+        "completion_conditions",
+        "error_conditions"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "fields": {"type": "array", "minItems": 1},
+        "valid_conditions": {"type": "array"},
+        "completion_conditions": {"type": "array"},
+        "error_conditions": {"type": "array"},
+        "functional_effects": {"type": "array"},
+        "timing_effects": {"type": "array"}
+      }
+    },
+    "fsm": {
+      "type": "object",
+      "required": ["name", "purpose", "simpy_process", "states", "transitions"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "purpose": {"type": "string", "minLength": 1},
+        "simpy_process": {"const": true},
+        "states": {"type": "array", "minItems": 1},
+        "transitions": {"type": "array", "minItems": 1},
+        "functional_responsibilities": {"type": "array"},
+        "interfaces_touched": {"type": "array"},
+        "queues_used": {"type": "array"},
+        "resources_used": {"type": "array"}
+      }
+    },
+    "fsm_relationships": {
+      "type": "object",
+      "required": ["fsm_count", "parallel_processes", "sequential_paths"],
+      "properties": {
+        "fsm_count": {"type": "integer", "minimum": 1},
+        "parallel_processes": {"type": "array", "minItems": 1},
+        "sequential_paths": {"type": "array", "minItems": 1},
+        "gating_relationships": {"type": "array"}
+      }
+    },
+    "timing_model": {
+      "type": "object",
+      "required": ["clock_mhz", "cycle_time_ns", "assumption", "fsm_process_delays", "end_to_end_paths"],
+      "properties": {
+        "clock_mhz": {"type": "number", "exclusiveMinimum": 0},
+        "cycle_time_ns": {"type": "number", "exclusiveMinimum": 0},
+        "assumption": {"type": "string", "minLength": 1},
+        "fsm_process_delays": {"type": "array", "minItems": 1},
+        "end_to_end_paths": {"type": "array", "minItems": 1}
+      }
+    },
+    "functionality_model": {
+      "type": "object",
+      "required": ["implemented_in_simpy", "state_variables", "apis", "invariants"],
+      "properties": {
+        "implemented_in_simpy": {"const": true},
+        "state_variables": {"type": "array", "minItems": 1},
+        "apis": {"type": "array", "minItems": 1},
+        "invariants": {"type": "array", "minItems": 1},
+        "ignored_payload_details": {"type": "array"}
+      }
+    },
+    "performance_model": {
+      "type": "object",
+      "required": ["language", "library", "model_functionality", "model_fsm_processes", "metrics"],
+      "properties": {
+        "language": {"const": "python"},
+        "library": {"const": "simpy"},
+        "abstraction_level": {"type": "string"},
+        "model_functionality": {"const": true},
+        "model_fsm_processes": {"const": true},
+        "model_data_payloads": {"type": "boolean"},
+        "model_interface_backpressure": {"type": "boolean"},
+        "model_arbitration": {"type": "boolean"},
+        "model_queue_occupancy": {"type": "boolean"},
+        "model_latency_sources": {"type": "array"},
+        "metrics": {"type": "array", "minItems": 1}
+      }
+    },
+    "test_scenario": {
+      "type": "object",
+      "required": [
+        "name",
+        "description",
+        "input_sequence",
+        "expected_functional_behavior",
+        "expected_performance_properties",
+        "fsm_coverage"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "input_sequence": {"type": "array"},
+        "expected_functional_behavior": {"type": "array", "minItems": 1},
+        "expected_performance_properties": {"type": "array", "minItems": 1},
+        "fsm_coverage": {"type": "array", "minItems": 1}
+      }
+    }
+  }
+}

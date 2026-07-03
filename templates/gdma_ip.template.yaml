@@ -1,0 +1,371 @@
+ip:
+  name: gdma_ip
+  domain: soc_dma
+  description: Moves data between memory-mapped endpoints using descriptor-driven channels.
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_channels_queues_buffers_and_interrupts
+
+interfaces:
+  - name: register_if
+    type: apb_axi_lite
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: cfg_write
+        fields: [addr, data, channel_id]
+        handshake: valid_ready
+        timing_notes: updates shadow configuration
+  - name: descriptor_read_if
+    type: memory_read
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: descriptor_fetch
+        fields: [desc_addr, channel_id]
+        handshake: valid_ready_response
+        timing_notes: descriptor response precedes decode
+  - name: source_read_if
+    type: memory_read
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: source_read
+        fields: [src_addr, length_bytes, tag, channel_id]
+        handshake: valid_ready_response
+        timing_notes: may have multiple outstanding tags
+  - name: destination_write_if
+    type: memory_write
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: destination_write
+        fields: [dst_addr, length_bytes, tag, channel_id]
+        handshake: valid_ready_response
+        timing_notes: consumes data from internal buffer
+  - name: interrupt_if
+    type: interrupt
+    direction: output
+    clock_domain: core_clk
+    transactions:
+      - name: irq
+        fields: [channel_id, vector]
+        handshake: level_or_pulse
+        timing_notes: asserted after completion/coalescing
+
+commands:
+  - name: DMA_DESCRIPTOR
+    description: Descriptor specifying a memory copy.
+    fields: [channel_id, src_addr, dst_addr, length_bytes, control_flags, completion_addr]
+    valid_conditions: [channel_enabled, descriptor_valid, length_non_zero]
+    completion_conditions: [all_write_responses_ok, completion_written]
+    error_conditions: [bad_descriptor, read_error, write_error]
+
+fsm_processes:
+  - name: channel_control
+    purpose: Sequential channel controller and error/halt owner.
+    simpy_process: true
+    states: [RESET, DISABLED, IDLE, ACTIVE, DRAIN, HALTED, ERROR]
+    transitions:
+      - from: DISABLED
+        to: IDLE
+        condition: channel_enable
+        actions: [clear_channel_state]
+        latency_cycles: 1
+      - from: IDLE
+        to: ACTIVE
+        condition: descriptor_available
+        actions: [start_descriptor_flow]
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [active_descriptor_queue]
+    resources_used: []
+  - name: descriptor_fetch
+    purpose: Fetch and validate descriptors, optionally prefetching later descriptors.
+    simpy_process: true
+    states: [WAIT_DESC, ISSUE_FETCH, WAIT_FETCH_RESP, VALIDATE, ENQUEUE_DESC, FETCH_STALL]
+    transitions:
+      - from: WAIT_DESC
+        to: ISSUE_FETCH
+        condition: software_head_not_equal_hw_tail
+        actions: [issue_descriptor_read]
+        latency_cycles: 1
+      - from: VALIDATE
+        to: ENQUEUE_DESC
+        condition: descriptor_valid
+        actions: [enqueue_descriptor]
+        latency_cycles: 1
+    interfaces_touched: [descriptor_read_if]
+    queues_used: [descriptor_prefetch_queue, active_descriptor_queue]
+    resources_used: [descriptor_read_port]
+  - name: read_issue
+    purpose: Issues source memory reads for active descriptors.
+    simpy_process: true
+    states: [WAIT_DESCRIPTOR, CHECK_READ_CREDITS, ISSUE_READ, UPDATE_READ_POINTER, READ_STALL, READ_DONE]
+    transitions:
+      - from: WAIT_DESCRIPTOR
+        to: CHECK_READ_CREDITS
+        condition: descriptor_ready
+        actions: [load_read_pointer]
+        latency_cycles: 1
+    interfaces_touched: [source_read_if]
+    queues_used: [active_descriptor_queue]
+    resources_used: [source_read_port, read_outstanding_table]
+  - name: channel_scheduler
+    purpose: Selects which channel descriptor is allowed to issue work.
+    simpy_process: true
+    states: [SCAN_CHANNELS, CHECK_PRIORITY, GRANT_CHANNEL, NO_ELIGIBLE]
+    transitions:
+      - from: SCAN_CHANNELS
+        to: CHECK_PRIORITY
+        condition: active_channel_found
+        actions: [evaluate_channel_priority]
+        latency_cycles: 10
+      - from: CHECK_PRIORITY
+        to: GRANT_CHANNEL
+        condition: channel_eligible
+        actions: [publish_channel_grant]
+        latency_cycles: 2
+      - from: CHECK_PRIORITY
+        to: NO_ELIGIBLE
+        condition: no_channel_eligible
+        actions: [increment_no_eligible_stall]
+        latency_cycles: 1
+    interfaces_touched: []
+    queues_used: [active_descriptor_queue]
+    resources_used: [source_read_port, destination_write_port]
+  - name: read_response
+    purpose: Accepts read responses and fills the internal data buffer.
+    simpy_process: true
+    states: [WAIT_READ_RESP, CHECK_RESP_STATUS, WRITE_BUFFER, RESP_ERROR]
+    transitions:
+      - from: CHECK_RESP_STATUS
+        to: WRITE_BUFFER
+        condition: response_ok_and_buffer_space
+        actions: [push_data_buffer]
+        latency_cycles: 1
+    interfaces_touched: [source_read_if]
+    queues_used: [internal_data_buffer]
+    resources_used: [read_outstanding_table]
+  - name: write_issue
+    purpose: Issues destination writes from buffered read data.
+    simpy_process: true
+    states: [WAIT_BUFFER_DATA, CHECK_WRITE_CREDITS, ISSUE_WRITE, UPDATE_WRITE_POINTER, WRITE_STALL, WRITE_DONE]
+    transitions:
+      - from: WAIT_BUFFER_DATA
+        to: ISSUE_WRITE
+        condition: buffer_has_data_and_write_credit
+        actions: [issue_destination_write]
+        latency_cycles: 1
+    interfaces_touched: [destination_write_if]
+    queues_used: [internal_data_buffer]
+    resources_used: [destination_write_port, write_outstanding_table]
+  - name: write_response
+    purpose: Tracks write responses and marks descriptor bytes complete.
+    simpy_process: true
+    states: [WAIT_WRITE_RESP, CHECK_RESP_STATUS, MARK_BYTES_COMPLETE, RESP_ERROR]
+    transitions:
+      - from: CHECK_RESP_STATUS
+        to: MARK_BYTES_COMPLETE
+        condition: response_ok
+        actions: [update_descriptor_progress]
+        latency_cycles: 1
+    interfaces_touched: [destination_write_if]
+    queues_used: []
+    resources_used: [write_outstanding_table]
+  - name: completion_update
+    purpose: Writes descriptor status after all data movement completes.
+    simpy_process: true
+    states: [WAIT_DESCRIPTOR_DONE, ISSUE_COMPLETION_WRITE, WAIT_COMPLETION_RESP, UPDATE_STATUS, COMPLETE_ERROR]
+    transitions:
+      - from: WAIT_DESCRIPTOR_DONE
+        to: ISSUE_COMPLETION_WRITE
+        condition: descriptor_bytes_complete
+        actions: [issue_completion_write]
+        latency_cycles: 1
+    interfaces_touched: [destination_write_if]
+    queues_used: [completion_pending_queue]
+    resources_used: [completion_write_port]
+  - name: interrupt_coalescing
+    purpose: Generates IRQs based on descriptor completion count or timer.
+    simpy_process: true
+    states: [IDLE, COUNT_COMPLETIONS, WAIT_COALESCE_TIMER, ASSERT_IRQ, WAIT_CLEAR]
+    transitions:
+      - from: COUNT_COMPLETIONS
+        to: ASSERT_IRQ
+        condition: coalesce_threshold_met
+        actions: [assert_irq]
+        latency_cycles: 1
+    interfaces_touched: [interrupt_if]
+    queues_used: [completion_pending_queue]
+    resources_used: []
+
+resources:
+  - name: descriptor_read_port
+    type: memory_port
+    capacity: 1
+    bandwidth: configured
+    latency_cycles: 4
+    arbitration: channel_scheduler
+    sharing_scope: global
+  - name: source_read_port
+    type: memory_port
+    capacity: 1
+    bandwidth: configured
+    latency_cycles: 8
+    arbitration: channel_scheduler
+    sharing_scope: global
+  - name: destination_write_port
+    type: memory_port
+    capacity: 1
+    bandwidth: configured
+    latency_cycles: 8
+    arbitration: channel_scheduler
+    sharing_scope: global
+
+queues:
+  - name: descriptor_prefetch_queue
+    producer: descriptor_fetch
+    consumer: channel_control
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo_per_channel
+  - name: internal_data_buffer
+    producer: read_response
+    consumer: write_issue
+    depth: 16
+    blocking_behavior: stall
+    ordering: fifo
+  - name: completion_pending_queue
+    producer: completion_update
+    consumer: interrupt_coalescing
+    depth: 16
+    blocking_behavior: stall
+    ordering: fifo
+
+fsm_relationships:
+  fsm_count: 9
+  parallel_processes:
+    - [descriptor_fetch, channel_scheduler, read_issue, read_response, write_issue, write_response, completion_update, interrupt_coalescing]
+    - [channel_control]
+  sequential_paths:
+    - name: descriptor_completion_path
+      path: [descriptor_fetch.VALIDATE, descriptor_fetch.ENQUEUE_DESC, read_issue.ISSUE_READ, read_response.WRITE_BUFFER, write_issue.ISSUE_WRITE, write_response.MARK_BYTES_COMPLETE, completion_update.UPDATE_STATUS, interrupt_coalescing.ASSERT_IRQ]
+      description: A descriptor must be fetched and validated before data movement and completion.
+  gating_relationships:
+    - source: internal_data_buffer.space
+      gates: read_response.WRITE_BUFFER
+      stall_reason: buffer_full
+    - source: internal_data_buffer.data_available
+      gates: write_issue.ISSUE_WRITE
+      stall_reason: buffer_empty
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from GDMA IP DLD.
+  fsm_process_delays:
+    - fsm: channel_control
+      mode: sequential_stage
+      operations:
+        - {name: enable_to_idle, cycles: 4, ns: 8}
+        - {name: idle_to_active, cycles: 4, ns: 8}
+    - fsm: descriptor_fetch
+      mode: parallel_process
+      operations:
+        - {name: descriptor_issue, cycles: 5, ns: 10}
+        - {name: descriptor_memory_latency, cycles: 40, ns: 80}
+        - {name: validate, cycles: 6, ns: 12}
+        - {name: enqueue, cycles: 2, ns: 4}
+    - fsm: read_issue
+      mode: parallel_process
+      operations:
+        - {name: read_credit_check, cycles: 4, ns: 8}
+        - {name: source_read_issue, cycles: 6, ns: 12}
+        - {name: read_pointer_update, cycles: 2, ns: 4}
+    - fsm: channel_scheduler
+      mode: parallel_process
+      operations:
+        - {name: channel_scan_arbitration, cycles: 10, ns: 20}
+        - {name: channel_grant_publish, cycles: 2, ns: 4}
+    - fsm: read_response
+      mode: parallel_process
+      operations:
+        - {name: read_response_lookup, cycles: 4, ns: 8}
+        - {name: read_status_check, cycles: 2, ns: 4}
+        - {name: buffer_write, cycles: 4, ns: 8}
+    - fsm: write_issue
+      mode: parallel_process
+      operations:
+        - {name: buffer_check, cycles: 3, ns: 6}
+        - {name: destination_write_issue, cycles: 6, ns: 12}
+        - {name: write_pointer_update, cycles: 2, ns: 4}
+    - fsm: write_response
+      mode: parallel_process
+      operations:
+        - {name: write_response_lookup, cycles: 4, ns: 8}
+        - {name: write_status_check, cycles: 2, ns: 4}
+        - {name: mark_bytes_complete, cycles: 3, ns: 6}
+    - fsm: completion_update
+      mode: sequential_stage
+      operations:
+        - {name: completion_write_issue, cycles: 8, ns: 16}
+        - {name: completion_response_wait, cycles: 20, ns: 40}
+        - {name: status_update, cycles: 4, ns: 8}
+    - fsm: interrupt_coalescing
+      mode: parallel_helper
+      operations:
+        - {name: count_completion, cycles: 2, ns: 4}
+        - {name: coalesce_timer_check, cycles: 2, ns: 4}
+        - {name: irq_assert, cycles: 4, ns: 8}
+  end_to_end_paths:
+    - name: one_chunk_descriptor
+      cycles: 127
+      ns: 254
+      path: [descriptor_issue, descriptor_memory_latency, validate, enqueue, channel_scan_arbitration, channel_grant_publish, source_read_issue, buffer_write, destination_write_issue, mark_bytes_complete, completion_write_issue, status_update, irq_assert]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [channel_state, descriptor_queues, internal_data_buffer, outstanding_reads, outstanding_writes, completed_descriptors, irq_state, error_state, transition_counts]
+  apis: [configure_channel, submit_descriptor, set_memory_ready, run, get_completed, get_metrics]
+  invariants:
+    - Disabled channels cannot start descriptors.
+    - Descriptors with zero length enter error handling.
+    - Completion is published only after all write responses complete.
+  ignored_payload_details: [byte_payload_contents]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [descriptor_fetch, read_latency, write_latency, completion_write, irq_coalescing]
+  metrics: [completed_descriptors, descriptor_latency, read_stalls, write_stalls, buffer_occupancy, irq_count]
+
+test_scenarios:
+  - name: single_descriptor_completes
+    description: Valid descriptor reaches completion after read, write, and status update.
+    input_sequence: [ENABLE_CH0, SUBMIT_DESC0]
+    expected_functional_behavior: [descriptor_completed]
+    expected_performance_properties: [latency_greater_than_zero]
+    fsm_coverage: [descriptor_fetch.VALIDATE, read_issue.ISSUE_READ, write_issue.ISSUE_WRITE, completion_update.UPDATE_STATUS]
+  - name: channel_scheduler_grants_active_channel
+    description: Enabled channel with active descriptor receives a scheduler grant.
+    input_sequence: [ENABLE_CH0, SUBMIT_DESC0, RUN_SCHEDULER]
+    expected_functional_behavior: [channel_grant_published]
+    expected_performance_properties: [channel_scan_latency_observed]
+    fsm_coverage: [channel_control.ACTIVE, channel_scheduler.SCAN_CHANNELS, channel_scheduler.GRANT_CHANNEL]
+  - name: response_and_interrupt_side_processes
+    description: Read and write responses update progress and completion coalescing generates IRQ.
+    input_sequence: [READ_RESP_OK, WRITE_RESP_OK, COALESCE_THRESHOLD_MET]
+    expected_functional_behavior: [buffer_filled, bytes_marked_complete, irq_asserted]
+    expected_performance_properties: [response_latency_observed, irq_latency_observed]
+    fsm_coverage: [read_response.WRITE_BUFFER, write_response.MARK_BYTES_COMPLETE, interrupt_coalescing.ASSERT_IRQ]

@@ -1,0 +1,355 @@
+ip:
+  name: interrupt_controller_ip
+  domain: soc_interrupt
+  description: Samples interrupt sources, filters/masks, resolves priority, and delivers IRQs to CPU targets.
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: null
+    - name: irq_clk
+      frequency_mhz: null
+  reset:
+    type: sync
+    behavior: clear_pending_active_enable_mask_and_priority_state
+
+interfaces:
+  - name: source_irq_if
+    type: interrupt_source
+    direction: input
+    clock_domain: irq_clk
+    transactions:
+      - name: source_event
+        fields: [src_id, trigger_type, level_value, edge_pulse]
+        handshake: sampled
+        timing_notes: edge latches pending; level may reassert after EOI
+  - name: cpu_irq_if
+    type: cpu_interrupt
+    direction: output
+    clock_domain: irq_clk
+    transactions:
+      - name: irq_delivery
+        fields: [target_id, irq_id, priority]
+        handshake: level_or_pulse
+        timing_notes: delivery follows priority resolution
+  - name: register_if
+    type: apb_axi_lite
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: irq_cfg_access
+        fields: [addr, write_data, read_data]
+        handshake: valid_ready
+        timing_notes: writes update enable mask priority pending active state
+
+commands:
+  - name: EDGE_INTERRUPT
+    description: Edge source sets pending state on pulse.
+    fields: [src_id, target_id, priority]
+    valid_conditions: [edge_pulse_seen, source_enabled]
+    completion_conditions: [acknowledged_and_eoi]
+    error_conditions: [disabled_source]
+  - name: LEVEL_INTERRUPT
+    description: Level source remains pending while asserted.
+    fields: [src_id, target_id, priority]
+    valid_conditions: [level_asserted, source_enabled]
+    completion_conditions: [level_deasserted_or_eoi_done]
+    error_conditions: [disabled_source]
+  - name: SOFTWARE_INTERRUPT
+    description: Software-generated pending interrupt.
+    fields: [src_id, target_id]
+    valid_conditions: [software_write_valid]
+    completion_conditions: [acknowledged_and_eoi]
+    error_conditions: [invalid_target]
+
+fsm_processes:
+  - name: source_sampling
+    purpose: Samples raw interrupt lines and queues source events.
+    simpy_process: true
+    states: [RESET, SAMPLE_SOURCES, DETECT_EDGE, DETECT_LEVEL, QUEUE_EVENT, SOURCE_STALL]
+    transitions:
+      - from: SAMPLE_SOURCES
+        to: DETECT_EDGE
+        condition: edge_source_configured
+        actions: [detect_edge]
+        latency_cycles: 1
+    interfaces_touched: [source_irq_if]
+    queues_used: [source_event_queue]
+    resources_used: []
+  - name: pending_update
+    purpose: Maintains pending bits from source and software events.
+    simpy_process: true
+    states: [RESET, WAIT_EVENT, SET_PENDING, CLEAR_PENDING, REASSERT_LEVEL, PENDING_UPDATE_DONE]
+    transitions:
+      - from: WAIT_EVENT
+        to: SET_PENDING
+        condition: source_or_software_event
+        actions: [set_pending_bit]
+        latency_cycles: 1
+    interfaces_touched: [source_irq_if, register_if]
+    queues_used: [source_event_queue, software_interrupt_event_queue]
+    resources_used: [pending_state_array]
+  - name: mask_enable_filter
+    purpose: Computes eligible interrupts per target.
+    simpy_process: true
+    states: [WAIT_PENDING_CHANGE, APPLY_ENABLE, APPLY_TARGET_MASK, APPLY_PRIORITY_THRESHOLD, PUBLISH_ELIGIBLE_SET]
+    transitions:
+      - from: APPLY_ENABLE
+        to: APPLY_TARGET_MASK
+        condition: enabled_sources_found
+        actions: [apply_mask]
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [eligible_set_queue]
+    resources_used: [pending_state_array]
+  - name: priority_resolver
+    purpose: Selects highest-priority eligible interrupt per CPU target.
+    simpy_process: true
+    states: [IDLE, SCAN_ELIGIBLE, COMPARE_PRIORITY, SELECT_WINNER, NO_ELIGIBLE]
+    transitions:
+      - from: COMPARE_PRIORITY
+        to: SELECT_WINNER
+        condition: winner_found
+        actions: [publish_winner]
+        latency_cycles: 1
+    interfaces_touched: [cpu_irq_if]
+    queues_used: [eligible_set_queue]
+    resources_used: [priority_comparator]
+  - name: cpu_delivery
+    purpose: Drives CPU IRQ output and waits for acknowledgement.
+    simpy_process: true
+    states: [IDLE, ASSERT_IRQ, WAIT_ACK, HOLD_LEVEL, DELIVERY_STALL]
+    transitions:
+      - from: ASSERT_IRQ
+        to: WAIT_ACK
+        condition: irq_visible_to_cpu
+        actions: [hold_selected_irq]
+        latency_cycles: 1
+    interfaces_touched: [cpu_irq_if]
+    queues_used: [ack_queue]
+    resources_used: [cpu_irq_line]
+  - name: acknowledge
+    purpose: Handles CPU acknowledge and moves pending interrupt to active.
+    simpy_process: true
+    states: [WAIT_ACK, LOOKUP_SELECTED_IRQ, CLEAR_OR_HOLD_PENDING, SET_ACTIVE, RETURN_ACK_ID, ACK_ERROR]
+    transitions:
+      - from: LOOKUP_SELECTED_IRQ
+        to: SET_ACTIVE
+        condition: selected_irq_valid
+        actions: [set_active_bit]
+        latency_cycles: 1
+    interfaces_touched: [cpu_irq_if]
+    queues_used: [ack_queue]
+    resources_used: [active_state_array]
+  - name: end_of_interrupt
+    purpose: Clears active state and rechecks level-triggered reassertion.
+    simpy_process: true
+    states: [WAIT_EOI, LOOKUP_ACTIVE, CLEAR_ACTIVE, CHECK_LEVEL_REASSERT, EOI_DONE, EOI_ERROR]
+    transitions:
+      - from: CLEAR_ACTIVE
+        to: CHECK_LEVEL_REASSERT
+        condition: active_cleared
+        actions: [check_level_reassert]
+        latency_cycles: 1
+    interfaces_touched: [cpu_irq_if]
+    queues_used: [eoi_queue]
+    resources_used: [active_state_array]
+  - name: register_access
+    purpose: Accepts software configuration and state reads.
+    simpy_process: true
+    states: [RESET, IDLE, DECODE_ACCESS, WRITE_STATE, READ_STATE, ACCESS_ERROR]
+    transitions:
+      - from: IDLE
+        to: DECODE_ACCESS
+        condition: bus_valid
+        actions: [decode_register]
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [software_interrupt_event_queue]
+    resources_used: [register_bus_port]
+  - name: software_interrupt
+    purpose: Converts software-generated interrupt writes into pending events.
+    simpy_process: true
+    states: [WAIT_SOFT_INT_WRITE, VALIDATE_TARGET, GENERATE_SOFT_EVENT, SOFT_INT_ERROR]
+    transitions:
+      - from: WAIT_SOFT_INT_WRITE
+        to: VALIDATE_TARGET
+        condition: soft_int_write
+        actions: [validate_software_interrupt_target]
+        latency_cycles: 2
+      - from: VALIDATE_TARGET
+        to: GENERATE_SOFT_EVENT
+        condition: target_valid
+        actions: [enqueue_software_interrupt_event]
+        latency_cycles: 2
+      - from: VALIDATE_TARGET
+        to: SOFT_INT_ERROR
+        condition: target_invalid
+        actions: [increment_soft_int_error]
+        latency_cycles: 1
+    interfaces_touched: [register_if]
+    queues_used: [software_interrupt_event_queue]
+    resources_used: []
+
+resources:
+  - name: pending_state_array
+    type: state_array
+    capacity: null
+    bandwidth: one_update_per_tick
+    latency_cycles: 1
+    arbitration: source_order
+    sharing_scope: global
+  - name: priority_comparator
+    type: comparator
+    capacity: 1
+    bandwidth: one_target_per_tick
+    latency_cycles: 1
+    arbitration: target_order
+    sharing_scope: global
+
+queues:
+  - name: source_event_queue
+    producer: source_sampling
+    consumer: pending_update
+    depth: 16
+    blocking_behavior: stall
+    ordering: fifo
+  - name: eligible_set_queue
+    producer: mask_enable_filter
+    consumer: priority_resolver
+    depth: 8
+    blocking_behavior: stall
+    ordering: priority
+  - name: ack_queue
+    producer: cpu_delivery
+    consumer: acknowledge
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+  - name: eoi_queue
+    producer: cpu_target
+    consumer: end_of_interrupt
+    depth: 4
+    blocking_behavior: stall
+    ordering: fifo
+
+fsm_relationships:
+  fsm_count: 9
+  parallel_processes:
+    - [source_sampling, pending_update, mask_enable_filter, priority_resolver, cpu_delivery, acknowledge, end_of_interrupt, register_access, software_interrupt]
+  sequential_paths:
+    - name: irq_delivery_path
+      path: [source_sampling.QUEUE_EVENT, pending_update.SET_PENDING, mask_enable_filter.PUBLISH_ELIGIBLE_SET, priority_resolver.SELECT_WINNER, cpu_delivery.ASSERT_IRQ, acknowledge.SET_ACTIVE, end_of_interrupt.CLEAR_ACTIVE]
+      description: Source event must become pending before filtering, priority resolution, CPU delivery, ACK, and EOI.
+  gating_relationships:
+    - source: enable_mask_threshold
+      gates: priority_resolver.SELECT_WINNER
+      stall_reason: masked_or_below_threshold
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from Interrupt Controller IP DLD.
+  fsm_process_delays:
+    - fsm: source_sampling
+      mode: parallel_process
+      operations:
+        - {name: source_sample, cycles: 2, ns: 4}
+        - {name: edge_level_detect, cycles: 2, ns: 4}
+        - {name: queue_event, cycles: 1, ns: 2}
+    - fsm: pending_update
+      mode: parallel_process
+      operations:
+        - {name: set_clear_pending, cycles: 3, ns: 6}
+        - {name: level_reassert_check, cycles: 3, ns: 6}
+    - fsm: mask_enable_filter
+      mode: parallel_process
+      operations:
+        - {name: apply_enable, cycles: 2, ns: 4}
+        - {name: apply_target_mask, cycles: 2, ns: 4}
+        - {name: apply_threshold, cycles: 2, ns: 4}
+        - {name: publish_eligible, cycles: 1, ns: 2}
+    - fsm: priority_resolver
+      mode: parallel_process
+      operations:
+        - {name: scan_eligible, cycles: 8, ns: 16}
+        - {name: compare_priorities, cycles: 4, ns: 8}
+        - {name: select_winner, cycles: 1, ns: 2}
+    - fsm: cpu_delivery
+      mode: parallel_process
+      operations:
+        - {name: assert_irq, cycles: 2, ns: 4}
+        - {name: cpu_visible, cycles: 2, ns: 4}
+    - fsm: acknowledge
+      mode: parallel_process
+      operations:
+        - {name: ack_lookup, cycles: 3, ns: 6}
+        - {name: pending_clear_or_hold, cycles: 2, ns: 4}
+        - {name: set_active, cycles: 2, ns: 4}
+        - {name: return_ack_id, cycles: 2, ns: 4}
+    - fsm: end_of_interrupt
+      mode: parallel_process
+      operations:
+        - {name: active_lookup, cycles: 3, ns: 6}
+        - {name: clear_active, cycles: 2, ns: 4}
+        - {name: eoi_level_reassert_check, cycles: 3, ns: 6}
+    - fsm: register_access
+      mode: parallel_process
+      operations:
+        - {name: decode_access, cycles: 2, ns: 4}
+        - {name: read_write_state, cycles: 2, ns: 4}
+    - fsm: software_interrupt
+      mode: parallel_process
+      operations:
+        - {name: validate_target, cycles: 2, ns: 4}
+        - {name: generate_software_event, cycles: 2, ns: 4}
+  end_to_end_paths:
+    - name: external_source_to_cpu_irq
+      cycles: 32
+      ns: 64
+      path: [source_sample, edge_level_detect, queue_event, set_clear_pending, apply_enable, apply_target_mask, apply_threshold, publish_eligible, scan_eligible, compare_priorities, select_winner, assert_irq, cpu_visible]
+    - name: ack_path
+      cycles: 9
+      ns: 18
+      path: [ack_lookup, pending_clear_or_hold, set_active, return_ack_id]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [enabled_sources, pending_bits, active_bits, priority_table, target_table, level_state, delivered_irqs, transition_counts]
+  apis: [configure_source, assert_edge, set_level, write_register, ack, eoi, run, get_metrics]
+  invariants:
+    - Highest-priority unmasked pending interrupt is delivered first.
+    - ACK moves selected interrupt to active state.
+    - Level interrupts reassert after EOI if the level remains asserted.
+  ignored_payload_details: [cpu_instruction_execution]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [sampling_latency, pending_update, priority_resolution, cpu_ack, eoi]
+  metrics: [delivered_irqs, masked_irqs, ack_latency, eoi_latency, reasserted_level_irqs]
+
+test_scenarios:
+  - name: priority_delivery
+    description: Highest-priority unmasked pending interrupt is delivered first.
+    input_sequence: [ENABLE_IRQS, ASSERT_LOW_PRIORITY, ASSERT_HIGH_PRIORITY]
+    expected_functional_behavior: [high_priority_ack_first]
+    expected_performance_properties: [delivery_latency_measured]
+    fsm_coverage: [source_sampling.QUEUE_EVENT, pending_update.SET_PENDING, priority_resolver.SELECT_WINNER, cpu_delivery.ASSERT_IRQ]
+  - name: mask_filter_ack_and_eoi_path
+    description: Enabled pending interrupt passes filters, ACK moves it active, and EOI clears active state.
+    input_sequence: [ENABLE_IRQS, ASSERT_EDGE, CPU_ACK, CPU_EOI]
+    expected_functional_behavior: [eligible_set_published, active_bit_set, active_bit_cleared]
+    expected_performance_properties: [filter_latency_measured, ack_latency_measured, eoi_latency_measured]
+    fsm_coverage: [mask_enable_filter.PUBLISH_ELIGIBLE_SET, acknowledge.SET_ACTIVE, end_of_interrupt.CLEAR_ACTIVE]
+  - name: register_and_software_interrupt_path
+    description: Register write generates a software interrupt event for a valid target.
+    input_sequence: [REGISTER_WRITE_ENABLE, SOFTWARE_INTERRUPT_WRITE]
+    expected_functional_behavior: [software_interrupt_event_enqueued]
+    expected_performance_properties: [register_latency_measured, software_interrupt_latency_measured]
+    fsm_coverage: [register_access.WRITE_STATE, software_interrupt.VALIDATE_TARGET, software_interrupt.GENERATE_SOFT_EVENT]

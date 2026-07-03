@@ -1,0 +1,121 @@
+ip:
+  name: <ip_name>
+  domain: <soc_domain>
+  description: <one_line_description>
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: <reset_behavior>
+
+interfaces:
+  - name: <interface_name>
+    type: <protocol_or_logical_type>
+    direction: input
+    clock_domain: core_clk
+    transactions:
+      - name: <transaction_name>
+        fields: [field0, field1]
+        handshake: valid_ready
+        timing_notes: <timing_notes>
+
+commands:
+  - name: <command_name>
+    description: <what_this_command_represents>
+    fields: [cmd_id]
+    valid_conditions: [<condition>]
+    completion_conditions: [<condition>]
+    error_conditions: [<condition>]
+    functional_effects: [<state_update_or_output>]
+    timing_effects: [<delay_or_stall_source>]
+
+fsm_processes:
+  - name: <fsm_name>
+    purpose: <fsm_purpose>
+    simpy_process: true
+    states: [RESET, IDLE]
+    transitions:
+      - from: IDLE
+        to: IDLE
+        condition: <condition>
+        actions: [<action>]
+        latency_cycles: 1
+    functional_responsibilities: [<responsibility>]
+    interfaces_touched: [<interface_name>]
+    queues_used: [<queue_name>]
+    resources_used: [<resource_name>]
+
+fsm_relationships:
+  fsm_count: 1
+  parallel_processes:
+    - [<fsm_name>]
+  sequential_paths:
+    - name: <path_name>
+      path: [<fsm_name>.<state>]
+      description: <causal_path_description>
+  gating_relationships:
+    - source: <signal_or_resource>
+      gates: <fsm_name>.<state>
+      stall_reason: <stall_reason>
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing. Replace with IP-specific values.
+  fsm_process_delays:
+    - fsm: <fsm_name>
+      mode: parallel_process
+      operations:
+        - {name: <operation>, cycles: 1, ns: 2}
+  end_to_end_paths:
+    - name: <path_name>
+      cycles: 1
+      ns: 2
+      path: [<operation>]
+
+resources:
+  - name: <resource_name>
+    type: <resource_type>
+    capacity: 1
+    bandwidth: <bandwidth>
+    latency_cycles: 1
+    arbitration: fifo
+    sharing_scope: global
+
+queues:
+  - name: <queue_name>
+    producer: <producer>
+    consumer: <consumer>
+    depth: 8
+    blocking_behavior: stall
+    ordering: fifo
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [fsm_state, transition_counts]
+  apis: [run, get_metrics]
+  invariants:
+    - <must_always_be_true>
+  ignored_payload_details: []
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: true
+  model_queue_occupancy: true
+  model_latency_sources: [<operation>]
+  metrics: [transition_counts]
+
+test_scenarios:
+  - name: <scenario_name>
+    description: <scenario_description>
+    input_sequence: [<input>]
+    expected_functional_behavior: [<expected_behavior>]
+    expected_performance_properties: [<expected_timing_or_metric>]
+    fsm_coverage: [<fsm_name>.<state>]

@@ -318,7 +318,7 @@ sequenceDiagram
     G-->>R: pass → promote to golden template
     R->>R: write src/<ip>.py + tests/test_<ip>.py
     R->>V: run full flow
-    V-->>U: ✅ all 10 IPs green, tests pass
+    V-->>U: ✅ all 11 IPs green, tests pass
 ```
 
 Concretely:
@@ -334,10 +334,10 @@ Concretely:
 
 This is exactly the path used to add `mailbox_ip`, `spi_master_ip`, and
 `i3c_ip`: brand-new DLDs went through extraction, review, modeling, and
-testing, and the whole 10-IP suite validated with 51 passing tests. The same
-path also carries subsystems: `dma_subsystem` is a connected cluster of four
-member IPs whose glue processes are its FSMs and whose member models are its
-resources, so every existing gate applies unchanged.
+testing, and the whole 11-IP suite validated with 55 passing tests. The same
+path also carries subsystems (`dma_subsystem`, `mailbox_irq_subsystem`):
+connected clusters of member IPs whose glue processes are their FSMs and whose
+member models are their resources, so every existing gate applies unchanged.
 
 ---
 

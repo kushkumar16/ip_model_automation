@@ -12,7 +12,7 @@ from ip_model_automation.ip import ArbitrationIpModel, Command, IP_ARTIFACTS, li
 
 class TestIpRegistryAndLayout(unittest.TestCase):
     def test_registry_has_all_ips_and_artifacts(self):
-        self.assertEqual(len(tuple(list_ips())), 10)
+        self.assertEqual(len(tuple(list_ips())), 11)
         repo_root = Path(__file__).resolve().parents[1]
         for ip_name in IP_ARTIFACTS:
             paths = resolve_artifacts(repo_root, ip_name)
@@ -34,6 +34,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             "interrupt_controller_ip.py",
             "ip.py",
             "mailbox_ip.py",
+            "mailbox_irq_subsystem.py",
             "spi_master_ip.py",
             "timer_ip.py",
         }
@@ -70,7 +71,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
 
         templates = validator.discover_templates(repo_root)
-        self.assertEqual(len(templates), 10)
+        self.assertEqual(len(templates), 11)
         validator.validate_scaffolds(repo_root, templates)
 
     def test_prompt_pack_generator_emits_model_request(self):
@@ -105,7 +106,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
-        self.assertIn("templates: 10", text)
+        self.assertIn("templates: 11", text)
 
     def test_ip_logging_writes_ip_tagged_run_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:

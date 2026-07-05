@@ -1,0 +1,351 @@
+ip:
+  name: mailbox_irq_subsystem
+  domain: soc_subsystem
+  description: Connected interrupt-delivery subsystem composing the Mailbox IP (doorbell source) and Interrupt Controller IP (delivery fabric) with a modeled software service loop, level-reassert semantics, and interrupt-storm throttling.
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: reset_members_and_clear_bookkeeping
+
+subsystem:
+  members:
+    - {ip: mailbox_ip, model: MailboxIpModel, role: doorbell_interrupt_source}
+    - {ip: interrupt_controller_ip, model: InterruptControllerIpModel, role: delivery_fabric}
+  connections:
+    - {from: host_message, to: mailbox_ip.send_message, payload: channel_message}
+    - {from: mailbox_ip.interrupts, to: irq_source_bridge, payload: doorbell_irq}
+    - {from: irq_source_bridge, to: interrupt_controller_ip.set_level, payload: level_assert}
+    - {from: interrupt_controller_ip.delivered, to: cpu_service, payload: delivered_irq}
+    - {from: cpu_service, to: interrupt_controller_ip.ack, payload: cpu_ack}
+    - {from: interrupt_controller_ip.acknowledged, to: software_handler, payload: acked_irq}
+    - {from: software_handler, to: mailbox_ip.read_message, payload: message_read}
+    - {from: software_handler, to: mailbox_ip.clear_interrupt, payload: doorbell_clear}
+    - {from: software_handler, to: interrupt_controller_ip.eoi, payload: end_of_interrupt}
+    - {from: storm_monitor, to: interrupt_controller_ip.set_mask, payload: storm_throttle}
+
+interfaces:
+  - name: host_message_if
+    type: message_queue
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: message_send
+        fields: [channel_id, message]
+        handshake: queue_put
+        timing_notes: accepted immediately; mailbox FIFO backpressure applies inside the member IP
+  - name: cpu_service_if
+    type: cpu_service
+    direction: output
+    clock_domain: bus_clk
+    transactions:
+      - name: irq_service
+        fields: [target_id, src_id]
+        handshake: ack_eoi
+        timing_notes: ack and software service are fixed glue delays plus member latencies
+  - name: storm_control_if
+    type: config
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: storm_config
+        fields: [src_id, masked, storm_limit, storm_window]
+        handshake: immediate
+        timing_notes: mask applied at storm limit, released after the throttle window elapses, re-masked if still flooding
+
+commands:
+  - name: SEND_MESSAGE
+    description: Host sends a message into a mailbox channel, starting the interrupt round trip.
+    fields: [channel_id, message]
+    valid_conditions: [channel_configured]
+    completion_conditions: [message_serviced, eoi_issued]
+    error_conditions: [mailbox_fifo_full_drop]
+    functional_effects: [enqueue_message, raise_doorbell]
+    timing_effects: [glue_intake_delay, member_ip_pipeline_delays]
+  - name: CONFIGURE_CHANNEL
+    description: Configure a mailbox channel and its mapped controller source.
+    fields: [channel_id, priority, masked]
+    valid_conditions: [valid_channel]
+    completion_conditions: [config_applied]
+    error_conditions: []
+    functional_effects: [configure_mailbox_channel, configure_controller_source]
+    timing_effects: [config_delay]
+  - name: SET_STORM_LIMIT
+    description: Set the outstanding-message threshold at which a source is storm-masked.
+    fields: [storm_limit]
+    valid_conditions: [positive_limit]
+    completion_conditions: [limit_applied]
+    error_conditions: []
+    functional_effects: [update_storm_limit]
+    timing_effects: [config_delay]
+
+fsm_processes:
+  - name: host_message
+    purpose: Accept host messages, timestamp them, and forward them to the mailbox sender interface.
+    simpy_process: true
+    states: [IDLE, ACCEPT_MESSAGE, FORWARD_MAILBOX]
+    transitions:
+      - from: IDLE
+        to: ACCEPT_MESSAGE
+        condition: message_available
+        actions: [dequeue_and_timestamp]
+        latency_cycles: 1
+      - from: ACCEPT_MESSAGE
+        to: FORWARD_MAILBOX
+        condition: message_accepted
+        actions: [send_to_mailbox]
+        latency_cycles: 1
+    functional_responsibilities: [message_intake, latency_timestamping]
+    interfaces_touched: [host_message_if]
+    queues_used: [message_intake_queue, send_timestamp_table]
+    resources_used: [mailbox_member]
+  - name: irq_source_bridge
+    purpose: Consume mailbox doorbell interrupts and assert the mapped level-triggered controller source.
+    simpy_process: true
+    states: [IDLE, CONSUME_MAILBOX_IRQ, MAP_SOURCE, ASSERT_LEVEL]
+    transitions:
+      - from: IDLE
+        to: CONSUME_MAILBOX_IRQ
+        condition: mailbox_irq_pending
+        actions: [pop_mailbox_interrupt]
+        latency_cycles: 1
+      - from: CONSUME_MAILBOX_IRQ
+        to: MAP_SOURCE
+        condition: irq_consumed
+        actions: [map_channel_to_source]
+        latency_cycles: 1
+      - from: MAP_SOURCE
+        to: ASSERT_LEVEL
+        condition: source_mapped
+        actions: [assert_controller_level, increment_outstanding]
+        latency_cycles: 1
+    functional_responsibilities: [doorbell_consumption, source_mapping, level_assertion]
+    interfaces_touched: [host_message_if]
+    queues_used: [outstanding_counter_table]
+    resources_used: [mailbox_member, irq_controller_member]
+  - name: cpu_service
+    purpose: Observe controller deliveries and issue the CPU acknowledge.
+    simpy_process: true
+    states: [IDLE, POLL_DELIVERED, ISSUE_ACK]
+    transitions:
+      - from: IDLE
+        to: POLL_DELIVERED
+        condition: tick
+        actions: [read_new_deliveries]
+        latency_cycles: 1
+      - from: POLL_DELIVERED
+        to: ISSUE_ACK
+        condition: new_delivery
+        actions: [issue_controller_ack]
+        latency_cycles: 1
+    functional_responsibilities: [delivery_observation, acknowledge_issue]
+    interfaces_touched: [cpu_service_if]
+    queues_used: [outstanding_counter_table]
+    resources_used: [irq_controller_member, cpu_service_context]
+  - name: software_handler
+    purpose: Service acknowledged interrupts by reading the message, conditionally clearing the doorbell, and issuing EOI.
+    simpy_process: true
+    states: [IDLE, POLL_ACKED, READ_MESSAGE, CLEAR_DOORBELL, ISSUE_EOI]
+    transitions:
+      - from: IDLE
+        to: POLL_ACKED
+        condition: tick
+        actions: [read_new_acknowledgements]
+        latency_cycles: 1
+      - from: POLL_ACKED
+        to: READ_MESSAGE
+        condition: new_acknowledgement
+        actions: [read_mailbox_message, decrement_outstanding]
+        latency_cycles: 2
+      - from: READ_MESSAGE
+        to: CLEAR_DOORBELL
+        condition: channel_drained
+        actions: [clear_mailbox_doorbell, deassert_controller_level]
+        latency_cycles: 1
+      - from: CLEAR_DOORBELL
+        to: ISSUE_EOI
+        condition: service_complete
+        actions: [issue_eoi, record_round_trip_latency]
+        latency_cycles: 1
+    functional_responsibilities: [message_service, conditional_clear, eoi_issue, latency_recording]
+    interfaces_touched: [cpu_service_if]
+    queues_used: [outstanding_counter_table, send_timestamp_table]
+    resources_used: [mailbox_member, irq_controller_member, cpu_service_context]
+  - name: storm_monitor
+    purpose: Mask a flooding source at the controller when outstanding reaches the storm limit and unmask after the throttle window elapses.
+    simpy_process: true
+    states: [IDLE, SAMPLE_OUTSTANDING, APPLY_MASK, RELEASE_MASK]
+    transitions:
+      - from: IDLE
+        to: SAMPLE_OUTSTANDING
+        condition: tick
+        actions: [sample_outstanding_counters]
+        latency_cycles: 2
+      - from: SAMPLE_OUTSTANDING
+        to: APPLY_MASK
+        condition: outstanding_at_limit
+        actions: [mask_controller_source]
+        latency_cycles: 1
+      - from: SAMPLE_OUTSTANDING
+        to: RELEASE_MASK
+        condition: throttle_window_elapsed
+        actions: [unmask_controller_source]
+        latency_cycles: 1
+    functional_responsibilities: [storm_detection, mask_control]
+    interfaces_touched: [storm_control_if]
+    queues_used: [outstanding_counter_table]
+    resources_used: [irq_controller_member]
+
+resources:
+  - name: mailbox_member
+    type: member_ip_model
+    capacity: 1
+    bandwidth: per_mailbox_template
+    latency_cycles: 1
+    arbitration: internal
+    sharing_scope: subsystem
+  - name: irq_controller_member
+    type: member_ip_model
+    capacity: 1
+    bandwidth: per_interrupt_controller_template
+    latency_cycles: 1
+    arbitration: internal
+    sharing_scope: subsystem
+  - name: cpu_service_context
+    type: cpu_context
+    capacity: 1
+    bandwidth: one_service_per_round
+    latency_cycles: 1
+    arbitration: delivery_order
+    sharing_scope: global
+
+queues:
+  - name: message_intake_queue
+    producer: host
+    consumer: host_message
+    depth: 16
+    blocking_behavior: backpressure
+    ordering: fifo
+  - name: send_timestamp_table
+    producer: host_message
+    consumer: software_handler
+    depth: 64
+    blocking_behavior: stall
+    ordering: fifo_per_channel
+  - name: outstanding_counter_table
+    producer: irq_source_bridge
+    consumer: software_handler
+    depth: 64
+    blocking_behavior: stall
+    ordering: keyed_by_channel
+
+fsm_relationships:
+  fsm_count: 5
+  parallel_processes:
+    - [host_message, irq_source_bridge, cpu_service, software_handler, storm_monitor]
+  sequential_paths:
+    - name: message_to_eoi_path
+      path: [host_message.FORWARD_MAILBOX, irq_source_bridge.ASSERT_LEVEL, cpu_service.ISSUE_ACK, software_handler.ISSUE_EOI]
+      description: A message raises a doorbell, is bridged as a level source, delivered, acknowledged, serviced, and completed with EOI.
+    - name: level_reassert_path
+      path: [software_handler.ISSUE_EOI, irq_source_bridge.ASSERT_LEVEL]
+      description: A still-asserted level at EOI re-pends the source for the next unserviced message.
+    - name: storm_path
+      path: [storm_monitor.SAMPLE_OUTSTANDING, storm_monitor.APPLY_MASK]
+      description: Outstanding is sampled before a flooding source is masked.
+  gating_relationships:
+    - source: outstanding_counter_table
+      gates: software_handler.CLEAR_DOORBELL
+      stall_reason: channel_not_drained
+    - source: irq_controller_member
+      gates: cpu_service.ISSUE_ACK
+      stall_reason: no_delivery_observed
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing for glue processes from Mailbox IRQ Subsystem DLD; member IP timing comes from member templates.
+  fsm_process_delays:
+    - fsm: host_message
+      mode: parallel_process
+      operations:
+        - {name: accept_message, cycles: 1, ns: 2}
+        - {name: forward_mailbox, cycles: 1, ns: 2}
+    - fsm: irq_source_bridge
+      mode: parallel_process
+      operations:
+        - {name: consume_mailbox_irq, cycles: 1, ns: 2}
+        - {name: map_source, cycles: 1, ns: 2}
+        - {name: assert_level, cycles: 1, ns: 2}
+    - fsm: cpu_service
+      mode: parallel_process
+      operations:
+        - {name: poll_delivered, cycles: 1, ns: 2}
+        - {name: issue_ack, cycles: 1, ns: 2}
+    - fsm: software_handler
+      mode: parallel_process
+      operations:
+        - {name: poll_acked, cycles: 1, ns: 2}
+        - {name: read_message, cycles: 2, ns: 4}
+        - {name: issue_eoi, cycles: 1, ns: 2}
+    - fsm: storm_monitor
+      mode: parallel_process
+      operations:
+        - {name: sample_outstanding, cycles: 2, ns: 4}
+        - {name: apply_mask, cycles: 1, ns: 2}
+  end_to_end_paths:
+    - name: glue_overhead_per_message
+      cycles: 11
+      ns: 22
+      path: [accept_message, forward_mailbox, consume_mailbox_irq, map_source, assert_level, poll_delivered, issue_ack, poll_acked, read_message, issue_eoi]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [outstanding_per_channel, send_timestamps, storm_throttled_sources, channel_source_mapping, transition_counts]
+  apis: [send, configure_channel, set_storm_limit, run, get_metrics]
+  invariants:
+    - A controller source is asserted only after the mailbox raises the corresponding doorbell interrupt.
+    - The doorbell is cleared and the level deasserted only when no unserviced messages remain on the channel.
+    - End-of-interrupt with a still-asserted level re-pends the source.
+    - A storm-masked source is unmasked only after the throttle window elapses, and is re-masked if it is still flooding.
+  ignored_payload_details: [message_contents]
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [member_ip_pipelines, glue_bridging, service_loop, storm_masking]
+  metrics: [messages_sent, irqs_bridged, deliveries_observed, acks_issued, messages_serviced, eois_issued, level_reasserts_used, storm_throttle_events, round_trip_latency]
+
+test_scenarios:
+  - name: single_message_round_trip
+    description: One message flows send -> doorbell -> level -> delivery -> ack -> read -> clear -> EOI.
+    input_sequence: [CONFIGURE_CHANNEL, SEND_MESSAGE]
+    expected_functional_behavior: [message_serviced, doorbell_cleared, eoi_issued]
+    expected_performance_properties: [round_trip_latency_measured]
+    fsm_coverage: [host_message.FORWARD_MAILBOX, irq_source_bridge.ASSERT_LEVEL, cpu_service.ISSUE_ACK, software_handler.ISSUE_EOI]
+  - name: multi_message_level_reassert
+    description: Several messages on one channel collapse to one pending source and are recovered by level reassert at EOI.
+    input_sequence: [CONFIGURE_CHANNEL, SEND_MESSAGE_X3]
+    expected_functional_behavior: [all_messages_serviced, level_reassert_observed]
+    expected_performance_properties: [per_message_service_measured]
+    fsm_coverage: [software_handler.READ_MESSAGE, software_handler.CLEAR_DOORBELL, irq_source_bridge.CONSUME_MAILBOX_IRQ]
+  - name: storm_throttle_masks_flooding_channel
+    description: A flooding channel reaches the storm limit, is masked at the controller, and is unmasked after the throttle window (re-masked while still flooding) until it drains.
+    input_sequence: [CONFIGURE_CHANNEL, SET_STORM_LIMIT_LOW, SEND_MESSAGE_BURST]
+    expected_functional_behavior: [storm_mask_applied, all_messages_eventually_serviced]
+    expected_performance_properties: [throttle_events_counted]
+    fsm_coverage: [storm_monitor.SAMPLE_OUTSTANDING, storm_monitor.APPLY_MASK, storm_monitor.RELEASE_MASK]
+  - name: masked_channel_is_isolated
+    description: A mailbox-masked channel never reaches the controller while an unmasked channel round-trips normally.
+    input_sequence: [CONFIGURE_CHANNEL_MASKED, CONFIGURE_CHANNEL, SEND_MESSAGE_BOTH]
+    expected_functional_behavior: [masked_channel_not_delivered, unmasked_channel_serviced]
+    expected_performance_properties: [isolation_verified]
+    fsm_coverage: [host_message.ACCEPT_MESSAGE, irq_source_bridge.MAP_SOURCE, cpu_service.POLL_DELIVERED]

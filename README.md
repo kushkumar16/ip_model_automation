@@ -43,6 +43,13 @@ same DLD -> template -> model -> tests pipeline and gates.
   arbitrated, and QoS-accounted); the subsystem IRQ fires when both legs
   complete. A backpressure monitor couples fabric congestion to GDMA memory
   readiness and completion backlog to arbitration issue readiness.
+- `mailbox_irq_subsystem`: interrupt-delivery cluster composing `mailbox_ip`
+  (doorbell source) and `interrupt_controller_ip` (delivery fabric) with a
+  modeled software service loop (ack, read, clear, EOI). Uses true
+  level-triggered semantics — the doorbell level stays asserted while
+  unserviced messages remain, so EOI re-pends the source — and duty-cycle
+  interrupt-storm throttling that masks a flooding channel for a throttle
+  window.
 
 ## Flow
 

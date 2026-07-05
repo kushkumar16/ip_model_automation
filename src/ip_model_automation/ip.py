@@ -11,6 +11,7 @@ from .gdma_ip import GdmaIpModel
 from .i3c_ip import I3cIpModel
 from .interrupt_controller_ip import InterruptControllerIpModel
 from .mailbox_ip import MailboxIpModel
+from .mailbox_irq_subsystem import MailboxIrqSubsystemModel
 from .spi_master_ip import SpiMasterIpModel
 from .timer_ip import TimerIpModel
 
@@ -27,6 +28,7 @@ __all__ = [
     "InterruptControllerIpModel",
     "IpArtifact",
     "MailboxIpModel",
+    "MailboxIrqSubsystemModel",
     "SpiMasterIpModel",
     "TimerIpModel",
     "list_ips",

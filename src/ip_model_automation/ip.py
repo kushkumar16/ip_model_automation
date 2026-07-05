@@ -6,6 +6,7 @@ from .arbitration_ip import ArbitrationIpModel
 from .axi_interconnect_ip import AxiInterconnectIpModel
 from .common import Command, Descriptor, IP_ARTIFACTS, IpArtifact, list_ips, resolve_artifacts
 from .completion_ip import CompletionIpModel
+from .dma_subsystem import DmaSubsystemModel
 from .gdma_ip import GdmaIpModel
 from .i3c_ip import I3cIpModel
 from .interrupt_controller_ip import InterruptControllerIpModel
@@ -19,6 +20,7 @@ __all__ = [
     "Command",
     "CompletionIpModel",
     "Descriptor",
+    "DmaSubsystemModel",
     "GdmaIpModel",
     "I3cIpModel",
     "IP_ARTIFACTS",

@@ -31,6 +31,19 @@ behavior from the DLD.
   engine, in-band-interrupt (IBI) detection/arbitration, and masked
   interrupts.
 
+## Subsystems
+
+A subsystem is modeled as "just another IP" whose FSM processes are the glue
+between member IP models; the member models are its resources. It rides the
+same DLD -> template -> model -> tests pipeline and gates.
+
+- `dma_subsystem`: connected data-mover composing `gdma_ip`,
+  `axi_interconnect_ip`, `arbitration_ip`, and `completion_ip`. Descriptors
+  fan out to an engine leg and a fabric leg (read+write commands routed,
+  arbitrated, and QoS-accounted); the subsystem IRQ fires when both legs
+  complete. A backpressure monitor couples fabric congestion to GDMA memory
+  readiness and completion backlog to arbitration issue readiness.
+
 ## Flow
 
 ```text

@@ -85,10 +85,17 @@ python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml 
 ```
 
 Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
-then the model/test flow):
+subsystem wiring is consistent, then the model/test flow):
 
 ```powershell
 python tools\validate_dld_flow.py
+```
+
+Check subsystem wiring only (members exist, member APIs and glue FSMs
+referenced by `connections:` are real, the model instantiates the members):
+
+```powershell
+python tools\check_subsystem_wiring.py
 ```
 
 ## Daily Validation

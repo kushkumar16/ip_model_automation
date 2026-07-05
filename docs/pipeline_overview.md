@@ -334,7 +334,7 @@ Concretely:
 
 This is exactly the path used to add `mailbox_ip`, `spi_master_ip`, and
 `i3c_ip`: brand-new DLDs went through extraction, review, modeling, and
-testing, and the whole 11-IP suite validated with 55 passing tests. The same
+testing, and the whole 11-IP suite validated with 57 passing tests. The same
 path also carries subsystems (`dma_subsystem`, `mailbox_irq_subsystem`):
 connected clusters of member IPs whose glue processes are their FSMs and whose
 member models are their resources, so every existing gate applies unchanged.

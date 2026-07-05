@@ -108,6 +108,46 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
         self.assertIn("templates: 11", text)
 
+    def test_subsystem_wiring_check_passes_for_repo(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        checker_path = repo_root / "tools" / "check_subsystem_wiring.py"
+        spec = importlib.util.spec_from_file_location("check_subsystem_wiring", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(checker)
+
+        templates = checker.discover_subsystem_templates(repo_root)
+        self.assertEqual(
+            {path.name for path in templates},
+            {"dma_subsystem.template.yaml", "mailbox_irq_subsystem.template.yaml"},
+        )
+        for template in templates:
+            self.assertEqual(checker.check_file(repo_root, template), [])
+
+    def test_subsystem_wiring_check_detects_bad_wiring(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        checker_path = repo_root / "tools" / "check_subsystem_wiring.py"
+        spec = importlib.util.spec_from_file_location("check_subsystem_wiring", checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(checker)
+
+        text = (repo_root / "templates" / "dma_subsystem.template.yaml").read_text(encoding="utf-8")
+        broken = text.replace("ip: gdma_ip, model: GdmaIpModel", "ip: ghost_ip, model: GhostIpModel")
+        broken = broken.replace("to: arbitration_ip.enqueue", "to: arbitration_ip.enqueue_nonexistent")
+        broken = broken.replace(
+            "from: backpressure_monitor, to: gdma_ip.set_memory_ready",
+            "from: bogus_fsm, to: gdma_ip.set_memory_ready",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "dma_subsystem.template.yaml"
+            target.write_text(broken, encoding="utf-8")
+            errors = "\n".join(checker.check_file(repo_root, target))
+        self.assertIn("member `ghost_ip`: no promoted template", errors)
+        self.assertIn("does not instantiate member model `GhostIpModel`", errors)
+        self.assertIn("`enqueue_nonexistent` not found in arbitration_ip.py", errors)
+        self.assertIn("`bogus_fsm`: not a glue FSM of dma_subsystem", errors)
+
     def test_ip_logging_writes_ip_tagged_run_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "run.log"

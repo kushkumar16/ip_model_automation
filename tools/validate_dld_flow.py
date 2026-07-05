@@ -37,6 +37,7 @@ def _load(module_name: str):
 template_lint = _load("template_lint")
 check_cov = _load("check_template_coverage")
 dld_tool = _load("dld_to_template")
+subsystem_wiring = _load("check_subsystem_wiring")
 
 
 def discover_dlds(repo_root: Path) -> list[Path]:
@@ -75,6 +76,18 @@ def validate_front_end(repo_root: Path) -> list[str]:
             continue
 
         print(f"  {ip_name}: OK")
+
+    subsystem_templates = subsystem_wiring.discover_subsystem_templates(repo_root)
+    if subsystem_templates:
+        print(f"checking subsystem wiring for {len(subsystem_templates)} subsystem templates")
+        for template_path in subsystem_templates:
+            wiring_errors = subsystem_wiring.check_file(repo_root, template_path)
+            if wiring_errors:
+                for error in wiring_errors:
+                    failures.append(f"{template_path.name}: {error}")
+                print(f"  {template_path.stem.removesuffix('.template')}: WIRING FAIL")
+            else:
+                print(f"  {template_path.stem.removesuffix('.template')}: wiring OK")
     return failures
 
 

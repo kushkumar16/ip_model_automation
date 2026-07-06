@@ -1,2 +1,14 @@
 # Normalize line endings on checkin; let Git handle EOL per-platform on checkout.
 * text=auto
+
+# Binary formats: never normalize line endings (git's text auto-detection can
+# misclassify uncompressed PDFs as text, which corrupts them on conversion).
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary

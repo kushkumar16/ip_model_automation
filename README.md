@@ -69,6 +69,12 @@ in a gaps report, never silently invented.
 
 ## DLD To Template
 
+New to template authoring? Start from the annotated reference
+[templates/reference_template.yaml](templates/reference_template.yaml) — it
+documents every section, the rules each gate enforces, and the optional
+`subsystem:` section. It is kept lint-clean by the test suite but is named so
+template discovery never treats it as a real IP.
+
 DLDs vary in format and often omit details. Extract a draft template plus a gaps
 report from a DLD:
 

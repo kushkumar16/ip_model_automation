@@ -108,6 +108,26 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
         self.assertIn("templates: 11", text)
 
+    def test_reference_template_is_lint_clean_and_undiscovered(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        reference = repo_root / "templates" / "reference_template.yaml"
+        self.assertTrue(reference.is_file())
+
+        linter_path = repo_root / "tools" / "template_lint.py"
+        spec = importlib.util.spec_from_file_location("template_lint", linter_path)
+        linter = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(linter)
+        self.assertEqual(linter.lint_file(reference), [])
+
+        validator_path = repo_root / "tools" / "validate_ip_flow.py"
+        spec = importlib.util.spec_from_file_location("validate_ip_flow", validator_path)
+        validator = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(validator)
+        discovered = {path.name for path in validator.discover_templates(repo_root)}
+        self.assertNotIn("reference_template.yaml", discovered)
+
     def test_subsystem_wiring_check_passes_for_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
         checker_path = repo_root / "tools" / "check_subsystem_wiring.py"

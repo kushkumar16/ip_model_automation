@@ -1,0 +1,192 @@
+# =============================================================================
+# REFERENCE TEMPLATE — not a real IP.
+#
+# This file documents every section of an IP model template and the rules the
+# gates enforce. Copy it (or a promoted draft from tools/dld_to_template.py)
+# when authoring a new IP, replace the example_* placeholders, and delete the
+# guidance comments you no longer need.
+#
+# It is deliberately named reference_template.yaml (NOT *.template.yaml) so
+# template discovery in validate_ip_flow.py / check_subsystem_wiring.py and
+# the counts in tests/test_workflow.py never pick it up. It IS kept
+# lint-clean: tests/test_workflow.py lints it explicitly so this reference
+# can never drift from the real contract in tools/template_lint.py.
+#
+# Authoring rules (enforced by the gates):
+#   - The DLD (docs/<name>_dld.md) is the only source for AUTHORING; this
+#     template, once promoted to templates/<name>.template.yaml, is the only
+#     source of truth for GENERATION. Never invent behavior the DLD does not
+#     state; record open questions in reports/<name>.gaps.md instead.
+#   - Every FSM name must be the exact snake_case of a DLD "### N.M <Name> FSM"
+#     heading, and fsm_relationships.fsm_count must equal the DLD's
+#     "Total FSM/processes: N" line (checked by check_template_coverage.py
+#     --strict).
+#   - Every FSM needs a timing_model.fsm_process_delays entry and must appear
+#     in at least one test_scenarios[].fsm_coverage item (template_lint.py).
+#   - The generated model is one flat file src/ip_model_automation/<name>.py
+#     with one class <CamelName>Model and one SimPy process per FSM.
+# =============================================================================
+
+ip:
+  name: example_ip                     # must match the file/DLD/model names
+  domain: soc_peripheral               # e.g. soc_peripheral | soc_infrastructure | soc_subsystem
+  description: One-sentence summary of what the IP does (first line under the DLD Purpose heading).
+  clock_domains:
+    - name: bus_clk
+      frequency_mhz: 500               # from the DLD "FSM Timing Model" clock assumption
+  reset:
+    type: sync
+    behavior: clear_state_queues_and_irqs
+
+# -----------------------------------------------------------------------------
+# subsystem: OPTIONAL. Only for connected multi-IP clusters (subsystem-as-IP
+# pattern). Members are existing IPs; connections wire member APIs to this
+# template's glue FSMs. checked by tools/check_subsystem_wiring.py:
+#   - each member ip needs a promoted template + model file + model class,
+#   - the subsystem model must instantiate every member model class,
+#   - every endpoint is "<member_ip>.<api>" (api = method or self.<attr> in the
+#     member's model file) or a bare glue-FSM name from fsm_processes below.
+# NOTE: use `ip:` (not `name:`) as the member key. template_lint.py applies the
+# arbitration-IP contract to any template containing the substring of a `name:`
+# key directly followed by the arbitration IP's name, so member and resource
+# entries must never spell that out (role-based names like
+# downstream_arbiter_member avoid it).
+# -----------------------------------------------------------------------------
+# subsystem:
+#   members:
+#     - {ip: some_member_ip, model: SomeMemberIpModel, role: what_it_does}
+#   connections:
+#     - {from: example_fsm, to: some_member_ip.submit, payload: what_flows}
+
+# interfaces: from DLD "### N.M <Name> Interface" sections.
+interfaces:
+  - name: example_if                   # interfaces are report-only in coverage:
+    type: apb_axi_lite                 # templates may consolidate DLD sections.
+    direction: input
+    clock_domain: bus_clk
+    transactions:
+      - name: example_access
+        fields: [addr, write_data, read_data]
+        handshake: valid_ready         # valid_ready | level | serial_shift | queue_put | immediate ...
+        timing_notes: writes update shadow state before runtime logic observes them
+
+# commands: software-visible operations; usually NOT stated verbatim in the
+# DLD -- derive them from DLD behavior.
+commands:
+  - name: EXAMPLE_COMMAND
+    description: What the command does, in one sentence.
+    fields: [field_a, field_b]
+    valid_conditions: [what_must_hold_to_accept]
+    completion_conditions: [what_marks_it_done]
+    error_conditions: [what_rejects_it]     # may be []
+    functional_effects: [state_change_it_causes]
+    timing_effects: [which_delay_applies]
+
+# fsm_processes: one entry per DLD FSM heading, same order. Each FSM name is
+# the snake_case of its DLD heading ("### 6.1 Example Fsm FSM" -> example_fsm).
+fsm_processes:
+  - name: example_fsm
+    purpose: One sentence from the DLD Role line.
+    simpy_process: true                # always true — each FSM is one env.process loop
+    states: [IDLE, DECODE, EXECUTE, ERROR]   # verbatim from the DLD States list
+    transitions:                       # at least one explicit from/to per FSM;
+      - from: IDLE                     # capture the DLD's sequential dependencies
+        to: DECODE
+        condition: input_available
+        actions: [dequeue_input]
+        latency_cycles: 1
+      - from: DECODE
+        to: EXECUTE
+        condition: input_valid
+        actions: [perform_operation]
+        latency_cycles: 1
+    functional_responsibilities: [what_this_process_owns]
+    interfaces_touched: [example_if]
+    queues_used: [example_queue]       # names must exist in queues: below
+    resources_used: [example_resource] # names must exist in resources: below
+
+# resources: shared ports/lines the FSMs contend for.
+resources:
+  - name: example_resource
+    type: bus_port                     # bus_port | serial_port | irq_line | member_ip_model ...
+    capacity: 1
+    bandwidth: one_access_per_tick
+    latency_cycles: 1
+    arbitration: bus_order
+    sharing_scope: global              # global | subsystem
+
+# queues: producer/consumer links between FSMs.
+queues:
+  - name: example_queue
+    producer: example_fsm              # an FSM name, or "host" for external input
+    consumer: example_fsm
+    depth: 8
+    blocking_behavior: backpressure    # backpressure | stall | drop_on_full
+    ordering: fifo
+
+fsm_relationships:
+  # fsm_count MUST equal the DLD "Total FSM/processes: N" line.
+  fsm_count: 1
+  # parallel_processes: groups that run concurrently.
+  parallel_processes:
+    - [example_fsm]
+  # sequential_paths: ordered FSM.STATE chains from the DLD.
+  sequential_paths:
+    - name: example_path
+      path: [example_fsm.DECODE, example_fsm.EXECUTE]
+      description: What must happen before what, per the DLD.
+  # gating_relationships: what stalls what, and why.
+  gating_relationships:
+    - source: example_queue
+      gates: example_fsm.DECODE
+      stall_reason: queue_empty
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing from the <Name> IP DLD.
+  # fsm_process_delays: one entry PER FSM; operations come from the DLD
+  # "| FSM/process | Runs as | Delay model |" table ("<op>: <c> cycles = <n> ns").
+  fsm_process_delays:
+    - fsm: example_fsm
+      mode: parallel_process
+      operations:
+        - {name: decode, cycles: 1, ns: 2}
+        - {name: execute, cycles: 2, ns: 4}
+  # end_to_end_paths: from the DLD "End-to-end delay" line.
+  end_to_end_paths:
+    - name: example_end_to_end
+      cycles: 3
+      ns: 6
+      path: [decode, execute]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [example_state, transition_counts]
+  apis: [submit, run, get_metrics]     # the model's public methods
+  invariants:                          # orderings the tests must be able to observe
+    - EXECUTE happens only after DECODE accepts a valid input.
+  ignored_payload_details: [data_contents]
+
+performance_model:
+  language: python                     # fixed
+  library: simpy                       # fixed
+  abstraction_level: transaction
+  model_functionality: true            # fixed
+  model_fsm_processes: true            # fixed
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [decode_delay, execute_delay]
+  metrics: [accepted_inputs, completed_operations, error_count]
+
+# test_scenarios: every FSM must appear in at least one fsm_coverage list;
+# each scenario becomes a unit test in tests/test_<name>.py.
+test_scenarios:
+  - name: example_happy_path
+    description: One input flows through decode and execute.
+    input_sequence: [EXAMPLE_COMMAND]
+    expected_functional_behavior: [operation_completed]
+    expected_performance_properties: [latency_measured]
+    fsm_coverage: [example_fsm.DECODE, example_fsm.EXECUTE]

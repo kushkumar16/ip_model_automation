@@ -150,6 +150,23 @@ For scaffold-only validation:
 python tools\validate_ip_flow.py --skip-tests
 ```
 
+## Performance Experiments
+
+Sweep model configurations and extract latency/throughput tables from the
+models' metrics (results land in `reports/experiments/`, gitignored):
+
+```powershell
+python tools\run_experiments.py            # run all experiments
+python tools\run_experiments.py --list     # list available experiments
+python tools\run_experiments.py --only dma_outstanding_limit
+```
+
+Each experiment sweeps one parameter against a fixed deterministic workload —
+e.g. descriptor end-to-end latency vs. interconnect outstanding limit,
+completion delay vs. QoS token budget, message round-trip vs. storm throttle
+window, issued commands vs. burst credit. Output is one CSV per experiment
+plus a combined `summary.md` with markdown tables.
+
 ## Model Logging
 
 Every IP model accepts `log_level` and `log_file` constructor arguments. Logs

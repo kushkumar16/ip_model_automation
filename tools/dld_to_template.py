@@ -499,7 +499,31 @@ def ip_name_from_path(path: Path) -> str:
     return path.stem
 
 
-def write_outputs(dld_path: Path, templates_dir: Path, reports_dir: Path) -> tuple[Path, Path]:
+def _load_doc_renderer():
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "render_template_doc.py"
+    spec = importlib.util.spec_from_file_location("render_template_doc", path)
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise RuntimeError(f"cannot load tool: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_draft_doc(draft: dict[str, Any], draft_path: Path, reports_dir: Path) -> Path:
+    """Render a readable HTML view of the draft next to the gaps report."""
+    doc_tool = _load_doc_renderer()
+    ip_name = draft["ip"]["name"]
+    markdown = doc_tool.render_document(draft, draft_path)
+    doc = doc_tool.markdown_to_html(markdown, f"{ip_name} — Template Overview (DRAFT)")
+    doc_path = reports_dir / "template_docs" / f"{ip_name}.template.draft.html"
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
+    doc_path.write_text(doc, encoding="utf-8")
+    return doc_path
+
+
+def write_outputs(dld_path: Path, templates_dir: Path, reports_dir: Path) -> tuple[Path, Path, Path]:
     yaml = require_yaml()
     dumper = _make_dumper(yaml)
     text = dld_path.read_text(encoding="utf-8")
@@ -522,7 +546,9 @@ def write_outputs(dld_path: Path, templates_dir: Path, reports_dir: Path) -> tup
 
     report_path = reports_dir / f"{ip_name}.gaps.md"
     report_path.write_text(render_gaps_report(ip_name, draft, gaps, open_items), encoding="utf-8")
-    return draft_path, report_path
+
+    doc_path = write_draft_doc(draft, draft_path, reports_dir)
+    return draft_path, report_path, doc_path
 
 
 def main(argv: list[str]) -> int:
@@ -535,9 +561,10 @@ def main(argv: list[str]) -> int:
     if not args.dld.is_file():
         raise SystemExit(f"DLD not found: {args.dld}")
 
-    draft_path, report_path = write_outputs(args.dld, args.templates_dir, args.reports_dir)
+    draft_path, report_path, doc_path = write_outputs(args.dld, args.templates_dir, args.reports_dir)
     print(f"wrote draft:  {draft_path}")
     print(f"wrote report: {report_path}")
+    print(f"wrote doc:    {doc_path}")
     print("Next: resolve TODO_REVIEW markers, lint, check coverage, then promote.")
     return 0
 

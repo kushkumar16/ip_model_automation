@@ -38,6 +38,7 @@ template_lint = _load("template_lint")
 check_cov = _load("check_template_coverage")
 dld_tool = _load("dld_to_template")
 subsystem_wiring = _load("check_subsystem_wiring")
+doc_renderer = _load("render_template_doc")
 
 
 def discover_dlds(repo_root: Path) -> list[Path]:
@@ -91,6 +92,24 @@ def validate_front_end(repo_root: Path) -> list[str]:
     return failures
 
 
+def render_template_docs(repo_root: Path) -> int:
+    """Regenerate readable Markdown + HTML docs for every promoted template."""
+    output_dir = repo_root / "reports" / "template_docs"
+    template_paths = doc_renderer.discover_templates()
+    for template_path in template_paths:
+        template = doc_renderer.load_template(template_path)
+        markdown = doc_renderer.render_document(template, template_path)
+        ip_name = template.get("ip", {}).get("name", template_path.stem)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        md_path = output_dir / template_path.name.replace(".template.yaml", ".template.md")
+        html_path = output_dir / template_path.name.replace(".template.yaml", ".template.html")
+        md_path.write_text(markdown, encoding="utf-8")
+        html_path.write_text(
+            doc_renderer.markdown_to_html(markdown, f"{ip_name} — Template Overview"), encoding="utf-8"
+        )
+    return len(template_paths)
+
+
 def run_model_flow(repo_root: Path) -> int:
     cmd = [sys.executable, str(TOOLS_DIR / "validate_ip_flow.py")]
     return subprocess.run(cmd, cwd=repo_root).returncode
@@ -110,6 +129,9 @@ def main(argv: list[str]) -> int:
             print(f"  - {failure}", file=sys.stderr)
         return 1
     print("DLD -> template gate: OK\n")
+
+    rendered = render_template_docs(repo_root)
+    print(f"rendered readable template docs (md + html) for {rendered} templates -> reports/template_docs\n")
 
     if args.skip_model_flow:
         print("DLD validation flow: OK (model flow skipped)")

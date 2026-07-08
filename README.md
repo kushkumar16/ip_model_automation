@@ -82,16 +82,20 @@ report from a DLD:
 python tools\dld_to_template.py docs\<ip_name>_dld.md
 ```
 
-This writes `templates\<ip_name>.template.draft.yaml` and
-`reports\<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker using only
-DLD-stated behavior, then check the draft covers the DLD and promote it:
+This writes `templates\<ip_name>.template.draft.yaml`,
+`reports\<ip_name>.gaps.md`, and a readable HTML view of the draft at
+`reports\template_docs\<ip_name>.template.draft.html`. Replace every
+`TODO_REVIEW` marker using only DLD-stated behavior, then check the draft
+covers the DLD and promote it:
 
 ```powershell
 python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md --strict
 ```
 
 Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
-subsystem wiring is consistent, then the model/test flow):
+subsystem wiring is consistent, then the model/test flow). When the gate
+passes it also regenerates the readable Markdown + HTML docs for every
+promoted template in `reports\template_docs\`:
 
 ```powershell
 python tools\validate_dld_flow.py
@@ -130,6 +134,18 @@ Generate an LLM prompt pack from a reviewed template:
 
 ```powershell
 python tools\generate_prompt_pack.py templates\<ip_name>.template.yaml --output-dir prompt_packs
+```
+
+Render templates into human-readable documents — Markdown by default, or
+standalone HTML pages that open in any browser (output lands in
+`reports/template_docs/`, gitignored; use `--stdout` to print one to the
+terminal):
+
+```powershell
+python tools\render_template_doc.py                                  # all reviewed templates (Markdown)
+python tools\render_template_doc.py --format html                    # styled HTML pages
+python tools\render_template_doc.py --format both                    # both formats
+python tools\render_template_doc.py templates\timer_ip.template.yaml --stdout
 ```
 
 Inspect the generation harness:
@@ -226,6 +242,7 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
+- `tools/render_template_doc.py`: template -> human-readable Markdown renderer.
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.
 - `tools/generate_prompt_pack.py`: LLM-ready prompt bundle generator.
 - `tools/inspect_harness.py`: generation harness inspector.

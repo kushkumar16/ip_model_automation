@@ -1,6 +1,6 @@
 # DLD Extraction Rules
 
-How `tools/dld_to_template.py` turns a `docs/<ip>_dld.md` into a draft template,
+How `tools/dld_to_template.py` turns a `dlds/<ip>_dld.md` into a draft template,
 and how a reviewer/LLM completes it. The draft is a starting point, not the
 source of truth: the promoted `templates/<ip>.template.yaml` is.
 
@@ -49,7 +49,7 @@ The DLD rarely states these directly; the reviewer fills them from DLD behavior:
 
 1. Replace every `TODO_REVIEW` in `templates/<ip>.template.draft.yaml`.
 2. `python tools/template_lint.py templates/<ip>.template.draft.yaml` — clean.
-3. `python tools/check_template_coverage.py templates/<ip>.template.draft.yaml docs/<ip>_dld.md --strict`
+3. `python tools/check_template_coverage.py templates/<ip>.template.draft.yaml dlds/<ip>_dld.md --strict`
    — FSM names/count match the DLD and no `TODO_REVIEW` remains.
 4. Promote the draft to `templates/<ip>.template.yaml`.
 5. `python tools/validate_dld_flow.py` — full front-end + model/test gate.

@@ -10,6 +10,21 @@ behavior from the DLD.
 > **New here?** Read [docs/pipeline_overview.md](docs/pipeline_overview.md) for a
 > diagrammed explanation of the whole flow and what each piece does.
 
+## Repository Layout
+
+| Directory | Contents |
+| --- | --- |
+| `dlds/` | **Input DLDs** — the authoring source (`*_dld.md`; `*_dld.docx` also accepted by the automated pipeline). |
+| `templates/` | Reviewed template YAMLs (source of truth for generation); extractor drafts land here too (gitignored). |
+| `src/ip_model_automation/` | Flat SimPy model implementations. |
+| `tests/` | Per-IP unit tests and workflow tests. |
+| `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. |
+| `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
+| `docs/` | Project documentation: pipeline overview, project report, modeling notes. |
+| `tools/` | Pipeline tools: extraction, gates, generators, validation, automation. |
+| `schemas/`, `examples/` | Template contract schema and authoring examples. |
+| `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contract. |
+
 ## IPs
 
 - `arbitration_ip`: hierarchical port/tenant/SQ arbitration with pending
@@ -79,7 +94,7 @@ DLDs vary in format and often omit details. Extract a draft template plus a gaps
 report from a DLD:
 
 ```powershell
-python tools\dld_to_template.py docs\<ip_name>_dld.md
+python tools\dld_to_template.py dlds\<ip_name>_dld.md
 ```
 
 This writes `templates\<ip_name>.template.draft.yaml`,
@@ -89,7 +104,7 @@ This writes `templates\<ip_name>.template.draft.yaml`,
 covers the DLD and promote it:
 
 ```powershell
-python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md --strict
+python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md --strict
 ```
 
 Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
@@ -106,6 +121,33 @@ referenced by `connections:` are real, the model instantiates the members):
 
 ```powershell
 python tools\check_subsystem_wiring.py
+```
+
+## Automated Pipeline
+
+`tools/auto_ip_pipeline.py` watches `dlds/*_dld.md` (and `*_dld.docx`) for new
+or modified DLDs and drives the full harness loop for each changed IP:
+docx -> markdown conversion (python-docx), draft extraction, template gates,
+scaffold (new IPs only), prompt pack, model/test generation, unit tests, and
+the repo-wide validation gate. Change detection hashes DLD content into
+`reports/.dld_pipeline_state.json`; an IP is only marked processed after its
+full chain passes.
+
+```powershell
+python tools\auto_ip_pipeline.py                      # process every changed DLD
+python tools\auto_ip_pipeline.py dlds\my_ip_dld.docx  # process one DLD explicitly
+python tools\auto_ip_pipeline.py --force              # reprocess everything
+```
+
+The two harness agent stages (`review_template`, `agent_implementation`) need
+an LLM or a human. By default the runner writes a ready-to-send prompt to
+`reports\agent_requests\<ip>.<stage>.prompt.md` and reports the IP as
+*awaiting* that stage. To run them unattended, pass an agent command — the
+prompt is piped to its stdin, and failed validations re-invoke the agent with
+the failure log up to `loop_policy.max_iterations` from the harness:
+
+```powershell
+python tools\auto_ip_pipeline.py --agent-cmd "claude -p --permission-mode acceptEdits"
 ```
 
 ## Daily Validation
@@ -200,19 +242,19 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 
 ## Adding A New IP
 
-1. Write `docs/<ip_name>_dld.md`.
+1. Write `dlds/<ip_name>_dld.md`.
 2. Extract a draft template and gaps report, then fill every `TODO_REVIEW`
    using only DLD-stated behavior:
 
    ```powershell
-   python tools\dld_to_template.py docs\<ip_name>_dld.md
+   python tools\dld_to_template.py dlds\<ip_name>_dld.md
    ```
 
 3. Check DLD coverage, then promote the draft to
    `templates\<ip_name>.template.yaml`:
 
    ```powershell
-   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md --strict
+   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md --strict
    python tools\template_lint.py templates\<ip_name>.template.yaml
    ```
 
@@ -232,17 +274,19 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 
 ## Key Files
 
-- `docs/*_dld.md`: human-readable IP design documents (template authoring source).
+- `dlds/*_dld.md`: human-readable IP design documents (template authoring source).
 - `templates/*.template.yaml`: source of truth for model generation.
 - `templates/*.template.draft.yaml`: extractor output awaiting review (gitignored).
 - `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored).
 - `schemas/ip_model_template.schema.json`: machine-checkable template contract.
+- `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
-- `tools/render_template_doc.py`: template -> human-readable Markdown renderer.
+- `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
+- `docs/`: project documentation (pipeline overview, project report, notes).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.
 - `tools/generate_prompt_pack.py`: LLM-ready prompt bundle generator.
 - `tools/inspect_harness.py`: generation harness inspector.

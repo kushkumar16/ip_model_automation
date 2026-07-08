@@ -2,7 +2,7 @@ name: ip_generation_loop
 description: Template-driven loop for generating and validating SimPy IP models.
 
 inputs:
-  dld_glob: docs/*_dld.md
+  dld_glob: dlds/*_dld.md
   template_glob: templates/*.template.yaml
   draft_glob: templates/*.template.draft.yaml
   model_dir: src/ip_model_automation

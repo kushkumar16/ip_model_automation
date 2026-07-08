@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that a template captures the FSMs/interfaces declared by its DLD.
 
-This is the gate for the ``docs/<ip>_dld.md`` -> ``templates/<ip>.template.yaml``
+This is the gate for the ``dlds/<ip>_dld.md`` -> ``templates/<ip>.template.yaml``
 step. It ensures the template did not silently drop behavior the DLD declares.
 
 Hard failures (exit 1):
@@ -100,7 +100,7 @@ def coverage(template_path: Path, dld_path: Path, strict: bool) -> tuple[list[st
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("template", type=Path, help="templates/<ip>.template.yaml (or .draft.yaml)")
-    parser.add_argument("dld", type=Path, help="docs/<ip>_dld.md")
+    parser.add_argument("dld", type=Path, help="dlds/<ip>_dld.md")
     parser.add_argument("--strict", action="store_true", help="also fail on TODO_REVIEW markers")
     args = parser.parse_args(argv)
 

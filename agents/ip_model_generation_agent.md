@@ -5,7 +5,7 @@ model from a prompt pack.
 
 ## Inputs
 
-- DLD: `docs/<ip_name>_dld.md`
+- DLD: `dlds/<ip_name>_dld.md`
 - Draft template + gaps report: `templates/<ip_name>.template.draft.yaml`,
   `reports/<ip_name>.gaps.md`
 - Reviewed template: `templates/<ip_name>.template.yaml`
@@ -18,7 +18,7 @@ model from a prompt pack.
 
 ### Stage 0: DLD -> reviewed template
 
-1. Generate the draft with `python tools/dld_to_template.py docs/<ip_name>_dld.md`.
+1. Generate the draft with `python tools/dld_to_template.py dlds/<ip_name>_dld.md`.
 2. Replace every `TODO_REVIEW` in the draft using only DLD-stated behavior;
    record anything the DLD leaves open in the gaps report with a labeled default.
 3. Pass `template_lint.py` and

@@ -71,7 +71,7 @@ the template once, and everything downstream is a faithful function of it.
 
 ```mermaid
 flowchart TD
-    DLD["📄 docs/&lt;ip&gt;_dld.md"]
+    DLD["📄 dlds/&lt;ip&gt;_dld.md"]
 
     subgraph S0["Stage 0 — DLD → Reviewed Template"]
         EXTRACT["tools/dld_to_template.py"]
@@ -105,7 +105,7 @@ flowchart TD
 ### ASCII version (same flow)
 
 ```text
-docs/<ip>_dld.md
+dlds/<ip>_dld.md
       │
       ▼   Stage 0: DLD → Reviewed Template
  dld_to_template.py ── draft template + gaps report
@@ -217,7 +217,7 @@ regression gate — if a future change breaks extraction, calibration fails loud
 ```mermaid
 flowchart TB
     subgraph inputs["Inputs / sources"]
-        DLDS["docs/*_dld.md"]
+        DLDS["dlds/*_dld.md"]
         SCHEMA["schemas/ip_model_template.schema.json"]
     end
     subgraph tools["tools/ (deterministic)"]
@@ -255,7 +255,7 @@ flowchart TB
 
 | Area | Role |
 | --- | --- |
-| `docs/*_dld.md` | Human design intent (authoring source only). |
+| `dlds/*_dld.md` | Human design intent (authoring source only). |
 | `templates/*.template.yaml` | **Golden reference** — source of truth for generation. |
 | `schemas/…schema.json` | Machine-checkable template contract. |
 | `tools/*.py` | Deterministic extraction, linting, coverage, generation, validation. |
@@ -310,7 +310,7 @@ sequenceDiagram
     participant G as Gates
     participant V as validate_dld_flow.py
 
-    U->>X: docs/<ip>_dld.md
+    U->>X: dlds/<ip>_dld.md
     X-->>R: draft template + gaps report
     R->>R: fill TODO_REVIEW (DLD-stated only)
     R->>G: lint + coverage --strict
@@ -323,10 +323,10 @@ sequenceDiagram
 
 Concretely:
 
-1. Write `docs/<ip>_dld.md` (Purpose, Interfaces, FSMs+States, timing table, Open Items).
-2. `python tools\dld_to_template.py docs\<ip>_dld.md` → draft + gaps.
+1. Write `dlds/<ip>_dld.md` (Purpose, Interfaces, FSMs+States, timing table, Open Items).
+2. `python tools\dld_to_template.py dlds\<ip>_dld.md` → draft + gaps.
 3. Fill every `TODO_REVIEW`; resolve gaps using only DLD-stated behavior.
-4. `python tools\check_template_coverage.py templates\<ip>.template.draft.yaml docs\<ip>_dld.md --strict`
+4. `python tools\check_template_coverage.py templates\<ip>.template.draft.yaml dlds\<ip>_dld.md --strict`
    then promote to `templates\<ip>.template.yaml`.
 5. Implement `src/ip_model_automation/<ip>.py` and `tests/test_<ip>.py`
    (register the model in `common.py` + `ip.py`).

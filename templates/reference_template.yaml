@@ -13,7 +13,7 @@
 # can never drift from the real contract in tools/template_lint.py.
 #
 # Authoring rules (enforced by the gates):
-#   - The DLD (docs/<name>_dld.md) is the only source for AUTHORING; this
+#   - The DLD (dlds/<name>_dld.md) is the only source for AUTHORING; this
 #     template, once promoted to templates/<name>.template.yaml, is the only
 #     source of truth for GENERATION. Never invent behavior the DLD does not
 #     state; record open questions in reports/<name>.gaps.md instead.

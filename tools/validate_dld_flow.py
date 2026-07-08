@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end validation for the DLD -> template -> model -> test flow.
 
-Extends ``validate_ip_flow.py`` with a front-end gate: every ``docs/<ip>_dld.md``
+Extends ``validate_ip_flow.py`` with a front-end gate: every ``dlds/<ip>_dld.md``
 must have a promoted ``templates/<ip>.template.yaml`` that (a) lints and (b) covers
 the FSMs the DLD declares (calibration/regression on the golden IPs). It then runs
 the existing model/test validation.
@@ -42,7 +42,7 @@ doc_renderer = _load("render_template_doc")
 
 
 def discover_dlds(repo_root: Path) -> list[Path]:
-    return sorted((repo_root / "docs").glob("*_dld.md"))
+    return sorted((repo_root / "dlds").glob("*_dld.md"))
 
 
 def validate_front_end(repo_root: Path) -> list[str]:
@@ -50,7 +50,7 @@ def validate_front_end(repo_root: Path) -> list[str]:
     failures: list[str] = []
     dlds = discover_dlds(repo_root)
     if not dlds:
-        return ["no docs/*_dld.md files found"]
+        return ["no dlds/*_dld.md files found"]
 
     print(f"checking DLD -> template coverage for {len(dlds)} DLDs")
     for dld_path in dlds:

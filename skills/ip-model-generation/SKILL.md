@@ -6,7 +6,7 @@ description: Parse hardware IP DLDs into template YAML, then generate, review, o
 # IP Model Generation
 
 Use this skill when generating or validating SimPy models from HW IP DLDs. It
-covers the full flow `docs/<ip>_dld.md -> reviewed template -> model -> tests`.
+covers the full flow `dlds/<ip>_dld.md -> reviewed template -> model -> tests`.
 If you already have a reviewed `*.template.yaml`, skip to the "Template ->
 Model" workflow below.
 
@@ -18,7 +18,7 @@ surface it in the gaps report.
 1. Extract a draft template and a gaps report from the DLD:
 
    ```powershell
-   python tools\dld_to_template.py docs\<ip_name>_dld.md
+   python tools\dld_to_template.py dlds\<ip_name>_dld.md
    ```
 
    This writes `templates\<ip_name>.template.draft.yaml` and
@@ -32,7 +32,7 @@ surface it in the gaps report.
 
    ```powershell
    python tools\template_lint.py templates\<ip_name>.template.draft.yaml
-   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml docs\<ip_name>_dld.md
+   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md
    ```
 
 4. When both pass and no `TODO_REVIEW` remains, promote the draft to the golden

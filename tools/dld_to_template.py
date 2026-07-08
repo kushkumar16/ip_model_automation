@@ -2,7 +2,7 @@
 """Extract a draft IP template from a design-level document (DLD) markdown file.
 
 This is the front-end of the generation pipeline: it turns a human-authored
-``docs/<ip>_dld.md`` into a *draft* ``templates/<ip>.template.draft.yaml`` plus a
+``dlds/<ip>_dld.md`` into a *draft* ``templates/<ip>.template.draft.yaml`` plus a
 ``reports/<ip>.gaps.md`` report.
 
 The extractor is deliberately best-effort. DLDs vary in format and routinely omit
@@ -480,7 +480,7 @@ def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], ope
         "   it here rather than inventing silent behavior.",
         "3. Run `python tools/template_lint.py templates/" + ip_name + ".template.draft.yaml`.",
         "4. Run `python tools/check_template_coverage.py templates/" + ip_name
-        + ".template.draft.yaml docs/" + ip_name + "_dld.md`.",
+        + ".template.draft.yaml dlds/" + ip_name + "_dld.md`.",
         "5. Promote the draft to the golden template name and re-run validation.",
         "",
     ]
@@ -553,7 +553,7 @@ def write_outputs(dld_path: Path, templates_dir: Path, reports_dir: Path) -> tup
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dld", type=Path, help="Path to docs/<ip>_dld.md")
+    parser.add_argument("dld", type=Path, help="Path to dlds/<ip>_dld.md")
     parser.add_argument("--templates-dir", type=Path, default=Path("templates"))
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
     args = parser.parse_args(argv)

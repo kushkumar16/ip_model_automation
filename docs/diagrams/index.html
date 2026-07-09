@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IP Model Automation — Flow Diagrams</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    font-family: "Segoe UI", Arial, sans-serif;
+    margin: 0; padding: 2rem;
+    background: #f8f9fa; color: #202124;
+    max-width: 1320px; margin-inline: auto;
+  }
+  h1 { font-size: 1.7rem; margin-bottom: .25rem; }
+  p.lead { color: #5f6368; margin-top: 0; }
+  section {
+    background: #fff; border: 1px solid #dadce0; border-radius: 12px;
+    padding: 1.25rem 1.5rem; margin: 1.5rem 0;
+  }
+  h2 { font-size: 1.15rem; margin: 0 0 .25rem; }
+  p.desc { color: #5f6368; font-size: .95rem; margin: 0 0 1rem; }
+  img { width: 100%; height: auto; display: block; }
+  nav { font-size: .95rem; }
+  nav a { margin-right: 1rem; color: #1a73e8; text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  footer { color: #5f6368; font-size: .85rem; margin: 2rem 0 1rem; }
+</style>
+</head>
+<body>
+<h1>IP Model Automation — Flow Diagrams</h1>
+<p class="lead">Standalone versions of the pipeline diagrams. Each image is an SVG in this folder —
+open it directly, or copy it into slides/documents. The full narrative lives in
+<code>docs/project_overview.md</code>.</p>
+
+<nav>
+  <a href="#d1">1. Big picture</a>
+  <a href="#d2">2. End-to-end flow</a>
+  <a href="#d3">3. Two sources of truth</a>
+  <a href="#d4">4. Extractor mapping</a>
+  <a href="#d5">5. Validation gates</a>
+  <a href="#d6">6. Automated runner</a>
+  <a href="#d7">7. Example model</a>
+</nav>
+
+<section id="d1">
+  <h2>1. The big picture</h2>
+  <p class="desc">What goes in (a DLD) and what comes out (a SimPy model + unit tests), with the template as the golden reference in the middle.</p>
+  <img src="01_big_picture.svg" alt="Big picture: DLD to template to model and tests">
+</section>
+
+<section id="d2">
+  <h2>2. End-to-end flow</h2>
+  <p class="desc">Both stages in one view: Stage 0 (DLD → reviewed template, with the review loop) and Stage 1 (template → model + tests, with the validation loop).</p>
+  <img src="02_end_to_end_flow.svg" alt="End-to-end flow with both stages and gates">
+</section>
+
+<section id="d3">
+  <h2>3. Two sources of truth — one at a time</h2>
+  <p class="desc">The rule the whole system is built around: the DLD authors the template; the reviewed template generates everything else.</p>
+  <img src="03_two_sources_of_truth.svg" alt="Two-phase source-of-truth rule">
+</section>
+
+<section id="d4">
+  <h2>4. Stage 0 extraction mapping</h2>
+  <p class="desc">Which DLD sections the extractor understands, what template fields they become, and where the un-derivable rest goes (TODO_REVIEW + gaps report).</p>
+  <img src="04_extractor_mapping.svg" alt="DLD section to template field mapping">
+</section>
+
+<section id="d5">
+  <h2>5. The validation gate chain</h2>
+  <p class="desc">The five checks behind a green <code>validate_dld_flow.py</code> — what “validated” actually means.</p>
+  <img src="05_validation_gates.svg" alt="Gate chain from lint to unit tests">
+</section>
+
+<section id="d6">
+  <h2>6. The automated pipeline runner</h2>
+  <p class="desc">How <code>auto_ip_pipeline.py</code> drives the whole chain from a DLD drop, including the agent retry loop.</p>
+  <img src="06_auto_pipeline.svg" alt="Automated pipeline runner flow">
+</section>
+
+<section id="d7">
+  <h2>7. What a generated model looks like</h2>
+  <p class="desc">The real Mailbox IP model: FSM processes connected by queues, with configuration/masking and backpressure.</p>
+  <img src="07_example_mailbox_model.svg" alt="Mailbox IP generated model structure">
+</section>
+
+<footer>IP Model Automation · docs/diagrams · generated diagrams are hand-maintained SVG (no build step required)</footer>
+</body>
+</html>

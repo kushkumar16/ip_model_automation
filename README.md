@@ -7,8 +7,9 @@ The template is the source of truth for model generation. The DLD is used to
 author and review the template, but generation should not infer missing
 behavior from the DLD.
 
-> **New here?** Read [docs/pipeline_overview.md](docs/pipeline_overview.md) for a
-> diagrammed explanation of the whole flow and what each piece does.
+> **New here?** Read [docs/project_overview.md](docs/project_overview.md) — the
+> single project document: intention, a diagrammed explanation of every
+> pipeline stage, code conventions, and current status.
 
 ## Repository Layout
 
@@ -20,7 +21,7 @@ behavior from the DLD.
 | `tests/` | Per-IP unit tests and workflow tests. |
 | `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. |
 | `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
-| `docs/` | Project documentation: pipeline overview, project report, modeling notes. |
+| `docs/` | Project documentation: `project_overview.md` (single consolidated doc), `project_overview.docx` (Word version with embedded diagrams), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
 | `tools/` | Pipeline tools: extraction, gates, generators, validation, automation. |
 | `schemas/`, `examples/` | Template contract schema and authoring examples. |
 | `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contract. |
@@ -286,7 +287,7 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
-- `docs/`: project documentation (pipeline overview, project report, notes).
+- `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.
 - `tools/generate_prompt_pack.py`: LLM-ready prompt bundle generator.
 - `tools/inspect_harness.py`: generation harness inspector.

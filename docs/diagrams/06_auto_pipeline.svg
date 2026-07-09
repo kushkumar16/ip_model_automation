@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1260 560" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea4335"/>
+    </marker>
+  </defs>
+  <rect width="1260" height="560" fill="#ffffff"/>
+  <text x="630" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The automated pipeline runner (tools/auto_ip_pipeline.py)</text>
+  <text x="630" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Drop a DLD in dlds/ — the runner drives every stage and retries failed agent steps with the failure log</text>
+
+  <!-- Row 1 -->
+  <rect x="40" y="110" width="210" height="70" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="145" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Watch dlds/</text>
+  <text x="145" y="161" text-anchor="middle" font-size="12" fill="#174ea6">content-hash change detection</text>
+
+  <rect x="290" y="110" width="210" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="395" y="139" text-anchor="middle" font-size="14" fill="#202124">.docx to markdown</text>
+  <text x="395" y="161" text-anchor="middle" font-size="12" fill="#5f6368">(if needed)</text>
+
+  <rect x="540" y="110" width="210" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="645" y="139" text-anchor="middle" font-size="14" fill="#202124">Extract draft</text>
+  <text x="645" y="161" text-anchor="middle" font-size="12" fill="#5f6368">+ gaps report</text>
+
+  <rect x="790" y="110" width="210" height="70" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="895" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">Template gates</text>
+  <text x="895" y="161" text-anchor="middle" font-size="12" fill="#9a6400">lint + coverage --strict</text>
+
+  <rect x="1040" y="110" width="180" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="1130" y="139" text-anchor="middle" font-size="14" fill="#202124">Scaffold</text>
+  <text x="1130" y="161" text-anchor="middle" font-size="12" fill="#5f6368">(new IPs only)</text>
+
+  <!-- Row 2 (right to left) -->
+  <rect x="1040" y="300" width="180" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="1130" y="329" text-anchor="middle" font-size="14" fill="#202124">Prompt pack</text>
+  <text x="1130" y="351" text-anchor="middle" font-size="12" fill="#5f6368">self-contained LLM prompt</text>
+
+  <rect x="740" y="300" width="240" height="70" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="860" y="329" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent steps (human / LLM)</text>
+  <text x="860" y="351" text-anchor="middle" font-size="12" fill="#174ea6">review template · implement model</text>
+
+  <rect x="470" y="300" width="210" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="575" y="329" text-anchor="middle" font-size="14" fill="#202124">Unit tests</text>
+  <text x="575" y="351" text-anchor="middle" font-size="12" fill="#5f6368">per-IP suite</text>
+
+  <rect x="180" y="300" width="230" height="70" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="295" y="329" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">Repo-wide validation gate</text>
+  <text x="295" y="351" text-anchor="middle" font-size="12" fill="#9a6400">validate_dld_flow.py</text>
+
+  <rect x="180" y="440" width="230" height="60" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
+  <text x="295" y="465" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e7e34">IP marked processed</text>
+  <text x="295" y="486" text-anchor="middle" font-size="12" fill="#1e7e34">reports/.dld_pipeline_state.json</text>
+
+  <!-- Row 1 arrows -->
+  <line x1="250" y1="145" x2="285" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="500" y1="145" x2="535" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="750" y1="145" x2="785" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1000" y1="145" x2="1035" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Turn down to row 2 -->
+  <line x1="1130" y1="180" x2="1130" y2="295" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Row 2 arrows (right to left) -->
+  <line x1="1040" y1="335" x2="985" y2="335" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="740" y1="335" x2="685" y2="335" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="470" y1="335" x2="415" y2="335" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Pass to done -->
+  <line x1="295" y1="370" x2="295" y2="435" stroke="#34a853" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="315" y="410" font-size="12" fill="#1e7e34">pass</text>
+
+  <!-- Fail retry loop -->
+  <path d="M 295 260 L 295 296" fill="none" stroke="none"/>
+  <path d="M 340 300 L 340 240 L 860 240 L 860 295" fill="none" stroke="#ea4335" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrowRed)"/>
+  <text x="600" y="230" text-anchor="middle" font-size="12" fill="#ea4335">fail: re-invoke the agent with the failure log (up to loop_policy.max_iterations)</text>
+</svg>

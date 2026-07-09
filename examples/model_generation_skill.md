@@ -133,7 +133,7 @@ python -m unittest discover -s tests
 - `src/ip_model_automation/common.py`
 - `src/ip_model_automation/ip.py`
 - `tests/test_ip_simpy_models.py`
-- `docs/model_generation_notes.md`
+- `docs/project_overview.md`
 
 ## Validation Checklist
 

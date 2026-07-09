@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 660" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea4335"/>
+    </marker>
+  </defs>
+  <rect width="1020" height="660" fill="#ffffff"/>
+  <text x="510" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">Stage 0 extraction: how DLD sections map to the template</text>
+
+  <!-- Left band: DLD sections -->
+  <rect x="50" y="70" width="380" height="470" rx="14" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="100" text-anchor="middle" font-size="16" font-weight="bold" fill="#174ea6">DLD sections (what you write)</text>
+
+  <rect x="80" y="120" width="320" height="54" rx="8" fill="#ffffff" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="153" text-anchor="middle" font-size="14" fill="#202124">## Purpose</text>
+
+  <rect x="80" y="200" width="320" height="54" rx="8" fill="#ffffff" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="233" text-anchor="middle" font-size="14" fill="#202124">### N.M … Interface</text>
+
+  <rect x="80" y="280" width="320" height="54" rx="8" fill="#ffffff" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="306" text-anchor="middle" font-size="14" fill="#202124">### N.M … FSM</text>
+  <text x="240" y="325" text-anchor="middle" font-size="13" fill="#5f6368">(States: …)</text>
+
+  <rect x="80" y="360" width="320" height="54" rx="8" fill="#ffffff" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="393" text-anchor="middle" font-size="14" fill="#202124">| FSM | Runs as | Delay model |</text>
+
+  <rect x="80" y="440" width="320" height="54" rx="8" fill="#ffffff" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="240" y="473" text-anchor="middle" font-size="14" fill="#202124">## Open Items</text>
+
+  <!-- Right band: extractor output -->
+  <rect x="590" y="70" width="380" height="470" rx="14" fill="#fff4e5" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="100" text-anchor="middle" font-size="16" font-weight="bold" fill="#9a6400">Extractor output (draft template)</text>
+
+  <rect x="620" y="120" width="320" height="54" rx="8" fill="#ffffff" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="153" text-anchor="middle" font-size="14" fill="#202124">ip.description</text>
+
+  <rect x="620" y="200" width="320" height="54" rx="8" fill="#ffffff" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="233" text-anchor="middle" font-size="14" fill="#202124">interfaces[]</text>
+
+  <rect x="620" y="280" width="320" height="54" rx="8" fill="#ffffff" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="313" text-anchor="middle" font-size="14" fill="#202124">fsm_processes[] + states</text>
+
+  <rect x="620" y="360" width="320" height="54" rx="8" fill="#ffffff" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="393" text-anchor="middle" font-size="14" fill="#202124">timing_model (cycles / ns)</text>
+
+  <rect x="620" y="440" width="320" height="54" rx="8" fill="#ffffff" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="780" y="473" text-anchor="middle" font-size="14" fill="#202124">gaps report (reports/&lt;ip&gt;.gaps.md)</text>
+
+  <!-- Mapping arrows -->
+  <line x1="400" y1="147" x2="612" y2="147" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="227" x2="612" y2="227" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="307" x2="612" y2="307" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="387" x2="612" y2="387" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="400" y1="467" x2="612" y2="467" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- TODO_REVIEW box -->
+  <rect x="250" y="570" width="520" height="64" rx="10" fill="#fce8e6" stroke="#ea4335" stroke-width="1.5"/>
+  <text x="510" y="596" text-anchor="middle" font-size="14" font-weight="bold" fill="#a50e0e">Everything the DLD does not state becomes a TODO_REVIEW marker</text>
+  <text x="510" y="618" text-anchor="middle" font-size="13" fill="#a50e0e">(commands, test scenarios, invariants, transition detail — flagged, never guessed)</text>
+  <path d="M 780 540 L 780 560 L 640 560 L 640 565" fill="none" stroke="#ea4335" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrowRed)"/>
+</svg>

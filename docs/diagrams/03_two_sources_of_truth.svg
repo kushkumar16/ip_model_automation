@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 520" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+  </defs>
+  <rect width="940" height="520" fill="#ffffff"/>
+  <text x="470" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The key rule: two sources of truth — one at a time</text>
+
+  <!-- Phase A band -->
+  <rect x="60" y="80" width="820" height="130" rx="14" fill="#f8f9fa" stroke="#dadce0" stroke-width="1.5"/>
+  <text x="80" y="110" font-size="15" font-weight="bold" fill="#5f6368">PHASE A — Authoring the template</text>
+
+  <rect x="120" y="130" width="300" height="56" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="2"/>
+  <text x="270" y="164" text-anchor="middle" font-size="15" font-weight="bold" fill="#174ea6">DLD is the source</text>
+
+  <rect x="540" y="130" width="300" height="56" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="690" y="164" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">Template</text>
+
+  <line x1="420" y1="158" x2="532" y2="158" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="476" y="146" text-anchor="middle" font-size="12" fill="#5f6368">author + review</text>
+
+  <!-- Phase B band -->
+  <rect x="60" y="250" width="820" height="130" rx="14" fill="#f8f9fa" stroke="#dadce0" stroke-width="1.5"/>
+  <text x="80" y="280" font-size="15" font-weight="bold" fill="#5f6368">PHASE B — Generating the model</text>
+
+  <rect x="120" y="300" width="300" height="56" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="270" y="334" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">Template is the source</text>
+
+  <rect x="540" y="300" width="300" height="56" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
+  <text x="690" y="334" text-anchor="middle" font-size="15" font-weight="bold" fill="#1e7e34">Model + Tests</text>
+
+  <line x1="420" y1="328" x2="532" y2="328" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="476" y="316" text-anchor="middle" font-size="12" fill="#5f6368">generate + implement</text>
+
+  <!-- Phase A -> B -->
+  <line x1="470" y1="210" x2="470" y2="245" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Rule note -->
+  <rect x="60" y="410" width="820" height="86" rx="12" fill="#fce8e6" stroke="#ea4335" stroke-width="1.5"/>
+  <text x="470" y="440" text-anchor="middle" font-size="14" fill="#a50e0e">The DLD is used ONLY to author and review the template. Once the template is reviewed,</text>
+  <text x="470" y="462" text-anchor="middle" font-size="14" fill="#a50e0e">the model is built from the TEMPLATE alone — never re-reading the DLD.</text>
+  <text x="470" y="484" text-anchor="middle" font-size="14" font-weight="bold" fill="#a50e0e">Missing details are surfaced in a gaps report, never silently invented.</text>
+</svg>

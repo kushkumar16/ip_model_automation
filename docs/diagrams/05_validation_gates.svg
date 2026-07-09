@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 790" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#34a853"/>
+    </marker>
+  </defs>
+  <rect width="760" height="790" fill="#ffffff"/>
+  <text x="380" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The gate chain: what "validated" means</text>
+  <text x="380" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Nothing advances until its gate is green. One command runs them all.</text>
+
+  <!-- Gate 1 -->
+  <rect x="100" y="95" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="124" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">1. template_lint.py</text>
+  <text x="380" y="148" text-anchor="middle" font-size="13" fill="#9a6400">template matches the schema / contract shape</text>
+
+  <!-- Gate 2 -->
+  <rect x="100" y="197" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="226" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">2. check_template_coverage.py --strict</text>
+  <text x="380" y="250" text-anchor="middle" font-size="13" fill="#9a6400">every DLD FSM + count captured, zero TODO_REVIEW left</text>
+
+  <!-- Gate 3 -->
+  <rect x="100" y="299" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="328" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">3. report_model_coverage.py</text>
+  <text x="380" y="352" text-anchor="middle" font-size="13" fill="#9a6400">every FSM has a test scenario</text>
+
+  <!-- Gate 4 -->
+  <rect x="100" y="401" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="430" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">4. generate_model_scaffold.py</text>
+  <text x="380" y="454" text-anchor="middle" font-size="13" fill="#9a6400">model shape: one class + one process per FSM</text>
+
+  <!-- Gate 5 -->
+  <rect x="100" y="503" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="532" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">5. unit tests</text>
+  <text x="380" y="556" text-anchor="middle" font-size="13" fill="#9a6400">functional + timing assertions pass</text>
+
+  <!-- OK -->
+  <rect x="100" y="625" width="560" height="64" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
+  <text x="380" y="652" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e7e34">validate_dld_flow.py: OK</text>
+  <text x="380" y="674" text-anchor="middle" font-size="13" fill="#1e7e34">one green result proves the whole repo is consistent</text>
+
+  <!-- Arrows -->
+  <line x1="380" y1="167" x2="380" y2="192" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="269" x2="380" y2="294" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="371" x2="380" y2="396" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="473" x2="380" y2="498" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="575" x2="380" y2="620" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <text x="380" y="740" text-anchor="middle" font-size="13" fill="#5f6368">Run all gates for every IP in the repo:  python tools\validate_dld_flow.py</text>
+</svg>

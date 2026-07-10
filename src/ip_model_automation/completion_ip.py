@@ -226,13 +226,17 @@ class CompletionIpModel:
     def refill_once(self) -> None:
         snapshot = {"time": float(self.env.now), "completed": float(self.metrics["completed_commands"])}
         for tenant_id, base in self.base_tokens.items():
-            self.tokens[tenant_id].update(base)
             if self.limit_type[tenant_id] == "SOFT":
+                # APPLY_BURST: unused base tokens roll over into the burst
+                # pool, capped at the configured burst maximum — so the
+                # leftover must be read before REFILL_BASE overwrites it.
                 for name in TOKEN_NAMES:
+                    leftover = max(0.0, self.tokens[tenant_id][name])
                     self.burst_tokens[tenant_id][name] = min(
                         self.burst_max[tenant_id][name],
-                        self.burst_tokens[tenant_id][name] + max(0.0, base[name] - self.tokens[tenant_id][name]),
+                        self.burst_tokens[tenant_id][name] + leftover,
                     )
+            self.tokens[tenant_id].update(base)
         self.window_metrics.append(snapshot)
         self.metrics["refill_windows"] += 1
         self.logger.info("refill window time=%s", self.env.now)

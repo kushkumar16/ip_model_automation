@@ -186,7 +186,10 @@ States:
 - `WAIT_WINDOW`: wait for next refill boundary.
 - `ASSESS_USAGE`: capture completed count and utilization.
 - `REFILL_BASE`: restore per-window base tokens.
-- `APPLY_BURST`: apply soft-limit accumulated tokens if allowed.
+- `APPLY_BURST`: roll each soft-limit tenant's unused base tokens (as left at
+  the end of the window, before `REFILL_BASE` restores them) into its
+  accumulated burst pool, capped at the configured burst maximum. Hard-limit
+  tenants are not touched.
 - `PUBLISH_METRICS`: snapshot window metrics.
 
 Transitions:
@@ -208,6 +211,8 @@ Base tokens:
 Soft limit:
 
 - Tenant may use accumulated burst tokens up to configured burst maximum.
+- Burst accumulation source: unused base tokens at the end of each window roll
+  over into the burst pool, capped at the configured burst maximum.
 - Burst is assessed on window boundaries and may have one-window apply delay.
 
 Hard limit:

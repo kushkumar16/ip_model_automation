@@ -2,29 +2,33 @@
 """Automated DLD -> template -> model -> tests pipeline runner.
 
 Watches ``dlds/*_dld.md`` (and ``*.docx`` DLDs) for new or modified files and
-drives the ``harness/ip_generation_loop.yaml`` stages for each changed IP:
+executes the stage sequence declared in ``harness/ip_generation_loop.yaml``
+for each changed IP. The harness YAML is the single source of truth for the
+pipeline: to add, remove, or reorder a stage, edit the YAML — not this file.
+(``.docx`` DLDs are converted to markdown before the stages run.)
 
-  1. ``.docx`` DLDs are converted to markdown (``dlds/<ip>_dld.md``).
-  2. ``dld_to_template.py`` extracts a draft template + gaps report + HTML doc.
-  3. If the promoted template is missing or stale, the *template review* agent
-     stage runs (resolve ``TODO_REVIEW``, promote) — see "Agent stages" below.
-  4. Coverage (``--strict``) and lint gates run on the promoted template.
-  5. A scaffold is generated for brand-new IPs (never overwrites an existing
-     model) and a prompt pack is always regenerated.
-  6. If the model or its tests are missing/failing, the *model implementation*
-     agent stage runs.
-  7. Unit tests for the IP, then the full ``validate_dld_flow.py`` gate.
+Stage semantics (the schema comment at the top of the harness YAML is the
+authoritative reference):
 
-Agent stages (``review_template`` and ``agent_implementation`` in the harness)
-need an LLM or a human. By default the runner writes a ready-to-send prompt to
+  - ``kind: tool`` stages run their ``command`` from the repo root with
+    ``{placeholder}`` substitution ({ip}, {dld}, {template}, {model_dir}, ...).
+  - ``kind: agent`` stages (``review_template``, ``agent_implementation``)
+    need an LLM or a human. Their ``gates`` — other tool stages — decide the
+    outcome: if the gates already pass the agent is skipped; otherwise the
+    agent runs and the gates re-run, up to ``max_attempts`` (default
+    ``loop_policy.max_iterations``).
+  - ``when: model_missing`` stages are skipped once the IP has a model file
+    (scaffolds never overwrite an implemented model).
+  - ``scope: repo`` stages run once after every changed IP completes.
+
+Agent stages: by default the runner writes a ready-to-send prompt to
 ``reports/agent_requests/<ip>.<stage>.prompt.md`` and reports the IP as
 *awaiting* that stage. Pass ``--agent-cmd`` to run them unattended, e.g.::
 
     python tools/auto_ip_pipeline.py --agent-cmd "claude -p --permission-mode acceptEdits"
 
-The prompt is piped to the command's stdin. Failed validations re-invoke the
-agent with the failure log up to ``loop_policy.max_iterations`` from the
-harness config.
+The prompt is piped to the command's stdin; while the gates fail, the agent
+is re-invoked with the failure log.
 
 Change detection hashes DLD sources into ``reports/.dld_pipeline_state.json``
 (gitignored); an IP is only marked processed after its full chain passes.
@@ -37,6 +41,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -45,8 +50,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = REPO_ROOT / "tools"
 DLDS_DIR = REPO_ROOT / "dlds"
 TEMPLATES_DIR = REPO_ROOT / "templates"
-MODELS_DIR = REPO_ROOT / "src" / "ip_model_automation"
-TESTS_DIR = REPO_ROOT / "tests"
 REPORTS_DIR = REPO_ROOT / "reports"
 STATE_PATH = REPORTS_DIR / ".dld_pipeline_state.json"
 AGENT_REQUEST_DIR = REPORTS_DIR / "agent_requests"
@@ -165,52 +168,26 @@ def state_key(path: Path) -> str:
 # Stage helpers
 # --------------------------------------------------------------------------- #
 
-def run_cmd(args: list[str], label: str) -> tuple[bool, str]:
+def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
+    """Run one tool stage's harness command with {placeholder} substitution."""
+    name = stage["name"]
+    try:
+        argv = [arg.format_map(ctx) for arg in shlex.split(str(stage["command"]))]
+    except KeyError as exc:
+        raise SystemExit(f"harness stage '{name}': unknown placeholder {exc} in command")
+    if argv and argv[0] == "python":
+        argv[0] = sys.executable
     result = subprocess.run(
-        args, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-    status = "OK" if result.returncode == 0 else "FAIL"
-    print(f"  {label}: {status}")
-    return result.returncode == 0, output
-
-
-def tool_cmd(tool: str, *args: str) -> list[str]:
-    return [sys.executable, str(TOOLS_DIR / f"{tool}.py"), *args]
-
-
-def template_gates_pass(ip_name: str, dld_md: Path) -> tuple[bool, str]:
-    template_path = TEMPLATES_DIR / f"{ip_name}.template.yaml"
-    if not template_path.is_file():
-        return False, f"promoted template missing: {template_path.name}"
-    ok_lint, lint_out = run_cmd(tool_cmd("template_lint", str(template_path)), "lint_template")
-    if not ok_lint:
-        return False, lint_out
-    ok_cov, cov_out = run_cmd(
-        tool_cmd("check_template_coverage", str(template_path), str(dld_md), "--strict"),
-        "check_dld_coverage",
-    )
-    if not ok_cov:
-        return False, cov_out
-    return True, ""
-
-
-def unit_tests_pass(ip_name: str) -> tuple[bool, str]:
-    test_path = TESTS_DIR / f"test_{ip_name}.py"
-    if not test_path.is_file():
-        return False, f"missing test file: tests/test_{ip_name}.py"
-    env_path = str(REPO_ROOT / "src")
-    result = subprocess.run(
-        [sys.executable, "-m", "unittest", f"tests.test_{ip_name}"],
+        argv,
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ, "PYTHONPATH": env_path},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
     )
     output = (result.stdout or "") + (result.stderr or "")
-    print(f"  unit_tests({ip_name}): {'OK' if result.returncode == 0 else 'FAIL'}")
+    print(f"  {name}: {'OK' if result.returncode == 0 else 'FAIL'}")
     return result.returncode == 0, output
 
 
@@ -283,85 +260,154 @@ def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str)
 # Harness config
 # --------------------------------------------------------------------------- #
 
-def harness_max_iterations(default: int = 3) -> int:
+AGENT_STAGE_MARKER = "external_agent_or_manual_edit"
+
+# Prompt builders for agent stages, keyed by harness stage name.
+AGENT_PROMPT_BUILDERS = {
+    "review_template": review_prompt,
+    "agent_implementation": implementation_prompt,
+}
+
+# Conditions usable as a stage's `when:` field, keyed by condition name.
+STAGE_CONDITIONS = {
+    "model_missing": lambda ctx: not Path(ctx["model_file"]).is_file(),
+}
+
+
+def load_harness() -> dict:
     try:
         import yaml  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise SystemExit("PyYAML is required to run the pipeline. Install project requirements.") from exc
+    data = yaml.safe_load(HARNESS_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("stages"), list):
+        raise SystemExit(f"{HARNESS_PATH}: expected a YAML mapping with a 'stages' list")
+    for stage in data["stages"]:
+        if not isinstance(stage, dict) or "name" not in stage or "command" not in stage:
+            raise SystemExit(f"{HARNESS_PATH}: every stage needs 'name' and 'command'")
+    return data
 
-        data = yaml.safe_load(HARNESS_PATH.read_text(encoding="utf-8"))
-        return int(data.get("loop_policy", {}).get("max_iterations", default))
-    except Exception:
-        return default
+
+def stage_kind(stage: dict) -> str:
+    return stage.get("kind", "agent" if stage.get("command") == AGENT_STAGE_MARKER else "tool")
+
+
+def stage_context(harness: dict, ip_name: str | None = None, dld_md: Path | None = None) -> dict[str, str]:
+    """Placeholder values for harness stage commands (repo-level, plus per-IP)."""
+    inputs = harness.get("inputs", {})
+    ctx = {
+        "model_dir": str(REPO_ROOT / inputs.get("model_dir", "src/ip_model_automation")),
+        "tests_dir": str(REPO_ROOT / inputs.get("tests_dir", "tests")),
+        "prompt_pack_dir": str(REPO_ROOT / inputs.get("prompt_pack_dir", "prompt_packs")),
+        "reports_dir": str(REPO_ROOT / inputs.get("reports_dir", "reports")),
+    }
+    if ip_name is not None and dld_md is not None:
+        ctx.update(
+            ip=ip_name,
+            dld=str(dld_md),
+            template=str(TEMPLATES_DIR / f"{ip_name}.template.yaml"),
+            draft=str(TEMPLATES_DIR / f"{ip_name}.template.draft.yaml"),
+            model_file=str(Path(ctx["model_dir"]) / f"{ip_name}.py"),
+        )
+    return ctx
 
 
 # --------------------------------------------------------------------------- #
-# Per-IP pipeline
+# Per-IP pipeline (generic engine over the harness stage list)
 # --------------------------------------------------------------------------- #
 
-def process_dld(source: Path, agent_cmd: str | None, max_iterations: int) -> str:
-    """Run the pipeline for one DLD source. Returns a status string."""
+def run_gates(
+    gate_names: list[str],
+    stages_by_name: dict[str, dict],
+    ctx: dict[str, str],
+    gate_results: dict[str, bool],
+) -> tuple[bool, str]:
+    """Run an agent stage's gate stages in order; stop at the first failure."""
+    for gate_name in gate_names:
+        gate = stages_by_name.get(gate_name)
+        if gate is None:
+            raise SystemExit(f"harness: agent gate references unknown stage '{gate_name}'")
+        ok, out = run_stage_command(gate, ctx)
+        gate_results[gate_name] = ok
+        if not ok:
+            return False, out
+    return True, ""
+
+
+def run_agent_stage(
+    stage: dict,
+    ctx: dict[str, str],
+    agent_cmd: str | None,
+    stages_by_name: dict[str, dict],
+    gate_results: dict[str, bool],
+    default_attempts: int,
+) -> tuple[str, str]:
+    """Skip the agent if its gates pass; otherwise dispatch it and re-check the
+    gates, up to max_attempts. Returns (outcome, output) with outcome in
+    {'pass', 'awaiting', 'failed'}."""
+    name = stage["name"]
+    gate_names = stage.get("gates") or []
+    if not gate_names:
+        raise SystemExit(f"harness: agent stage '{name}' needs a 'gates' list")
+    ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results)
+    if ok:
+        print(f"  {name}: skipped (gates already pass)")
+        return "pass", ""
+    build_prompt = AGENT_PROMPT_BUILDERS.get(name)
+    if build_prompt is None:
+        raise SystemExit(f"harness: no prompt builder registered for agent stage '{name}'")
+    max_attempts = int(stage.get("max_attempts", default_attempts))
+    for attempt in range(1, max_attempts + 1):
+        prompt = build_prompt(ctx["ip"], f"\nAttempt {attempt}. Current gate output:\n{out[-4000:]}")
+        if not dispatch_agent(agent_cmd, ctx["ip"], name, prompt):
+            return "awaiting", ""
+        ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results)
+        if ok:
+            return "pass", ""
+    return "failed", out
+
+
+def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
+    """Run the harness's per-IP stages for one DLD source. Returns a status string."""
     dld_md = ensure_markdown_dld(source)
     ip_name = dld_tool.ip_name_from_path(dld_md)
     print(f"\n=== {ip_name} ===")
 
-    # Stage: parse_dld (draft template + gaps report + draft HTML doc)
-    ok, out = run_cmd(tool_cmd("dld_to_template", str(dld_md)), "parse_dld")
-    if not ok:
-        print(out)
-        return "failed: dld extraction"
+    ctx = stage_context(harness, ip_name, dld_md)
+    stages_by_name = {s["name"]: s for s in harness["stages"]}
+    default_attempts = int(harness.get("loop_policy", {}).get("max_iterations", 3))
+    gate_results: dict[str, bool] = {}
 
-    # Stage: review_template (agent) — only if the promoted template is missing/stale
-    gates_ok, gate_out = template_gates_pass(ip_name, dld_md)
-    if not gates_ok:
-        agent_ran = dispatch_agent(
-            agent_cmd, ip_name, "review_template", review_prompt(ip_name, f"\nCurrent gate output:\n{gate_out}")
-        )
-        if not agent_ran:
-            return "awaiting template review"
-        gates_ok, gate_out = template_gates_pass(ip_name, dld_md)
-        if not gates_ok:
-            print(gate_out)
-            return "failed: template gates after review"
-
-    template_path = TEMPLATES_DIR / f"{ip_name}.template.yaml"
-
-    # Stage: generate_scaffold — new IPs only; never clobber an implemented model
-    model_path = MODELS_DIR / f"{ip_name}.py"
-    if not model_path.is_file():
-        ok, out = run_cmd(
-            tool_cmd("generate_model_scaffold", str(template_path), "--output-dir", str(MODELS_DIR)),
-            "generate_scaffold",
-        )
-        if not ok:
-            print(out)
-            return "failed: scaffold generation"
-
-    # Stage: generate_prompt_pack
-    ok, out = run_cmd(
-        tool_cmd("generate_prompt_pack", str(template_path), "--output-dir", str(REPO_ROOT / "prompt_packs")),
-        "generate_prompt_pack",
-    )
-    if not ok:
-        print(out)
-        return "failed: prompt pack generation"
-
-    # Stage: agent_implementation + validation loop
-    tests_ok, test_out = unit_tests_pass(ip_name)
-    iteration = 0
-    while not tests_ok and iteration < max_iterations:
-        iteration += 1
-        agent_ran = dispatch_agent(
-            agent_cmd,
-            ip_name,
-            "agent_implementation",
-            implementation_prompt(ip_name, f"\nIteration {iteration}. Current failure output:\n{test_out[-4000:]}"),
-        )
-        if not agent_ran:
-            return "awaiting model implementation"
-        tests_ok, test_out = unit_tests_pass(ip_name)
-    if not tests_ok:
-        print(test_out[-2000:])
-        return f"failed: unit tests after {max_iterations} agent iterations"
-
+    for stage in harness["stages"]:
+        if stage.get("scope", "ip") != "ip":
+            continue
+        name = stage["name"]
+        when = stage.get("when")
+        if when is not None:
+            condition = STAGE_CONDITIONS.get(when)
+            if condition is None:
+                raise SystemExit(f"harness stage '{name}': unknown 'when' condition '{when}'")
+            if not condition(ctx):
+                print(f"  {name}: skipped (when: {when} is false)")
+                continue
+        if stage_kind(stage) == "agent":
+            outcome, out = run_agent_stage(stage, ctx, agent_cmd, stages_by_name, gate_results, default_attempts)
+            if outcome == "awaiting":
+                return f"awaiting {name}"
+            if outcome == "failed":
+                print(out[-2000:])
+                return f"failed: {name} gates still failing after agent attempts"
+        else:
+            if gate_results.get(name):
+                print(f"  {name}: OK (already verified as an agent gate)")
+                continue
+            ok, out = run_stage_command(stage, ctx)
+            gate_results[name] = ok
+            if not ok:
+                if stage.get("required", True):
+                    print(out[-2000:])
+                    return f"failed: {name}"
+                print(f"  {name}: FAIL (optional stage; continuing)")
     return "complete"
 
 
@@ -383,10 +429,11 @@ def main(argv: list[str]) -> int:
         "written to reports/agent_requests/ and the IP is reported as awaiting that stage.",
     )
     parser.add_argument(
-        "--skip-final-gate", action="store_true", help="Skip the repo-wide validate_dld_flow gate at the end"
+        "--skip-final-gate", action="store_true", help="Skip the repo-wide (scope: repo) harness stages at the end"
     )
     args = parser.parse_args(argv)
 
+    harness = load_harness()
     state = load_state()
     sources = [p.resolve() for p in args.dlds] if args.dlds else discover_dld_sources()
     for src in sources:
@@ -403,23 +450,29 @@ def main(argv: list[str]) -> int:
         return 0
 
     print(f"processing {len(changed)} DLD(s): {', '.join(p.name for p in changed)}")
-    max_iterations = harness_max_iterations()
     statuses: dict[str, str] = {}
     for src in changed:
-        status = process_dld(src, args.agent_cmd, max_iterations)
+        status = process_dld(src, harness, args.agent_cmd)
         statuses[src.name] = status
         if status == "complete":
             state[state_key(src)] = sha256(src)
             save_state(state)
 
     completed = [name for name, status in statuses.items() if status == "complete"]
-    if completed and not args.skip_final_gate:
+    repo_stages = [s for s in harness["stages"] if s.get("scope") == "repo"]
+    if completed and repo_stages and not args.skip_final_gate:
         print("\n=== repo-wide validation gate ===")
-        ok, out = run_cmd(tool_cmd("validate_dld_flow"), "validate_dld_flow")
-        if not ok:
-            print(out[-3000:])
-            for name in completed:
-                statuses[name] = "complete (repo-wide gate FAILED — see output)"
+        repo_ctx = stage_context(harness)
+        for stage in repo_stages:
+            ok, out = run_stage_command(stage, repo_ctx)
+            if not ok:
+                if not stage.get("required", True):
+                    print(f"  {stage['name']}: FAIL (optional stage; continuing)")
+                    continue
+                print(out[-3000:])
+                for name in completed:
+                    statuses[name] = f"complete (repo-wide gate FAILED at {stage['name']} — see output)"
+                break
 
     print("\n=== summary ===")
     for name, status in statuses.items():

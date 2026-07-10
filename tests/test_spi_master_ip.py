@@ -29,6 +29,38 @@ class TestSpiMasterIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["received_bytes"], 4)
         self.assertEqual(model.metrics["rx_overflows"], 2)
 
+    def test_empty_rx_fifo_read_returns_none(self):
+        env = simpy.Environment()
+        model = SpiMasterIpModel(env)
+        self.assertIsNone(model.read_rx())
+
+    def test_get_metrics_returns_snapshot_dict(self):
+        env = simpy.Environment()
+        model = SpiMasterIpModel(env, byte_bits=2, shift_latency=1)
+        model.write_tx(0x0F)
+        env.run(until=20)
+        snapshot = model.get_metrics()
+        self.assertIsInstance(snapshot, dict)
+        self.assertEqual(snapshot["transmitted_bytes"], 1)
+
+    def test_full_tx_fifo_drops_byte(self):
+        env = simpy.Environment()
+        model = SpiMasterIpModel(env, tx_depth=1)
+        model.write_tx(0x11)
+        model.write_tx(0x22)
+        env.run(until=1)
+        self.assertEqual(model.metrics["tx_dropped"], 1)
+
+    def test_clear_interrupt_empties_asserted_interrupts(self):
+        env = simpy.Environment()
+        model = SpiMasterIpModel(env, byte_bits=2, shift_latency=1, interrupt_latency=1)
+        model.write_tx(0xAB)
+        env.run(until=20)
+        self.assertGreaterEqual(model.metrics["interrupt_count"], 1)
+        model.clear_interrupt()
+        env.run(until=25)
+        self.assertEqual(model.interrupts, [])
+
     def test_masked_interrupt_suppresses_irq(self):
         env = simpy.Environment()
         model = SpiMasterIpModel(env, byte_bits=2, shift_latency=1, interrupt_latency=1)

@@ -127,12 +127,15 @@ python tools\check_subsystem_wiring.py
 ## Automated Pipeline
 
 `tools/auto_ip_pipeline.py` watches `dlds/*_dld.md` (and `*_dld.docx`) for new
-or modified DLDs and drives the full harness loop for each changed IP:
-docx -> markdown conversion (python-docx), draft extraction, template gates,
-scaffold (new IPs only), prompt pack, model/test generation, unit tests, and
-the repo-wide validation gate. Change detection hashes DLD content into
-`reports/.dld_pipeline_state.json`; an IP is only marked processed after its
-full chain passes.
+or modified DLDs and executes the stage sequence declared in
+`harness/ip_generation_loop.yaml` for each changed IP: docx -> markdown
+conversion (python-docx), draft extraction, template gates, scaffold (new IPs
+only), prompt pack, model/test generation, unit tests, and the repo-wide
+validation gate. The harness YAML is the single source of truth for the
+pipeline — adding, removing, or reordering a stage is a YAML edit, not a
+runner change (the stage schema is documented at the top of that file).
+Change detection hashes DLD content into `reports/.dld_pipeline_state.json`;
+an IP is only marked processed after its full chain passes.
 
 ```powershell
 python tools\auto_ip_pipeline.py                      # process every changed DLD
@@ -171,6 +174,18 @@ Run only the FSM coverage report:
 
 ```powershell
 python tools\report_model_coverage.py
+```
+
+Measure *code* coverage — which model lines the unit tests actually execute
+(distinct from the template FSM/scenario coverage above). The table lands in
+`reports\code_coverage\coverage.txt`; `--html` adds a browsable report at
+`reports\code_coverage\html\index.html`, and `--fail-under N` (total) /
+`--fail-under-file N` (each model file) turn it into a gate — the automated
+pipeline enforces 95% for both:
+
+```powershell
+python tools\run_code_coverage.py
+python tools\run_code_coverage.py --html --fail-under 95 --fail-under-file 95
 ```
 
 Generate an LLM prompt pack from a reviewed template:
@@ -286,6 +301,7 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
+- `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.

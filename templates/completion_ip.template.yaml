@@ -263,6 +263,7 @@ functionality_model:
     - A completion is emitted only after required tokens are debited.
     - WWV writes consume write tokens and read-equivalent tokens.
     - Hard-limit tenants cannot consume burst tokens.
+    - APPLY_BURST rolls a soft-limit tenant's unused base tokens into its burst pool at each window boundary, capped at the configured burst maximum (DLD leaves the accumulation source open; rollover chosen as the recorded default).
   ignored_payload_details: [nvme_completion_entry_bit_layout, data_payload_bytes]
 
 performance_model:

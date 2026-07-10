@@ -146,6 +146,28 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertEqual(len(model.window_metrics), 1)
         self.assertEqual(model.window_metrics[0]["completed"], 1.0)
 
+    def test_completion_refill_rolls_unused_base_tokens_into_burst(self):
+        env = simpy.Environment()
+        model = CompletionIpModel(env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1)
+        model.configure_tenant("T0", read=4, write=4, read_bw=16, write_bw=16, burst_read=4)
+        model.tokens["T0"]["read"] = 3.0
+        model.burst_tokens["T0"]["read"] = 0.0
+        model.refill_once()
+        self.assertEqual(model.tokens["T0"]["read"], 4.0)
+        self.assertEqual(model.burst_tokens["T0"]["read"], 3.0)
+        model.refill_once()
+        self.assertEqual(model.burst_tokens["T0"]["read"], 4.0)
+
+    def test_completion_refill_leaves_hard_limit_burst_untouched(self):
+        env = simpy.Environment()
+        model = CompletionIpModel(env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1)
+        model.configure_tenant("T0", read=4, write=4, read_bw=16, write_bw=16, limit_type="HARD", burst_read=4)
+        model.tokens["T0"]["read"] = 3.0
+        model.burst_tokens["T0"]["read"] = 0.0
+        model.refill_once()
+        self.assertEqual(model.tokens["T0"]["read"], 4.0)
+        self.assertEqual(model.burst_tokens["T0"]["read"], 0.0)
+
     def test_completion_refill_process_refills_each_window(self):
         env = simpy.Environment()
         model = CompletionIpModel(

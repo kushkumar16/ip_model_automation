@@ -466,6 +466,9 @@ def main(argv: list[str]) -> int:
         for stage in repo_stages:
             ok, out = run_stage_command(stage, repo_ctx)
             if not ok:
+                if not stage.get("required", True):
+                    print(f"  {stage['name']}: FAIL (optional stage; continuing)")
+                    continue
                 print(out[-3000:])
                 for name in completed:
                     statuses[name] = f"complete (repo-wide gate FAILED at {stage['name']} — see output)"

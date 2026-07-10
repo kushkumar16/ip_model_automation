@@ -377,6 +377,12 @@ for **every** DLD in the repo (template exists, lints, covers its DLD), then
 the model/test flow, and regenerates the readable template docs. A single
 green result proves the whole repo is consistent.
 
+Alongside the template-side FSM/scenario coverage above, `python
+tools\run_code_coverage.py` measures *code* coverage — which model lines the
+unit tests actually execute (coverage.py, table + optional `--html` report in
+`reports\code_coverage\`). It runs as an informational repo-wide stage in the
+automated pipeline; pass `--fail-under N` to use it as a hard gate.
+
 ## The automated pipeline runner
 
 `tools/auto_ip_pipeline.py` is the orchestrator that strings all of the above
@@ -446,6 +452,7 @@ flowchart TB
         T6["report_model_coverage.py"]
         T7["validate_ip_flow.py"]
         T8["validate_dld_flow.py"]
+        T9["run_code_coverage.py"]
     end
     subgraph guidance["Guidance for humans/LLMs"]
         SK["skills/ip-model-generation/"]

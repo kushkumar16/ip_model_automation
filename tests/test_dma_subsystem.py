@@ -107,6 +107,53 @@ class TestDmaSubsystemModel(unittest.TestCase):
         self.assertEqual(subsystem.metrics["descriptors_completed"], 1)
         self.assertEqual(subsystem.metrics["subsystem_irqs"], 1)
 
+    def test_qos_refill_and_metrics_wrappers(self):
+        env = simpy.Environment()
+        subsystem = make_subsystem(env)
+        subsystem.refill_qos()
+        self.assertEqual(subsystem.completion.metrics["refill_windows"], 1)
+        snapshot = subsystem.get_metrics()
+        self.assertIsInstance(snapshot, dict)
+        self.assertEqual(snapshot.get("descriptors_submitted", 0), 0)
+
+    def test_unrouted_fabric_command_counts_decode_error(self):
+        env = simpy.Environment()
+        subsystem = make_subsystem(env)
+        subsystem.interconnect.routes.clear()
+        subsystem.set_route(0x1000, 0x2000, "mem0")
+        subsystem.configure_channel(0)
+        subsystem.submit(Descriptor("d0", channel_id=0, src_addr=0x9000, dst_addr=0xA000, length_bytes=4096))
+        env.run(until=400)
+        self.assertGreaterEqual(subsystem.metrics["fabric_decode_errors"], 1)
+        self.assertEqual(subsystem.metrics["descriptors_completed"], 0)
+
+    def test_untracked_member_activity_is_ignored(self):
+        env = simpy.Environment()
+        subsystem = make_subsystem(env)
+        from ip_model_automation.common import Command
+
+        subsystem.interconnect.responses.append((0.0, Command("ghost:rd", "READ", status="mem0:OK")))
+        subsystem.completion.completed.append((0.0, Command("ghost:wr", "WRITE")))
+        subsystem.gdma.completed_ids.append("ghost")
+        env.run(until=20)
+        self.assertEqual(subsystem.metrics["arb_enqueued"], 0)
+        self.assertEqual(subsystem.metrics["completions_collected"], 0)
+        self.assertEqual(subsystem.metrics["descriptors_completed"], 0)
+
+    def test_completion_backlog_throttles_arbitration_issue(self):
+        env = simpy.Environment()
+        subsystem = make_subsystem(env, completion_backlog_limit=1)
+        subsystem.configure_channel(0)
+        subsystem.configure_qos("T0", token_budget=0.0, limit_type="HARD")
+        subsystem.submit(Descriptor("d0", channel_id=0, src_addr=0x1000, dst_addr=0x2000, length_bytes=4096))
+        env.run(until=500)
+        self.assertTrue(subsystem.issue_throttled)
+        self.assertGreaterEqual(subsystem.metrics["completion_backlog_events"], 1)
+        subsystem.configure_qos("T0", token_budget=1_000_000.0)
+        env.run(until=1500)
+        self.assertEqual(subsystem.metrics["descriptors_completed"], 1)
+        self.assertFalse(subsystem.issue_throttled)
+
     def test_multi_channel_descriptors_complete_independently(self):
         env = simpy.Environment()
         subsystem = make_subsystem(env)

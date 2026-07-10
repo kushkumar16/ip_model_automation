@@ -41,6 +41,64 @@ class TestTimerIpModel(unittest.TestCase):
         self.assertGreaterEqual(model.metrics["watchdog_timeouts"], 1)
         self.assertIn(-1, [channel_id for _, channel_id in model.interrupts])
 
+    def test_timer_clear_interrupt_drops_status_bit(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1)
+        model.configure(0, "ONE_SHOT", compare=2)
+        env.run(until=5)
+        self.assertIn(0, model.interrupt_status)
+        model.clear_interrupt(0)
+        self.assertNotIn(0, model.interrupt_status)
+
+    def test_timer_watchdog_kick_defers_timeout(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1, watchdog_latency=1)
+        model.configure_watchdog(timeout=4)
+        env.run(until=3)
+        model.kick_watchdog()
+        env.run(until=7)
+        self.assertEqual(model.metrics["watchdog_kicks"], 1)
+        self.assertEqual(model.metrics["watchdog_timeouts"], 0)
+        env.run(until=12)
+        self.assertGreaterEqual(model.metrics["watchdog_timeouts"], 1)
+
+    def test_timer_masked_interrupt_is_counted_not_asserted(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1)
+        model.interrupt_mask[0] = False
+        model.configure(0, "ONE_SHOT", compare=2)
+        env.run(until=6)
+        self.assertGreaterEqual(model.metrics["masked_events"], 1)
+        self.assertEqual(model.interrupts, [])
+        self.assertIn(0, model.interrupt_status)
+
+    def test_timer_non_configure_register_write_applies_nothing(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1)
+        model.write_register({"op": "status_read"})
+        env.run(until=3)
+        self.assertEqual(model.metrics["register_writes"], 1)
+        self.assertEqual(model.metrics["config_applied"], 0)
+        self.assertEqual(model.channels, {})
+
+    def test_timer_tick_functional_respects_prescaler(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1000, interrupt_latency=1)
+        model.configure(0, "ONE_SHOT", compare=10, prescale=4)
+        env.run(until=5)
+        for _ in range(3):
+            model.tick_functional()
+        self.assertEqual(model.metrics["effective_ticks"], 0)
+        model.tick_functional()
+        self.assertEqual(model.metrics["effective_ticks"], 1)
+
+    def test_timer_counter_ignores_tick_for_unknown_channel(self):
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1000)
+        model.effective_tick_queue.put(99)
+        env.run(until=5)
+        self.assertEqual(model.metrics["counter_updates"], 0)
+
     def test_timer_debug_freeze_holds_and_resumes_counter(self):
         env = simpy.Environment()
         model = TimerIpModel(env, tick_period=1, interrupt_latency=1, debug_freeze_latency=1)

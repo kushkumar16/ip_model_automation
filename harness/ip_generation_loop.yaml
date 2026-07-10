@@ -77,10 +77,10 @@ stages:
     scope: repo
     notes: FSM/scenario coverage declared in the templates.
   - name: code_coverage
-    command: python tools/run_code_coverage.py
+    command: python tools/run_code_coverage.py --fail-under 95
     required: false
     scope: repo
-    notes: Line coverage of src/ip_model_automation from the unit tests (informational; report in reports/code_coverage/).
+    notes: Line coverage of src/ip_model_automation from the unit tests (report in reports/code_coverage/; warns below 95% without blocking the pipeline).
   - name: full_validation
     command: python tools/validate_dld_flow.py
     required: true

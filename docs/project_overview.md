@@ -380,7 +380,11 @@ green result proves the whole repo is consistent.
 ## The automated pipeline runner
 
 `tools/auto_ip_pipeline.py` is the orchestrator that strings all of the above
-together so you don't have to run each tool by hand:
+together so you don't have to run each tool by hand. It is a generic stage
+engine: the stage sequence it executes — commands, agent steps and their
+gates, skip conditions, per-IP vs. repo-wide scope — is declared in
+`harness/ip_generation_loop.yaml`, which is the single source of truth for
+the pipeline. Changing the pipeline is a YAML edit, not a runner change:
 
 ```mermaid
 flowchart LR
@@ -407,11 +411,13 @@ Details worth knowing:
   its full chain passes — so a half-finished IP is automatically picked up
   again next run.
 - **The two agent steps** (template review, model implementation) are the
-  only places judgment is needed. Without `--agent-cmd`, the runner writes
-  the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and reports
-  the IP as *awaiting*. With `--agent-cmd`, it pipes the prompt to your LLM
-  command and, when validation fails, re-invokes it with the failure log —
-  up to `loop_policy.max_iterations` from `harness/ip_generation_loop.yaml`.
+  only places judgment is needed. Each declares `gates:` in the harness YAML
+  — tool stages whose pass/fail decides everything: if the gates already
+  pass, the agent is skipped entirely. Without `--agent-cmd`, the runner
+  writes the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and
+  reports the IP as *awaiting*. With `--agent-cmd`, it pipes the prompt to
+  your LLM command and, while the gates fail, re-invokes it with the failure
+  log — up to `max_attempts` per stage (default `loop_policy.max_iterations`).
 
 ## Beyond single IPs: subsystems
 

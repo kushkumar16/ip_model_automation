@@ -1,6 +1,28 @@
 name: ip_generation_loop
 description: Template-driven loop for generating and validating SimPy IP models.
 
+# This file is the single source of truth for the pipeline stage sequence.
+# tools/auto_ip_pipeline.py executes the `stages` list below in order, once
+# per changed DLD; stages with `scope: repo` run once at the end instead.
+# To add, remove, or reorder a stage, edit this file — not the runner.
+#
+# Stage fields:
+#   kind: tool (default) — `command` runs as a subprocess from the repo root
+#         with {placeholder} substitution; `python` resolves to the current
+#         interpreter. Placeholders: {ip} {dld} {template} {draft}
+#         {model_dir} {tests_dir} {prompt_pack_dir} {reports_dir}.
+#         agent — an LLM/human step driven by --agent-cmd (or a prompt
+#         request written to reports/agent_requests/).
+#   gates: agent stages only — tool stages that decide the outcome. If they
+#         all pass the agent is skipped; otherwise the agent runs and the
+#         gates are re-checked after each attempt. A gate that passed here is
+#         not re-run when reached in the main sequence.
+#   max_attempts: agent stages only — attempts before the pipeline fails;
+#         defaults to loop_policy.max_iterations.
+#   when: model_missing — run the stage only if the IP has no model file yet.
+#   scope: repo — run once after all changed IPs complete, not per IP
+#         (skipped by --skip-final-gate).
+
 inputs:
   dld_glob: dlds/*_dld.md
   template_glob: templates/*.template.yaml
@@ -18,9 +40,12 @@ stages:
     required: true
     notes: Extract draft template + gaps report from the DLD.
   - name: review_template
+    kind: agent
     command: external_agent_or_manual_edit
     required: false
-    notes: Agent replaces every TODO_REVIEW in the draft using only DLD-stated behavior, then promotes the draft to {template}.
+    gates: [check_dld_coverage, lint_template]
+    max_attempts: 1
+    notes: Agent replaces every TODO_REVIEW in the draft using only DLD-stated behavior, then promotes the draft to {template}. Skipped when the promoted template already passes both gates.
   - name: check_dld_coverage
     command: python tools/check_template_coverage.py {template} {dld} --strict
     required: true
@@ -31,19 +56,29 @@ stages:
   - name: generate_scaffold
     command: python tools/generate_model_scaffold.py {template} --output-dir {model_dir}
     required: true
+    when: model_missing
+    notes: New IPs only — never overwrites an existing model implementation.
   - name: generate_prompt_pack
     command: python tools/generate_prompt_pack.py {template} --output-dir {prompt_pack_dir}
     required: true
   - name: agent_implementation
+    kind: agent
     command: external_agent_or_manual_edit
     required: false
-    notes: Agent fills model and tests using prompt pack and agent contract.
+    gates: [unit_tests]
+    notes: Agent fills model and tests using prompt pack and agent contract; re-invoked with the failure log while unit_tests fails.
+  - name: unit_tests
+    command: python -m unittest tests.test_{ip}
+    required: true
+    notes: Per-IP unit tests — the gate that drives the agent_implementation loop.
   - name: coverage_report
     command: python tools/report_model_coverage.py
     required: true
+    scope: repo
   - name: full_validation
     command: python tools/validate_dld_flow.py
     required: true
+    scope: repo
     notes: Runs the DLD->template coverage gate then the model/test flow.
 
 loop_policy:

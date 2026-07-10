@@ -77,10 +77,10 @@ stages:
     scope: repo
     notes: FSM/scenario coverage declared in the templates.
   - name: code_coverage
-    command: python tools/run_code_coverage.py --fail-under 95
+    command: python tools/run_code_coverage.py --fail-under 95 --fail-under-file 95
     required: true
     scope: repo
-    notes: Hard gate — line coverage of src/ip_model_automation from the unit tests must stay at 95%+ (report in reports/code_coverage/).
+    notes: Hard gate — line coverage of src/ip_model_automation from the unit tests must stay at 95%+ in total and per model file (report in reports/code_coverage/).
   - name: full_validation
     command: python tools/validate_dld_flow.py
     required: true

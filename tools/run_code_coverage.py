@@ -8,12 +8,14 @@ coverage declared in the templates.
 
 Output lands in reports/code_coverage/ (gitignored): coverage.txt always,
 plus a browsable HTML report with --html. Exit code is nonzero if the tests
-fail or total coverage is below --fail-under.
+fail, total coverage is below --fail-under, or any single model file is
+below --fail-under-file.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -52,6 +54,12 @@ def main(argv: list[str]) -> int:
         default=0.0,
         help="Fail if total line coverage is below this percentage (default: 0, informational)",
     )
+    parser.add_argument(
+        "--fail-under-file",
+        type=float,
+        default=0.0,
+        help="Fail if any single model file's line coverage is below this percentage (default: 0, informational)",
+    )
     args = parser.parse_args(argv)
 
     require_coverage()
@@ -87,9 +95,33 @@ def main(argv: list[str]) -> int:
             return html.returncode
         print(f"written: {(OUTPUT_DIR / 'html' / 'index.html').relative_to(REPO_ROOT)}")
 
+    below_threshold = per_file_shortfalls(env, args.fail_under_file)
+    for path, percent in below_threshold:
+        print(f"FAIL: {path} at {percent:.1f}% (below --fail-under-file={args.fail_under_file})")
+
     if report.returncode != 0:
         print(f"FAIL: total coverage below --fail-under={args.fail_under}")
+    if below_threshold:
+        return 2
     return report.returncode
+
+
+def per_file_shortfalls(env: dict[str, str], threshold: float) -> list[tuple[str, float]]:
+    """Return (path, percent) for every measured file below the threshold."""
+    if threshold <= 0.0:
+        return []
+    json_path = OUTPUT_DIR / "coverage.json"
+    result = run([sys.executable, "-m", "coverage", "json", "-o", str(json_path)], env)
+    if result.returncode != 0:
+        print((result.stdout or "") + (result.stderr or ""))
+        raise SystemExit("coverage json export failed; cannot apply --fail-under-file")
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    shortfalls = [
+        (path, summary)
+        for path, entry in sorted(data.get("files", {}).items())
+        if (summary := float(entry["summary"]["percent_covered"])) < threshold
+    ]
+    return shortfalls
 
 
 if __name__ == "__main__":

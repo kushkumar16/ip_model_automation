@@ -179,12 +179,13 @@ python tools\report_model_coverage.py
 Measure *code* coverage — which model lines the unit tests actually execute
 (distinct from the template FSM/scenario coverage above). The table lands in
 `reports\code_coverage\coverage.txt`; `--html` adds a browsable report at
-`reports\code_coverage\html\index.html`, and `--fail-under N` turns it into a
-gate:
+`reports\code_coverage\html\index.html`, and `--fail-under N` (total) /
+`--fail-under-file N` (each model file) turn it into a gate — the automated
+pipeline enforces 95% for both:
 
 ```powershell
 python tools\run_code_coverage.py
-python tools\run_code_coverage.py --html --fail-under 90
+python tools\run_code_coverage.py --html --fail-under 95 --fail-under-file 95
 ```
 
 Generate an LLM prompt pack from a reviewed template:

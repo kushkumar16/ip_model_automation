@@ -6,9 +6,10 @@ order:
 1. [What does this system do for me?](#part-1--what-this-system-does-for-you)
 2. [How do I generate a model and unit tests from my DLD?](#part-2--how-to-go-from-a-dld-to-a-model--tests)
 3. [What actually happens in the background?](#part-3--how-it-works-behind-the-scenes)
+4. [Show me one real IP, end to end.](#part-4--worked-example-mailbox_ip-end-to-end)
 
 The exact CLI command reference lives in the [README](../README.md). Current
-project status is at the [end of this document](#part-4--current-status).
+project status is at the [end of this document](#part-5--current-status).
 
 > **Prefer Word?** This document also exists as
 > [project_overview.docx](project_overview.docx) with all diagrams embedded —
@@ -492,10 +493,210 @@ flowchart TB
 
 ---
 
-# Part 4 — Current status
+# Part 4 — Worked example: `mailbox_ip`, end to end
 
-*As of 2026-07-09: all gates green — `validate_dld_flow.py` OK, 60 unit tests
-passing.*
+`mailbox_ip` was added to this repo through the exact pipeline described in
+Parts 2 and 3 — a brand-new DLD in, a validated model and tests out. Every
+artifact below exists in the repo, so you can open each file and follow along.
+
+## The input: one markdown DLD
+
+[dlds/mailbox_ip_dld.md](../dlds/mailbox_ip_dld.md) describes a multi-channel
+inter-processor mailbox in ordinary prose: purpose and scope, four interfaces,
+five FSMs with their states, a per-FSM timing table, and an honest **Open
+Items** list. The parts the extractor will lean on look like this:
+
+```text
+### 6.2 Message Push FSM
+
+Role: Accept sender messages and enqueue them into the channel FIFO.
+
+States:
+- IDLE
+- ACCEPT_MESSAGE
+- CHECK_SPACE
+- ENQUEUE
+- REJECT_FULL
+
+| FSM/process      | Runs as                      | Delay model                       |
+| ---              | ---                          | ---                               |
+| Message Push FSM | Parallel per-channel process | Accept message: 1 cycle = 2 ns. … |
+```
+
+And what the author *didn't* know yet (section 12, Open Items): the number of
+channels, message width, FIFO depth per channel, interrupt target routing, and
+overflow-error behavior. These stay visible through the whole flow instead of
+being silently guessed.
+
+## Step 1 — extract a draft spec + gaps report
+
+```powershell
+python tools\dld_to_template.py dlds\mailbox_ip_dld.md
+```
+
+```text
+wrote draft:  templates\mailbox_ip.template.draft.yaml
+wrote report: reports\mailbox_ip.gaps.md
+wrote doc:    reports\template_docs\mailbox_ip.template.draft.html
+Next: resolve TODO_REVIEW markers, lint, check coverage, then promote.
+```
+
+The extractor found the mechanical facts on its own, and flagged exactly the
+judgment-needing parts (this is the real report):
+
+```text
+## Extracted
+- FSMs (5): register_access, message_push, message_pop, doorbell, interrupt_notify
+- Interfaces (4): register_if, sender_message_if, receiver_message_if, interrupt_output_if
+- Declared fsm_count: 5
+
+## Missing / To Review
+- commands: not derivable from DLD; TODO_REVIEW placeholder emitted
+- test_scenarios: author from DLD behavior; TODO_REVIEW placeholder emitted
+- functionality_model.invariants/apis/state_variables: complete from DLD
+
+## DLD Open Items
+- Number of mailbox channels.
+- Message width.
+- FIFO depth per channel.
+- Interrupt target routing policy.
+- Whether an overflow raises an error interrupt.
+```
+
+## Step 2 — review: resolve every `TODO_REVIEW`
+
+A reviewer (human or LLM under the contract) replaced each marker using only
+DLD-stated behavior. For example, the DLD's Message Flow section ("a message is
+accepted only when the target channel FIFO has space; a full channel applies
+backpressure") became this reviewed command entry:
+
+```yaml
+- name: SEND_MESSAGE
+  description: Sender writes a message into a channel FIFO.
+  fields: [channel_id, message]
+  valid_conditions: [channel_enabled, fifo_has_space]
+  completion_conditions: [message_enqueued]
+  error_conditions: [fifo_full]
+  functional_effects: [enqueue_message, raise_doorbell]
+  timing_effects: [push_delay]
+```
+
+The unresolved Open Items were handled the conservative way: channel count and
+FIFO depth became **model constructor parameters** with bounded defaults
+(`num_channels=4`, `fifo_depth=8`, recorded in the template's `queues:`
+section), so experiments can sweep them and nothing is hard-wired on a guess.
+
+## Step 3 — pass the gates, promote to golden
+
+```powershell
+python tools\check_template_coverage.py templates\mailbox_ip.template.draft.yaml dlds\mailbox_ip_dld.md --strict
+python tools\template_lint.py templates\mailbox_ip.template.yaml
+```
+
+For `mailbox_ip` these proved: all five DLD FSM names and the declared
+`fsm_count: 5` are captured, every state list matches, zero `TODO_REVIEW`
+markers remain, and the YAML satisfies the schema/contract. The draft was then
+renamed to the golden
+[templates/mailbox_ip.template.yaml](../templates/mailbox_ip.template.yaml) —
+from here on, the DLD is never read again.
+
+## Step 4 — scaffold + implement the model
+
+```powershell
+python tools\generate_model_scaffold.py templates\mailbox_ip.template.yaml --output-dir src\ip_model_automation
+```
+
+Each of the five template FSMs became one concurrent SimPy process in
+[src/ip_model_automation/mailbox_ip.py](../src/ip_model_automation/mailbox_ip.py)
+(the process/queue picture is in Part 3, "What a generated model looks like" —
+also standalone at [diagrams/07_example_mailbox_model.svg](diagrams/07_example_mailbox_model.svg)).
+Here is the real
+`message_push` process — note how every line traces back to the template: the
+state names, the `message_fifo` bounded queue, the doorbell hand-off, and the
+`REJECT_FULL` drop path:
+
+```python
+def message_push_process(self):
+    while True:
+        self.fsm_state["message_push"] = "IDLE"
+        channel_id, message = yield self.sender_if.get()
+        self.fsm_state["message_push"] = "ACCEPT_MESSAGE"
+        yield self.env.timeout(self.lat["push"])
+        self.fsm_state["message_push"] = "CHECK_SPACE"
+        fifo = self.message_fifos[channel_id]
+        if len(fifo) < self.fifo_depth:
+            fifo.append(message)
+            self.fsm_state["message_push"] = "ENQUEUE"
+            self.metrics["enqueued_messages"] += 1
+            yield self.doorbell_queue.put(channel_id)
+        else:
+            self.fsm_state["message_push"] = "REJECT_FULL"
+            self.metrics["dropped_on_full"] += 1
+            self.logger.warning("channel fifo full channel=%s message dropped", channel_id)
+```
+
+## Step 5 — unit tests from the template's scenarios
+
+The template's `test_scenarios:` section is the test plan. Its second scenario:
+
+```yaml
+- name: full_fifo_applies_backpressure
+  description: Sending beyond FIFO depth drops or stalls messages on a full channel.
+  input_sequence: [CONFIG_CHANNEL_0, SEND_MESSAGE_BURST]
+  expected_functional_behavior: [dropped_on_full_counted]
+  fsm_coverage: [message_push.CHECK_SPACE, message_push.REJECT_FULL]
+```
+
+became this test in [tests/test_mailbox_ip.py](../tests/test_mailbox_ip.py):
+
+```python
+def test_full_fifo_applies_backpressure(self):
+    env = simpy.Environment()
+    model = MailboxIpModel(env, fifo_depth=4)
+    model.set_receiver_enabled(False)
+    model.configure_channel(0)
+    for index in range(6):
+        model.send_message(0, f"m{index}")
+    env.run(until=20)
+    self.assertEqual(model.metrics["enqueued_messages"], 4)
+    self.assertEqual(model.metrics["dropped_on_full"], 2)
+```
+
+Six sends into a depth-4 FIFO with the receiver stalled: exactly 4 enqueue,
+exactly 2 hit `REJECT_FULL` — the DLD's backpressure statement, now executable.
+
+## Step 6 — the repo-wide gate
+
+```powershell
+python tools\validate_dld_flow.py
+```
+
+Green means, for `mailbox_ip` specifically: its template lints and covers its
+DLD, the scaffold check finds the model class with one process per FSM, every
+FSM appears in a test scenario, and its unit tests pass alongside the rest of
+the suite. From that point `mailbox_ip` is a first-class citizen — it was later
+reused unchanged as the doorbell source inside the `mailbox_irq_subsystem`.
+
+## Where each DLD statement ended up
+
+| DLD says | Template captures it as | Model implements it | Test proves it |
+| --- | --- | --- | --- |
+| "A full channel applies backpressure to the sender" (§4.2) | `SEND_MESSAGE.error_conditions: [fifo_full]`; `queues.message_fifo.blocking_behavior: backpressure` | `message_push_process` `REJECT_FULL` branch | `test_full_fifo_applies_backpressure` |
+| "Enqueue precedes doorbell; doorbell precedes interrupt" (§11) | `sequential_paths: message_to_interrupt_path` | `doorbell_queue` → `interrupt_pending_queue` hand-offs | `test_message_enqueue_delivers_and_interrupts` |
+| "Doorbell interrupt is level, asserted until software clears" (§4.4) | invariant: "stays asserted until software clears it" | `clear_interrupt()` API + `doorbell_status` set | subsystem tests (`mailbox_irq_subsystem`) |
+| Per-FSM cycle counts (§11 timing table) | `timing_model.fsm_process_delays` | latency constructor parameters (`self.lat`) | timing assertions in per-IP tests |
+| Open Items: channel count, FIFO depth (§12) | gaps report + `queues.message_fifo.depth` | `num_channels` / `fifo_depth` constructor parameters | swept by `run_experiments.py` scenarios |
+
+One footnote: this walkthrough shows the manual, stage-by-stage path so each
+artifact is visible. Today the automated runner does all of it from the DLD
+drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
+
+---
+
+# Part 5 — Current status
+
+*As of 2026-07-12: all gates green — `validate_dld_flow.py` OK, full unit
+suite passing (run it for the current count).*
 
 ## Modeled IPs (9)
 

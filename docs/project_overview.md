@@ -344,12 +344,7 @@ Every model also ships with:
   public export surface: `ip.py`.
 - Per-IP tests in `tests/test_<ip>.py`, derived from the template's
   `test_scenarios`.
-- A written coding style guide,
-  [skills/ip-model-generation/references/coding_style.md](../skills/ip-model-generation/references/coding_style.md),
-  codifies formatting (ruff, 120 columns, sorted imports) and the model/test
-  structure conventions. It is enforced as a hard repo-wide pipeline gate —
-  `python tools\check_code_style.py` (add `--fix` to auto-repair) — and every
-  prompt pack instructs the implementing agent to follow it.
+- Every Python file follows the written coding style guide (next section).
 
 Run the whole test suite from the repo root:
 
@@ -357,6 +352,57 @@ Run the whole test suite from the repo root:
 $env:PYTHONPATH="$PWD\src"
 python -m unittest discover -s tests
 ```
+
+### Coding style
+
+All Python code in `src/`, `tools/`, and `tests/` follows one written style
+guide:
+[skills/ip-model-generation/references/coding_style.md](../skills/ip-model-generation/references/coding_style.md).
+It has two halves:
+
+**Machine-enforced rules** — configured in `ruff.toml` at the repo root and
+checked by [ruff](https://docs.astral.sh/ruff/) (linter + formatter in one
+tool, installed via `requirements.txt`):
+
+- 120-column lines, double quotes, four-space indentation, trailing commas in
+  multi-line literals (applied by `ruff format` — never hand-format against it).
+- No unused imports or variables, no ambiguous single-letter names
+  (pycodestyle + pyflakes rules `E`, `W`, `F`).
+- Imports sorted in three groups — stdlib, third-party (`simpy`, `yaml`),
+  first-party (`ip_model_automation`) — each alphabetized (rule `I`); models
+  inside the package use relative imports (`from .common import ...`).
+
+**Structure conventions** — the shape every model and test file shares,
+checked by the scaffold/validation gates and review:
+
+- Model class `<Ip>Model` with a short docstring; constructor order is `env`
+  first, then `<operation>_latency` parameters (defaulted from the template's
+  timing model), behavioral knobs, and `log_level`/`log_file` last.
+- One SimPy process method per template FSM, named `<fsm>_process`, started in
+  the constructor with `env.process(...)`.
+- Observable state for tests: a `metrics` counter dict (snake_case keys) and,
+  where useful, an `fsm_state` dict keyed by FSM name.
+- Logging via `get_ip_logger` with lazy `%s` formatting (never f-strings in
+  log calls), at the documented levels (DEBUG transitions, INFO lifecycle,
+  WARNING expected stalls, ERROR invalid paths).
+- Tests use `unittest`, named after the template's `test_scenarios`, assert on
+  metrics/completions/state — not log output — and pass small explicit latency
+  overrides so they run in a few simulated ticks.
+
+One command checks all of it, and the automated pipeline runs the same command
+as a required repo-wide `code_style` stage (a hard gate, right before the
+coverage gate):
+
+```powershell
+python tools\check_code_style.py          # check — what the pipeline runs
+python tools\check_code_style.py --fix    # apply auto-fixes and reformat
+```
+
+New models inherit the style at generation time: every prompt pack carries a
+"Coding Style" section pointing the implementing agent (human or LLM) at the
+guide, and the generation rules in
+`skills/ip-model-generation/references/model_generation_rules.md` include the
+style check in their validation commands.
 
 ## The gates: what "validated" actually means
 
@@ -384,11 +430,12 @@ for **every** DLD in the repo (template exists, lints, covers its DLD), then
 the model/test flow, and regenerates the readable template docs. A single
 green result proves the whole repo is consistent.
 
-Alongside the template-side FSM/scenario coverage above, `python
-tools\run_code_coverage.py` measures *code* coverage — which model lines the
+Two more repo-wide hard gates run in the automated pipeline alongside the
+chain above: `python tools\check_code_style.py` (ruff lint + format — the
+coding style guide's mechanical half) and `python tools\run_code_coverage.py
+--fail-under 95 --fail-under-file 95` — *code* coverage, which model lines the
 unit tests actually execute (coverage.py, table + optional `--html` report in
-`reports\code_coverage\`). It runs as an informational repo-wide stage in the
-automated pipeline; pass `--fail-under N` to use it as a hard gate.
+`reports\code_coverage\`), enforced at 95%+ both in total and per model file.
 
 ## The automated pipeline runner
 
@@ -733,6 +780,9 @@ suite passing (run it for the current count).*
   subsystems.
 - The change-driven runner (`auto_ip_pipeline.py`), readable template docs
   (Markdown + HTML), and the performance-experiments layer are in place.
+- A written coding style guide with a ruff-based `code_style` hard gate keeps
+  all model, tool, and test code on one convention; prompt packs carry the
+  style rules so newly generated models follow it from the start.
 - Extractor calibration holds for every golden IP (FSM name set + count
   reproduce exactly).
 

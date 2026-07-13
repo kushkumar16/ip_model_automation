@@ -1,7 +1,32 @@
 # IP Model Generation Agent Contract
 
 Use this contract for any human, LLM, or scripted agent that implements an IP
-model from a prompt pack.
+model from a prompt pack. The pipeline is agent-agnostic: models and tests may
+be written by any vendor's coding agent (Claude, Codex, Gemini, an in-house
+agent, ...) or by a human — the gates judge the output, not the author.
+
+## Runtime Requirements (any vendor)
+
+`tools/auto_ip_pipeline.py` drives agent stages by piping a self-contained
+prompt to a shell command's stdin. To plug in, an agent command must:
+
+- run **non-interactively** (headless / auto-approve mode — no prompts for
+  permission or input),
+- **read the prompt from stdin** (the prompt is also saved to
+  `reports/agent_requests/<ip>.<stage>.prompt.md` for manual replay),
+- be able to **create and edit files** under the repo root (model, tests,
+  template),
+- **exit when finished** — pass/fail is decided by the stage's gates
+  (unit tests, lint, coverage), not by the agent's exit code; while a gate
+  fails, the agent is re-invoked with the failure log appended, up to
+  `max_attempts`.
+
+Named commands live in `harness/ip_generation_loop.yaml` under
+`agent_profiles` (select with `--agent <name>`); any other command can be
+passed raw via `--agent-cmd "..."`. The prompt pack plus this contract are the
+complete task description — an agent needs no other repo context, and the
+coding style gate (`python tools/check_code_style.py`) holds every agent's
+output to the same conventions.
 
 ## Inputs
 

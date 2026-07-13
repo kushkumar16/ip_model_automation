@@ -13,7 +13,10 @@ project status is at the [end of this document](#part-5--current-status).
 
 > **Prefer Word?** This document also exists as
 > [project_overview.docx](project_overview.docx) with all diagrams embedded —
-> same content, shareable outside the repo.
+> same content, shareable outside the repo. This Markdown file is the canonical
+> source; the docx is a hand-maintained rendering of it, kept honest by a
+> provenance check (`python tools/check_overview_sync.py`) that fails if the
+> docx drifts from this file.
 >
 > **Standalone diagrams:** every flow diagram in this document also exists as
 > a plain SVG image in [docs/diagrams/](diagrams/) — open
@@ -255,9 +258,18 @@ flowchart TB
 ```
 
 Why this matters: a reviewer signs off the template **once**, and everything
-downstream (model, tests, docs, experiments) is a faithful function of that
-reviewed artifact. If the model did something the template doesn't say, that's
-a bug — not a judgment call.
+downstream (model, tests, docs, experiments) derives from that reviewed
+artifact. The **structure** is machine-enforced end to end — an FSM, queue,
+resource, or scenario the model has but the template doesn't (or vice versa) is
+a gate failure, not a judgment call (see the gate chain below). The template's
+**numeric** timing and queue depths are the declared reference the implementer
+carries into the model; the linter checks they are internally coherent (a
+queue's declared capacity is real; an operation's `ns` equals `cycles ×
+cycle_time_ns`), but note that the numbers are not asserted equal to the model's
+constructor defaults — models routinely default latencies low so unit tests run
+in a few simulated ticks and take the template's values as overrides. So:
+structure is provably faithful; timing is a coherent, reviewed reference rather
+than a machine-verified equality.
 
 ## Stage 0: DLD → reviewed template
 

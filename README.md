@@ -21,7 +21,7 @@ behavior from the DLD.
 | `tests/` | Per-IP unit tests and workflow tests. |
 | `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. |
 | `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
-| `docs/` | Project documentation: `project_overview.md` (single consolidated doc), `project_overview.docx` (Word version with embedded diagrams), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
+| `docs/` | Project documentation: `project_overview.md` (single consolidated doc, **canonical source**), `project_overview.docx` (hand-maintained Word rendering of the md, kept in sync by `tools/check_overview_sync.py`), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
 | `tools/` | Pipeline tools: extraction, gates, generators, validation, automation. |
 | `schemas/`, `examples/` | Template contract schema and authoring examples. |
 | `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contract. |
@@ -324,6 +324,7 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
+- `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).
 - `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).

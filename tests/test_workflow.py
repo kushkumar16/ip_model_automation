@@ -181,6 +181,18 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
         self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
 
+    def test_overview_docx_tracks_markdown(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "check_overview_sync.py"
+        spec = importlib.util.spec_from_file_location("check_overview_sync", tool_path)
+        tool = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(tool)
+
+        # The docx must carry a source stamp matching the current Markdown, so a
+        # Markdown edit that forgets to re-sync the Word copy fails here.
+        self.assertEqual(tool.check(), [], "project_overview.docx has drifted from project_overview.md")
+
     def test_subsystem_wiring_check_passes_for_repo(self):
         repo_root = Path(__file__).resolve().parents[1]
         checker_path = repo_root / "tools" / "check_subsystem_wiring.py"

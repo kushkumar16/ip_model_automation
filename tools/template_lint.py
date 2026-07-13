@@ -1,379 +1,194 @@
 #!/usr/bin/env python3
-"""Dependency-free lint checks for IP model templates.
+"""Contract checks for IP model templates.
 
-The linter intentionally enforces the generation contract more tightly than a
-generic YAML parser would. It checks the modeling fields that must be present
-before an LLM/code generator is allowed to create SimPy models and tests.
+The template contract is enforced in two layers, and this tool runs both:
+
+1. **Structure** — the JSON Schema at ``schemas/ip_model_template.schema.json``
+   is the single source of truth for the *shape* of a template: which sections
+   and fields must exist, their types, and simple value constraints (e.g. a
+   queue ``depth`` is a positive integer or the literal ``unbounded``, and an
+   unbounded queue must carry a ``depth_note``). The schema is validated with
+   ``jsonschema`` — it is not decorative documentation.
+
+2. **Cross-field semantics** — the checks below that JSON Schema cannot express:
+   the declared ``fsm_count`` matching the number of FSMs, every FSM having a
+   timing entry and appearing in a test scenario, and the arbitration-IP
+   sub-contract. Each rule lives in exactly one layer, so the schema and this
+   file cannot drift apart.
+
+Both layers operate on the same parsed mapping (``yaml.safe_load``); nothing
+here parses YAML by hand.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
-REQUIRED_TOP_LEVEL = [
-    "ip",
-    "interfaces",
-    "commands",
-    "fsm_processes",
-    "fsm_relationships",
-    "timing_model",
-    "functionality_model",
-    "performance_model",
-    "test_scenarios",
-]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCHEMA_PATH = REPO_ROOT / "schemas" / "ip_model_template.schema.json"
 
 
-REQUIRED_PERFORMANCE_FIELDS = [
-    "language: python",
-    "library: simpy",
-    "model_functionality: true",
-    "model_fsm_processes: true",
-    "metrics:",
-]
+def require_deps():
+    try:
+        import yaml  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise SystemExit("PyYAML is required. Install project requirements before running this tool.") from exc
+    try:
+        import jsonschema  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise SystemExit("jsonschema is required. Install project requirements before running this tool.") from exc
+    return yaml, jsonschema
 
 
-REQUIRED_FUNCTIONALITY_FIELDS = [
-    "implemented_in_simpy: true",
-    "state_variables:",
-    "apis:",
-    "invariants:",
-]
+def load_template(path: Path, yaml) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: template did not parse to a mapping")
+    return data
 
 
-def indent_of(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
+# --------------------------------------------------------------------------- #
+# Layer 1: structure (JSON Schema)
+# --------------------------------------------------------------------------- #
+def schema_errors(template: dict[str, Any], jsonschema) -> list[str]:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    errors: list[str] = []
+    for error in sorted(validator.iter_errors(template), key=lambda e: list(e.absolute_path)):
+        location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+        errors.append(f"schema[{location}]: {error.message}")
+    return errors
 
 
-def top_level_keys(text: str) -> set[str]:
-    keys: set[str] = set()
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        if not line or line.lstrip().startswith("#") or raw_line[0].isspace():
+# --------------------------------------------------------------------------- #
+# Layer 2: cross-field semantics (not expressible in JSON Schema)
+# --------------------------------------------------------------------------- #
+def fsm_names(template: dict[str, Any]) -> list[str]:
+    return [str(fsm.get("name")) for fsm in template.get("fsm_processes", []) if isinstance(fsm, dict)]
+
+
+def semantic_errors(template: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    names = fsm_names(template)
+
+    if len(names) != len(set(names)):
+        errors.append("fsm_processes: duplicate FSM names found")
+
+    declared = template.get("fsm_relationships", {}).get("fsm_count")
+    if isinstance(declared, int) and declared != len(names):
+        errors.append(f"fsm_relationships: fsm_count={declared} but fsm_processes defines {len(names)} FSMs")
+
+    # every FSM has exactly one timing entry, and no timing entry names an unknown FSM
+    timing_fsms = [
+        str(entry.get("fsm"))
+        for entry in template.get("timing_model", {}).get("fsm_process_delays", [])
+        if isinstance(entry, dict)
+    ]
+    for missing in sorted(set(names) - set(timing_fsms)):
+        errors.append(f"timing_model: missing fsm_process_delays entry for FSM `{missing}`")
+    for extra in sorted(set(timing_fsms) - set(names)):
+        errors.append(f"timing_model: fsm_process_delays entry for unknown FSM `{extra}`")
+    for entry in template.get("timing_model", {}).get("fsm_process_delays", []):
+        if not isinstance(entry, dict):
             continue
-        if ":" in line:
-            keys.add(line.split(":", 1)[0].strip())
-    return keys
+        ops = entry.get("operations", [])
+        if not ops:
+            errors.append(f"timing_model.{entry.get('fsm')}: missing `operations`")
+            continue
+        for op in ops:
+            if not isinstance(op, dict) or "cycles" not in op or "ns" not in op:
+                errors.append(f"timing_model.{entry.get('fsm')}: each operation must include `cycles` and `ns`")
+                break
+
+    # every FSM must appear in at least one test scenario's fsm_coverage
+    covered = " ".join(
+        str(item)
+        for scenario in template.get("test_scenarios", [])
+        if isinstance(scenario, dict)
+        for item in scenario.get("fsm_coverage", [])
+    )
+    for name in names:
+        if name and f"{name}." not in covered and name not in covered.split():
+            errors.append(f"test_scenarios: no scenario covers FSM `{name}`")
+
+    return errors
 
 
-def section_lines(text: str, section: str) -> list[str]:
-    lines = text.splitlines()
-    start = None
-    for idx, line in enumerate(lines):
-        if line == f"{section}:":
-            start = idx + 1
-            break
-    if start is None:
+# --------------------------------------------------------------------------- #
+# arbitration_ip sub-contract: concepts that must be modeled by name.
+# Operates on the flattened set of keys/values from the parsed template, so it
+# never touches raw text.
+# --------------------------------------------------------------------------- #
+ARBITRATION_REQUIRED = [
+    "topology",
+    "port_mode",
+    "pending_bitmaps",
+    "device_burst_available",
+    "tenant_burst_available",
+    "sq_burst_available",
+    "issue_count_rule",
+    "issue_pipeline",
+    "pending_count_read",
+    "burst_read",
+    "min_burst_calculation",
+    "downstream_issue_request",
+    "burst_debit",
+]
+ARBITRATION_METRICS = ["burst_stalls", "downstream_requests", "issued_commands", "issue_count"]
+
+
+def flatten_tokens(obj: Any) -> set[str]:
+    """Collect every key and scalar string from a parsed template."""
+    tokens: set[str] = set()
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            tokens.add(str(key))
+            tokens |= flatten_tokens(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            tokens |= flatten_tokens(item)
+    elif isinstance(obj, str):
+        tokens.add(obj)
+    return tokens
+
+
+def arbitration_errors(template: dict[str, Any]) -> list[str]:
+    if template.get("ip", {}).get("name") != "arbitration_ip":
         return []
-    end = len(lines)
-    for idx in range(start, len(lines)):
-        line = lines[idx]
-        if line and not line[0].isspace() and line.endswith(":"):
-            end = idx
-            break
-    return lines[start:end]
-
-
-def count_top_list_items(text: str, section: str) -> int:
-    return sum(1 for line in section_lines(text, section) if line.startswith("  - "))
-
-
-def collect_fsm_names(text: str) -> list[str]:
-    names: list[str] = []
-    in_fsm_item = False
-    for line in section_lines(text, "fsm_processes"):
-        if line.startswith("  - name:"):
-            names.append(line.split(":", 1)[1].strip())
-            in_fsm_item = True
-        elif line.startswith("  - "):
-            in_fsm_item = False
-        elif in_fsm_item and line.startswith("    name:"):
-            names.append(line.split(":", 1)[1].strip())
-    return names
-
-
-def collect_fsm_blocks(text: str) -> dict[str, list[str]]:
-    blocks: dict[str, list[str]] = {}
-    current_name: str | None = None
-    current_lines: list[str] = []
-    for line in section_lines(text, "fsm_processes"):
-        if line.startswith("  - name:"):
-            if current_name is not None:
-                blocks[current_name] = current_lines
-            current_name = line.split(":", 1)[1].strip()
-            current_lines = [line]
-            continue
-        if current_name is not None:
-            current_lines.append(line)
-    if current_name is not None:
-        blocks[current_name] = current_lines
-    return blocks
-
-
-def collect_queue_blocks(text: str) -> dict[str, list[str]]:
-    blocks: dict[str, list[str]] = {}
-    current_name: str | None = None
-    current_lines: list[str] = []
-    for line in section_lines(text, "queues"):
-        if line.startswith("  - name:"):
-            if current_name is not None:
-                blocks[current_name] = current_lines
-            current_name = line.split(":", 1)[1].strip()
-            current_lines = [line]
-            continue
-        if current_name is not None:
-            current_lines.append(line)
-    if current_name is not None:
-        blocks[current_name] = current_lines
-    return blocks
-
-
-def lint_queue_contract(text: str) -> list[str]:
-    """Every queue (FIFO within an IP or between IPs) must declare a real
-    capacity: an integer depth >= 1, or the explicit value `unbounded`
-    accompanied by a `depth_note:` explaining where backpressure comes from
-    instead. `blocking_behavior`, `ordering`, `producer`, and `consumer`
-    are always required."""
-    errors: list[str] = []
-    for queue_name, lines in collect_queue_blocks(text).items():
-        block = "\n".join(lines)
-        for required in ["producer:", "consumer:", "blocking_behavior:", "ordering:"]:
-            if required not in block:
-                errors.append(f"queues.{queue_name}: missing `{required}`")
-        depth_match = re.search(r"^\s*depth:\s*(\S+)\s*(?:#.*)?$", block, re.MULTILINE)
-        if depth_match is None:
-            errors.append(f"queues.{queue_name}: missing `depth:`")
-            continue
-        depth = depth_match.group(1)
-        if depth == "unbounded":
-            if "depth_note:" not in block:
-                errors.append(
-                    f"queues.{queue_name}: `depth: unbounded` requires a `depth_note:` "
-                    "explaining where backpressure comes from instead"
-                )
-        elif not depth.isdigit() or int(depth) < 1:
-            errors.append(
-                f"queues.{queue_name}: `depth` must be an integer >= 1 or the explicit "
-                f"value `unbounded` (got `{depth}`)"
-            )
+    tokens = flatten_tokens(template)
+    metrics = set(template.get("performance_model", {}).get("metrics", []))
+    errors = [f"arbitration_ip contract: missing `{token}`" for token in ARBITRATION_REQUIRED if token not in tokens]
+    errors += [
+        f"arbitration_ip contract: performance metrics missing `{metric}`"
+        for metric in ARBITRATION_METRICS
+        if metric not in metrics
+    ]
     return errors
 
 
-def collect_timing_fsms(text: str) -> set[str]:
-    timing = set()
-    in_timing = False
-    for line in section_lines(text, "timing_model"):
-        stripped = line.strip()
-        if stripped == "fsm_process_delays:":
-            in_timing = True
-            continue
-        if (
-            in_timing
-            and line.startswith("  ")
-            and not line.startswith("    ")
-            and stripped.endswith(":")
-            and stripped != "fsm_process_delays:"
-        ):
-            in_timing = False
-        if in_timing and stripped.startswith("- fsm:"):
-            timing.add(stripped.split(":", 1)[1].strip())
-    return timing
-
-
-def collect_timing_blocks(text: str) -> dict[str, list[str]]:
-    blocks: dict[str, list[str]] = {}
-    current_name: str | None = None
-    current_lines: list[str] = []
-    in_timing = False
-    for line in section_lines(text, "timing_model"):
-        stripped = line.strip()
-        if stripped == "fsm_process_delays:":
-            in_timing = True
-            continue
-        if not in_timing:
-            continue
-        if stripped.startswith("- fsm:"):
-            if current_name is not None:
-                blocks[current_name] = current_lines
-            current_name = stripped.split(":", 1)[1].strip()
-            current_lines = [line]
-            continue
-        if current_name is not None:
-            current_lines.append(line)
-    if current_name is not None:
-        blocks[current_name] = current_lines
-    return blocks
-
-
-def extract_scalar_int(text: str, key: str) -> int | None:
-    match = re.search(rf"^\s*{re.escape(key)}:\s*([0-9]+)\s*$", text, re.MULTILINE)
-    return int(match.group(1)) if match else None
-
-
-def list_has_items(text: str, key: str) -> bool:
-    lines = text.splitlines()
-    for idx, line in enumerate(lines):
-        if re.match(rf"^\s*{re.escape(key)}:\s*(\[.*\])?\s*$", line):
-            if "[" in line and "]" in line:
-                return line.split("[", 1)[1].split("]", 1)[0].strip() != ""
-            base_indent = indent_of(line)
-            for child in lines[idx + 1 :]:
-                if not child.strip():
-                    continue
-                if indent_of(child) <= base_indent:
-                    return False
-                if child.lstrip().startswith("- "):
-                    return True
-            return False
-    return False
-
-
-def fsm_count_in_relationships(text: str) -> int | None:
-    rel_text = "\n".join(section_lines(text, "fsm_relationships"))
-    return extract_scalar_int(rel_text, "fsm_count")
-
-
-def validate_required_text(text: str, required: list[str], errors: list[str], context: str) -> None:
-    for item in required:
-        if item not in text:
-            errors.append(f"{context}: missing `{item}`")
-
-
-def lint_generic_contract(text: str) -> list[str]:
-    errors: list[str] = []
-
-    keys = top_level_keys(text)
-    for key in REQUIRED_TOP_LEVEL:
-        if key not in keys:
-            errors.append(f"missing top-level section: {key}")
-
-    for section in ["interfaces", "commands", "fsm_processes", "test_scenarios"]:
-        if count_top_list_items(text, section) == 0:
-            errors.append(f"section has no list items: {section}")
-
-    fsm_names = collect_fsm_names(text)
-    if not fsm_names:
-        errors.append("no FSMs found in fsm_processes")
-    if len(fsm_names) != len(set(fsm_names)):
-        errors.append("duplicate FSM names found")
-
-    fsm_blocks = collect_fsm_blocks(text)
-    for fsm_name, lines in fsm_blocks.items():
-        block = "\n".join(lines)
-        for required in [
-            "simpy_process: true",
-            "states:",
-            "transitions:",
-            "interfaces_touched:",
-            "queues_used:",
-            "resources_used:",
-        ]:
-            if required not in block:
-                errors.append(f"fsm_processes.{fsm_name}: missing `{required}`")
-        if "- from:" not in block:
-            errors.append(f"fsm_processes.{fsm_name}: transitions must contain at least one explicit `from` state")
-
-    relationship_count = fsm_count_in_relationships(text)
-    if relationship_count is None:
-        errors.append("fsm_relationships: missing integer fsm_count")
-    elif relationship_count != len(fsm_names):
-        errors.append(
-            f"fsm_relationships: fsm_count={relationship_count} but fsm_processes defines {len(fsm_names)} FSMs"
-        )
-
-    timing_fsms = collect_timing_fsms(text)
-    missing_timing = sorted(set(fsm_names) - timing_fsms)
-    extra_timing = sorted(timing_fsms - set(fsm_names))
-    if missing_timing:
-        errors.append(f"timing_model: missing fsm_process_delays for FSMs: {', '.join(missing_timing)}")
-    if extra_timing:
-        errors.append(f"timing_model: has delays for unknown FSMs: {', '.join(extra_timing)}")
-
-    for fsm_name, lines in collect_timing_blocks(text).items():
-        block = "\n".join(lines)
-        if "operations:" not in block:
-            errors.append(f"timing_model.{fsm_name}: missing `operations`")
-            continue
-        if "cycles:" not in block or "ns:" not in block:
-            errors.append(f"timing_model.{fsm_name}: operations must include `cycles` and `ns` values")
-
-    for key in ["parallel_processes", "sequential_paths"]:
-        if not list_has_items(text, key):
-            errors.append(f"fsm_relationships: `{key}` must contain at least one item")
-
-    timing_text = "\n".join(section_lines(text, "timing_model"))
-    for key in ["clock_mhz", "cycle_time_ns"]:
-        value = extract_scalar_int(timing_text, key)
-        if value is None or value <= 0:
-            errors.append(f"timing_model: `{key}` must be a positive number")
-    if not list_has_items(text, "fsm_process_delays"):
-        errors.append("timing_model: `fsm_process_delays` must contain at least one item")
-    if not list_has_items(text, "end_to_end_paths"):
-        errors.append("timing_model: `end_to_end_paths` must contain at least one item")
-
-    errors.extend(lint_queue_contract(text))
-
-    validate_required_text(text, REQUIRED_PERFORMANCE_FIELDS, errors, "performance_model")
-    validate_required_text(text, REQUIRED_FUNCTIONALITY_FIELDS, errors, "functionality_model")
-
-    for required in ["valid_conditions:", "completion_conditions:", "error_conditions:"]:
-        if required not in "\n".join(section_lines(text, "commands")):
-            errors.append(f"commands: every generated template should include `{required}`")
-
-    scenario_text = "\n".join(section_lines(text, "test_scenarios"))
-    for required in ["expected_functional_behavior:", "expected_performance_properties:", "fsm_coverage:"]:
-        if required not in scenario_text:
-            errors.append(f"test_scenarios: missing `{required}` coverage field")
-    for fsm_name in fsm_names:
-        if (
-            f"{fsm_name}." not in scenario_text
-            and f"- {fsm_name}" not in scenario_text
-            and f"[{fsm_name}" not in scenario_text
-        ):
-            errors.append(f"test_scenarios: no scenario covers FSM `{fsm_name}`")
-
-    return errors
-
-
-def lint_arbitration_contract(text: str) -> list[str]:
-    errors: list[str] = []
-    if "name: arbitration_ip" not in text:
-        return errors
-
-    for required in [
-        "topology:",
-        "port_mode:",
-        "pending_bitmaps:",
-        "device_burst_available:",
-        "tenant_burst_available:",
-        "sq_burst_available:",
-        "issue_count_rule:",
-        "issue_pipeline",
-        "pending_count_read",
-        "burst_read",
-        "min_burst_calculation",
-        "downstream_issue_request",
-        "burst_debit",
-    ]:
-        if required not in text:
-            errors.append(f"arbitration_ip contract: missing `{required}`")
-
-    for metric in ["burst_stalls", "downstream_requests", "issued_commands", "issue_count"]:
-        if metric not in text:
-            errors.append(f"arbitration_ip contract: performance metrics missing `{metric}`")
-
-    return errors
+def lint_template(template: dict[str, Any], jsonschema) -> list[str]:
+    structure = schema_errors(template, jsonschema)
+    # Cross-field checks assume a well-formed shape; skip them if structure failed.
+    if structure:
+        return structure
+    return semantic_errors(template) + arbitration_errors(template)
 
 
 def lint_file(path: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8")
-    return lint_generic_contract(text) + lint_arbitration_contract(text)
+    yaml, jsonschema = require_deps()
+    try:
+        template = load_template(path, yaml)
+    except ValueError as exc:
+        return [str(exc)]
+    return lint_template(template, jsonschema)
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Validate IP model templates against the contract.")
     parser.add_argument("templates", nargs="+", type=Path)
     args = parser.parse_args(argv)
 

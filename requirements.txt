@@ -2,3 +2,4 @@ simpy>=4.1.2
 PyYAML>=6.0.2
 coverage>=7.6
 ruff>=0.15
+jsonschema>=4.20

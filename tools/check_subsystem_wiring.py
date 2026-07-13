@@ -14,7 +14,8 @@ whether those declarations point at anything real, so this tool verifies:
   member is declared and the API exists in the member's model file (method or
   attribute), or a bare name matching one of the subsystem's glue FSMs.
 
-Dependency-free, in the style of ``template_lint.py``.
+Reads the template as parsed YAML (like ``template_lint.py``); only the model
+files it cross-references are scanned as source text.
 
 Usage::
 
@@ -25,30 +26,28 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import re
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = REPO_ROOT / "tools"
 
-MEMBER_RE = re.compile(r"\{\s*ip:\s*(\w+)\s*,\s*model:\s*(\w+)")
-CONNECTION_RE = re.compile(r"\{\s*from:\s*([\w.]+)\s*,\s*to:\s*([\w.]+)")
-IP_NAME_RE = re.compile(r"^\s*name:\s*(\w+)\s*$", re.MULTILINE)
+
+def require_yaml():
+    try:
+        import yaml  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise SystemExit("PyYAML is required. Install project requirements before running this tool.") from exc
+    return yaml
 
 
-def _load_template_lint():
-    path = TOOLS_DIR / "template_lint.py"
-    spec = importlib.util.spec_from_file_location("template_lint", path)
-    if spec is None or spec.loader is None:  # pragma: no cover
-        raise RuntimeError(f"cannot load tool: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-template_lint = _load_template_lint()
+def load_template(path: Path) -> dict[str, Any]:
+    yaml = require_yaml()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: template did not parse to a mapping")
+    return data
 
 
 def camel_model_name(ip_name: str) -> str:
@@ -58,18 +57,18 @@ def camel_model_name(ip_name: str) -> str:
 def discover_subsystem_templates(repo_root: Path) -> list[Path]:
     found = []
     for template in sorted((repo_root / "templates").glob("*.template.yaml")):
-        text = template.read_text(encoding="utf-8")
-        if any(line == "subsystem:" for line in text.splitlines()):
+        data = load_template(template)
+        if isinstance(data.get("subsystem"), dict):
             found.append(template)
     return found
 
 
-def parse_members(subsystem_text: str) -> list[tuple[str, str]]:
-    return MEMBER_RE.findall(subsystem_text)
-
-
-def parse_connections(subsystem_text: str) -> list[tuple[str, str]]:
-    return CONNECTION_RE.findall(subsystem_text)
+def connection_endpoints(connections: list[dict[str, Any]]) -> list[str]:
+    endpoints: list[str] = []
+    for conn in connections:
+        if isinstance(conn, dict):
+            endpoints += [str(conn[key]) for key in ("from", "to") if key in conn]
+    return endpoints
 
 
 def _member_has_api(member_text: str, api: str) -> bool:
@@ -78,17 +77,20 @@ def _member_has_api(member_text: str, api: str) -> bool:
 
 def check_file(repo_root: Path, template_path: Path) -> list[str]:
     errors: list[str] = []
-    text = template_path.read_text(encoding="utf-8")
-    subsystem_text = "\n".join(template_lint.section_lines(text, "subsystem"))
-    if not subsystem_text:
+    template = load_template(template_path)
+    subsystem = template.get("subsystem")
+    if not isinstance(subsystem, dict):
         return [f"{template_path.name}: no `subsystem:` section"]
 
-    name_match = IP_NAME_RE.search(text)
-    if name_match is None:
+    subsystem_name = template.get("ip", {}).get("name")
+    if not subsystem_name:
         return [f"{template_path.name}: cannot find `ip.name`"]
-    subsystem_name = name_match.group(1)
 
-    members = parse_members(subsystem_text)
+    members = [
+        (m["ip"], m["model"])
+        for m in subsystem.get("members", [])
+        if isinstance(m, dict) and "ip" in m and "model" in m
+    ]
     if not members:
         errors.append("subsystem.members: no `{ip: ..., model: ...}` entries found")
 
@@ -121,11 +123,12 @@ def check_file(repo_root: Path, template_path: Path) -> list[str]:
                 errors.append(f"{subsystem_name}.py: does not instantiate member model `{model_class}`")
 
     member_ips = {ip_name for ip_name, _model in members}
-    fsm_names = set(template_lint.collect_fsm_names(text))
-    connections = parse_connections(subsystem_text)
-    if not connections:
+    fsm_names = {str(fsm.get("name")) for fsm in template.get("fsm_processes", []) if isinstance(fsm, dict)}
+    connections = subsystem.get("connections", [])
+    endpoints = connection_endpoints(connections)
+    if not endpoints:
         errors.append("subsystem.connections: no `{from: ..., to: ...}` entries found")
-    for endpoint in [ep for pair in connections for ep in pair]:
+    for endpoint in endpoints:
         if "." in endpoint:
             member, api = endpoint.split(".", 1)
             if member not in member_ips:

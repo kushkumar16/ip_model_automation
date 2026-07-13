@@ -315,12 +315,12 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `templates/*.template.yaml`: source of truth for model generation.
 - `templates/*.template.draft.yaml`: extractor output awaiting review (gitignored).
 - `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored).
-- `schemas/ip_model_template.schema.json`: machine-checkable template contract.
+- `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
-- `tools/template_lint.py`: strict template contract checker.
+- `tools/template_lint.py`: template contract checker — validates *structure* against the JSON Schema and enforces the cross-field *semantics* (fsm_count parity, per-FSM timing, scenario coverage) the schema cannot express.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).

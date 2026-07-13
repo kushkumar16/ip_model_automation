@@ -217,6 +217,21 @@ declared capacity — bounded depth, or an explicit `unbounded` with the reason)
 resources, timing model, invariants, and test scenarios. The annotated
 `templates/reference_template.yaml` documents every section.
 
+The contract for that fixed shape is enforced in **two non-overlapping layers**,
+both run by `tools/template_lint.py`:
+
+- **Structure** — `schemas/ip_model_template.schema.json` is a JSON Schema
+  (validated with `jsonschema`) that owns the *shape*: which sections and
+  fields exist, their types, and value constraints (e.g. a queue `depth` is a
+  positive integer or the literal `unbounded`, and an unbounded queue must
+  carry a `depth_note`). It is enforced, not decorative documentation.
+- **Cross-field semantics** — the rules JSON Schema cannot express: the declared
+  `fsm_count` matching the actual FSM list, every FSM having a timing entry and
+  appearing in a test scenario, and the arbitration-IP sub-contract.
+
+Each rule lives in exactly one layer, so the schema and the linter cannot drift
+apart — and a template must satisfy both before it can generate a model.
+
 ### Two sources of truth — but only one at a time
 
 This is the rule the whole system is built around:
@@ -417,7 +432,7 @@ re-reading everything:
 
 ```mermaid
 flowchart TD
-    G1["template_lint.py<br/>template matches the schema/contract"]
+    G1["template_lint.py<br/>JSON Schema structure + cross-field semantics"]
     G2["check_template_coverage.py --strict<br/>template captures every DLD FSM + count,<br/>zero TODO_REVIEW left"]
     G3["report_model_coverage.py<br/>every FSM has a test scenario"]
     G4["generate_model_scaffold.py<br/>model shape: class + one process per FSM"]
@@ -555,7 +570,7 @@ flowchart TB
 | `dlds/*_dld.md` | Your design intent (authoring source only). |
 | `templates/*.template.yaml` | **Golden reference** — source of truth for generation. |
 | `templates/*.template.draft.yaml` | Extractor output awaiting review (gitignored). |
-| `schemas/…schema.json` | Machine-checkable template contract. |
+| `schemas/…schema.json` | JSON Schema for template structure — enforced by `template_lint.py` (structure), which also checks the cross-field semantics the schema can't express. |
 | `tools/*.py` | Deterministic extraction, linting, coverage, generation, validation. |
 | `skills/…`, `harness/…`, `agents/…` | Instructions/contract for the human or LLM that fills templates, models, and tests. |
 | `src/ip_model_automation/*.py` | Flat, one-file-per-IP SimPy delay models. |

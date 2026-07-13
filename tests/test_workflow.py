@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import logging
 import tempfile
@@ -148,6 +149,37 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
         discovered = {path.name for path in validator.discover_templates(repo_root)}
         self.assertNotIn("reference_template.yaml", discovered)
+
+    def test_template_lint_enforces_schema_and_semantics(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        linter_path = repo_root / "tools" / "template_lint.py"
+        spec = importlib.util.spec_from_file_location("template_lint", linter_path)
+        linter = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(linter)
+
+        # Every promoted template passes both layers (structure + semantics).
+        for template in (repo_root / "templates").glob("*.template.yaml"):
+            self.assertEqual(linter.lint_file(template), [], f"{template.name} is not lint-clean")
+
+        import yaml
+
+        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+
+        # Layer 1 (schema) catches a structural violation: an unbounded queue
+        # with no depth_note.
+        broken_structure = copy.deepcopy(base)
+        broken_structure["queues"][0]["depth"] = "unbounded"
+        broken_structure["queues"][0].pop("depth_note", None)
+        errors = linter.lint_template(broken_structure, importlib.import_module("jsonschema"))
+        self.assertTrue(any("schema[" in e and "depth_note" in e for e in errors), errors)
+
+        # Layer 2 (semantics) catches a cross-field violation JSON Schema cannot
+        # express: a declared fsm_count that disagrees with fsm_processes.
+        broken_semantics = copy.deepcopy(base)
+        broken_semantics["fsm_relationships"]["fsm_count"] = 99
+        errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
+        self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
 
     def test_subsystem_wiring_check_passes_for_repo(self):
         repo_root = Path(__file__).resolve().parents[1]

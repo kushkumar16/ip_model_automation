@@ -31,7 +31,7 @@ behavior from the DLD.
 - `arbitration_ip`: hierarchical port/tenant/SQ arbitration with pending
   bitmaps, RR/WRR policy, and burst-limited issue pipeline.
 - `completion_ip`: command completion scheduling with per-tenant QoS tokens,
-  WWV write accounting, soft/hard burst behavior, and output backpressure.
+  window-based refill, and output backpressure.
 - `gdma_ip`: descriptor-driven DMA with multiple parallel/sequential FSMs.
 - `timer_ip`: register, tick, compare, watchdog, debug-freeze, and interrupt
   timer behavior.

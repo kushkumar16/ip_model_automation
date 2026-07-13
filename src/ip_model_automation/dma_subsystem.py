@@ -120,14 +120,13 @@ class DmaSubsystemModel:
     def configure_channel(self, channel_id: int, enabled: bool = True, priority: int = 0) -> None:
         self.gdma.configure_channel(channel_id, enabled=enabled, priority=priority)
 
-    def configure_qos(self, tenant_id: str, token_budget: float, limit_type: str = "SOFT") -> None:
+    def configure_qos(self, tenant_id: str, token_budget: float) -> None:
         self.completion.configure_tenant(
             tenant_id,
             read=token_budget,
             write=token_budget,
             read_bw=max(token_budget, 1.0) * 1000.0,
             write_bw=max(token_budget, 1.0) * 1000.0,
-            limit_type=limit_type,
         )
         self.logger.info("qos configured tenant=%s budget=%s", tenant_id, token_budget)
 

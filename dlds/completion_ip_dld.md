@@ -5,13 +5,12 @@
 The Completion IP accepts issued NVMe command descriptors, tracks completion
 eligibility, applies QoS/token accounting, and emits completion records toward a
 host-facing completion queue interface. It is the natural home for performance
-delay modeling of per-tenant completion limits, burst behavior, write-vs-read
-token coupling, queue occupancy, and completion backpressure.
+delay modeling of per-tenant completion limits, queue occupancy, and completion
+backpressure.
 
 The DLD is based on general NVMe command/completion flow and the QoS concepts
 already present in the workspace simulation code: per-tenant queues, IOPS and
-bandwidth tokens, refill windows, soft/hard tenant limits, accumulated burst
-tokens, weighted ordering, and WWV-style write debit against read budget.
+bandwidth tokens, refill windows, and weighted ordering.
 
 ## 2. Scope
 
@@ -21,9 +20,6 @@ In scope:
 - Per-tenant completion queues.
 - Read/write IOPS and bandwidth token checks.
 - Window-based token refill.
-- Soft-limit burst accumulation.
-- Hard-limit blocking of burst usage.
-- WWV mode where writes also debit read-side budget by configured ratios.
 - Completion delivery backpressure.
 - Latency, throughput, utilization, and stall metrics.
 
@@ -73,25 +69,15 @@ Timing:
 Configuration per tenant:
 
 - `tenant_alive`
-- `limit_type`: `SOFT` or `HARD`.
 - `read_iops_per_sec`
 - `write_iops_per_sec`
 - `read_bw_kb_per_sec`
 - `write_bw_kb_per_sec`
-- `max_burst_read_iops`
-- `max_burst_write_iops`
-- `max_burst_read_bw`
-- `max_burst_write_bw`
 
 Global configuration:
 
 - `window_ms`
 - `dispatch_tick_ms`
-- `write_token_mode`: `DEFAULT` or `WWV`.
-- `wwv_write_iops_ratio`
-- `wwv_read_iops_ratio`
-- `wwv_write_bw_ratio`
-- `wwv_read_bw_ratio`
 
 ### 4.3 Completion Queue Interface
 
@@ -119,17 +105,10 @@ Timing:
 - Requires one read IOPS debit.
 - Requires read bandwidth debit proportional to `size_kb`.
 
-`WRITE` in `DEFAULT` mode:
+`WRITE`:
 
 - Requires one write IOPS debit.
 - Requires write bandwidth debit proportional to `size_kb`.
-
-`WRITE` in `WWV` mode:
-
-- Requires write-side debit.
-- Also requires read-side debit by configured write/read ratio.
-- Example from existing code: write/read IOPS ratio `3:2` means a write may
-  debit `1.5x` read-side IOPS tokens in addition to write tokens.
 
 `FLUSH`:
 
@@ -162,7 +141,7 @@ States:
 - `RESET`: initialize scheduling order.
 - `IDLE`: wait for pending completion candidates.
 - `SELECT_TENANT`: choose next tenant based on weighted order.
-- `CHECK_TOKENS`: verify IOPS/BW tokens and burst tokens.
+- `CHECK_TOKENS`: verify IOPS/BW tokens.
 - `WAIT_TOKENS`: no sufficient tokens for selected command.
 - `EMIT`: send completion to output interface.
 - `STALL_OUTPUT`: completion output not ready.
@@ -186,18 +165,13 @@ States:
 - `WAIT_WINDOW`: wait for next refill boundary.
 - `ASSESS_USAGE`: capture completed count and utilization.
 - `REFILL_BASE`: restore per-window base tokens.
-- `APPLY_BURST`: roll each soft-limit tenant's unused base tokens (as left at
-  the end of the window, before `REFILL_BASE` restores them) into its
-  accumulated burst pool, capped at the configured burst maximum. Hard-limit
-  tenants are not touched.
 - `PUBLISH_METRICS`: snapshot window metrics.
 
 Transitions:
 
 - `WAIT_WINDOW -> ASSESS_USAGE`: window timer expires.
 - `ASSESS_USAGE -> REFILL_BASE`: usage captured.
-- `REFILL_BASE -> APPLY_BURST`: base tokens restored.
-- `APPLY_BURST -> PUBLISH_METRICS`: burst rules applied.
+- `REFILL_BASE -> PUBLISH_METRICS`: base tokens restored.
 - `PUBLISH_METRICS -> WAIT_WINDOW`: metrics stored.
 
 ## 7. QoS Rules
@@ -207,24 +181,8 @@ Base tokens:
 - Per-window token allocation is derived from per-second rate and `window_ms`.
 - IOPS and bandwidth are tracked independently.
 - Bandwidth token cost is derived from transfer size.
-
-Soft limit:
-
-- Tenant may use accumulated burst tokens up to configured burst maximum.
-- Burst accumulation source: unused base tokens at the end of each window roll
-  over into the burst pool, capped at the configured burst maximum.
-- Burst is assessed on window boundaries and may have one-window apply delay.
-
-Hard limit:
-
-- Tenant cannot consume burst tokens.
-- If base tokens are insufficient, command remains pending.
-
-WWV write mode:
-
-- Write completion requires write tokens and read-side equivalent tokens.
-- Ratio components must be positive.
-- This models write-heavy traffic reducing read-side completion opportunity.
+- If base tokens are insufficient, the command remains pending until the next
+  refill window.
 
 Tenant alive:
 
@@ -255,14 +213,13 @@ The generated SimPy delay model shall include enough functionality to validate
 the FSM behavior from this DLD without modeling payload data. The model must
 include:
 
-- Tenant configuration API with `SOFT` and `HARD` limit types.
+- Tenant configuration API.
 - Command accept API that enqueues commands into per-tenant ready queues after
   accept/service latency.
 - Deterministic weighted tenant scheduling.
 - Completion eligibility and status generation.
 - Token debit model using floating-point or fixed-point units.
-- Burst token debit only for soft-limit tenants.
-- Hard-limit blocking when base tokens are insufficient.
+- Blocking when base tokens are insufficient.
 - Output-ready control for completion queue backpressure.
 - Deterministic scheduling order.
 - Metrics query API.
@@ -271,8 +228,6 @@ Minimum state variables:
 
 - `tenant_pending_queues`
 - `tenant_tokens`
-- `tenant_burst_tokens`
-- `tenant_limit_type`
 - `tenant_alive`
 - `completed_commands`
 - `window_metrics`
@@ -302,14 +257,12 @@ Per-process timing:
 | --- | --- | --- |
 | Accept FSM | Parallel ingress process | Accepted command enqueue: 4 cycles = 8 ns. Queue-full backpressure retry: 1 cycle = 2 ns. |
 | Completion Scheduler FSM | Parallel scheduler process | Tenant select: 8 cycles = 16 ns. Token check: 5 cycles = 10 ns. Completion emit: 4 cycles = 8 ns. Output stall retry: 1 cycle = 2 ns. |
-| Refill FSM | Parallel periodic process | Refill window: 10 ms = 5,000,000 cycles. Usage assessment: 20 cycles = 40 ns. Base refill: 10 cycles = 20 ns. Burst apply: 20 cycles = 40 ns. Metrics publish: 10 cycles = 20 ns. |
+| Refill FSM | Parallel periodic process | Refill window: 10 ms = 5,000,000 cycles. Usage assessment: 20 cycles = 40 ns. Base refill: 10 cycles = 20 ns. Metrics publish: 10 cycles = 20 ns. |
 
 End-to-end completion delay:
 
 - No stall after command becomes service-ready:
   `Accept enqueue 4 + select 8 + token check 5 + emit 4 = 21 cycles = 42 ns`.
-- WWV write has the same control-path timing, but may stall until both write
-  and read-equivalent tokens are available.
 - Output backpressure adds `1 cycle = 2 ns` per retry tick.
 - Token starvation adds delay until the next refill boundary, up to
   `10 ms = 5,000,000 cycles`.

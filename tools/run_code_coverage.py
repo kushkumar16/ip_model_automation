@@ -30,9 +30,7 @@ def require_coverage() -> None:
     try:
         import coverage  # type: ignore # noqa: F401
     except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "coverage is required. Install project requirements before running this tool."
-        ) from exc
+        raise SystemExit("coverage is required. Install project requirements before running this tool.") from exc
 
 
 def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -42,12 +40,8 @@ def run(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "--html", action="store_true", help="Also write an HTML report to reports/code_coverage/html/"
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--html", action="store_true", help="Also write an HTML report to reports/code_coverage/html/")
     parser.add_argument(
         "--fail-under",
         type=float,
@@ -71,7 +65,18 @@ def main(argv: list[str]) -> int:
     }
 
     tests = run(
-        [sys.executable, "-m", "coverage", "run", f"--source={SOURCE_DIR}", "-m", "unittest", "discover", "-s", "tests"],
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "run",
+            f"--source={SOURCE_DIR}",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+        ],
         env,
     )
     if tests.returncode != 0:

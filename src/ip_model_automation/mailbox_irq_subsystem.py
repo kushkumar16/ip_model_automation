@@ -88,9 +88,7 @@ class MailboxIrqSubsystemModel:
 
     def configure_channel(self, channel_id: int, priority: int = 10, masked: bool = False) -> None:
         self.mailbox.configure_channel(channel_id, enable=True, masked=masked)
-        self.controller.configure_source(
-            channel_id, priority=priority, target_id=self.target_id, trigger_type="LEVEL"
-        )
+        self.controller.configure_source(channel_id, priority=priority, target_id=self.target_id, trigger_type="LEVEL")
 
     def set_storm_limit(self, storm_limit: int) -> None:
         self.storm_limit = storm_limit
@@ -135,13 +133,15 @@ class MailboxIrqSubsystemModel:
                 self.outstanding[channel_id] += 1
                 yield self.controller.set_level(src_id, True)
                 self.metrics["irqs_bridged"] += 1
-                self.logger.debug("bridged channel=%s source=%s outstanding=%s", channel_id, src_id, self.outstanding[channel_id])
+                self.logger.debug(
+                    "bridged channel=%s source=%s outstanding=%s", channel_id, src_id, self.outstanding[channel_id]
+                )
 
     def cpu_service_process(self):
         while True:
             self.fsm_state["cpu_service"] = "POLL_DELIVERED"
             yield self.env.timeout(1)
-            new_deliveries = self.controller.delivered[self._delivered_seen:]
+            new_deliveries = self.controller.delivered[self._delivered_seen :]
             self._delivered_seen += len(new_deliveries)
             for _time, src_id in new_deliveries:
                 self.metrics["deliveries_observed"] += 1
@@ -154,7 +154,7 @@ class MailboxIrqSubsystemModel:
         while True:
             self.fsm_state["software_handler"] = "POLL_ACKED"
             yield self.env.timeout(1)
-            new_acked = self.controller.acknowledged[self._acked_seen:]
+            new_acked = self.controller.acknowledged[self._acked_seen :]
             self._acked_seen += len(new_acked)
             for _time, src_id in new_acked:
                 channel_id = src_id
@@ -185,7 +185,9 @@ class MailboxIrqSubsystemModel:
                 self.metrics["eois_issued"] += 1
                 self.logger.info(
                     "serviced channel=%s remaining=%s time=%s",
-                    channel_id, self.outstanding[channel_id], self.env.now,
+                    channel_id,
+                    self.outstanding[channel_id],
+                    self.env.now,
                 )
 
     def storm_monitor_process(self):
@@ -213,4 +215,6 @@ class MailboxIrqSubsystemModel:
                     self.storm_masked[src_id] = self.env.now
                     self.controller.set_mask(src_id, True)
                     self.metrics["storm_throttle_events"] += 1
-                    self.logger.warning("storm mask applied source=%s outstanding=%s time=%s", src_id, count, self.env.now)
+                    self.logger.warning(
+                        "storm mask applied source=%s outstanding=%s time=%s", src_id, count, self.env.now
+                    )

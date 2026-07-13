@@ -20,6 +20,9 @@
 - Each model constructor must accept `log_level: str = "WARNING"` and
   `log_file: str = "run.log"`, initialize `self.logger`, and write logs to both
   terminal and the log file with the IP tag, for example `[arbitration_ip]`.
+- Follow the coding style guide (`references/coding_style.md`): 120-column
+  ruff formatting, sorted imports, and the model/test naming conventions. The
+  pipeline enforces it with `python tools/check_code_style.py`.
 
 ## FSM Implementation
 
@@ -51,6 +54,7 @@ Run:
 ```powershell
 python tools\template_lint.py templates\*.template.yaml
 python tools\report_model_coverage.py
+python tools\check_code_style.py
 python tools\validate_ip_flow.py
 ```
 

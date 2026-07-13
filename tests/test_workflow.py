@@ -7,7 +7,7 @@ from pathlib import Path
 import simpy
 
 from ip_model_automation.common import get_ip_logger
-from ip_model_automation.ip import ArbitrationIpModel, Command, IP_ARTIFACTS, list_ips, resolve_artifacts
+from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, list_ips, resolve_artifacts
 
 
 class TestIpRegistryAndLayout(unittest.TestCase):

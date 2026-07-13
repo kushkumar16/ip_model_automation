@@ -11,7 +11,6 @@ from .common import Command, Descriptor, get_ip_logger
 from .completion_ip import CompletionIpModel
 from .gdma_ip import GdmaIpModel
 
-
 DEFAULT_SUBSYSTEM_TOPOLOGY = {
     "port0": {
         "tenants": {
@@ -165,14 +164,20 @@ class DmaSubsystemModel:
             tenant_id = self._tenant_for_channel(desc.channel_id)
             size_kb = max(1, desc.length_bytes // 1024)
             read_cmd = Command(
-                f"{desc.desc_id}:rd", "READ",
-                tenant_id=tenant_id, sq_id="SQ0",
-                addr=desc.src_addr, size_kb=size_kb,
+                f"{desc.desc_id}:rd",
+                "READ",
+                tenant_id=tenant_id,
+                sq_id="SQ0",
+                addr=desc.src_addr,
+                size_kb=size_kb,
             )
             write_cmd = Command(
-                f"{desc.desc_id}:wr", "WRITE",
-                tenant_id=tenant_id, sq_id="SQ0",
-                addr=desc.dst_addr, size_kb=size_kb,
+                f"{desc.desc_id}:wr",
+                "WRITE",
+                tenant_id=tenant_id,
+                sq_id="SQ0",
+                addr=desc.dst_addr,
+                size_kb=size_kb,
             )
             self.cmd_to_desc[read_cmd.cmd_id] = desc.desc_id
             self.cmd_to_desc[write_cmd.cmd_id] = desc.desc_id
@@ -187,7 +192,7 @@ class DmaSubsystemModel:
         while True:
             self.fsm_state["fabric_bridge"] = "POLL_RESPONSES"
             yield self.env.timeout(1)
-            new_responses = self.interconnect.responses[self._responses_seen:]
+            new_responses = self.interconnect.responses[self._responses_seen :]
             self._responses_seen += len(new_responses)
             for _time, response in new_responses:
                 desc_id = self.cmd_to_desc.get(response.cmd_id)
@@ -205,9 +210,12 @@ class DmaSubsystemModel:
                 yield self.env.timeout(1)
                 desc = entry["desc"]
                 arb_cmd = Command(
-                    response.cmd_id, response.kind,
-                    tenant_id=self._tenant_for_channel(desc.channel_id), sq_id="SQ0",
-                    addr=response.addr, size_kb=max(1, desc.length_bytes // 1024),
+                    response.cmd_id,
+                    response.kind,
+                    tenant_id=self._tenant_for_channel(desc.channel_id),
+                    sq_id="SQ0",
+                    addr=response.addr,
+                    size_kb=max(1, desc.length_bytes // 1024),
                 )
                 self.fsm_state["fabric_bridge"] = "ENQUEUE_ARBITRATION"
                 yield self.env.timeout(1)
@@ -218,7 +226,7 @@ class DmaSubsystemModel:
         while True:
             self.fsm_state["downstream_dispatch"] = "POLL_ISSUED"
             yield self.env.timeout(1)
-            new_issued = self.arbitration.issued[self._issued_seen:]
+            new_issued = self.arbitration.issued[self._issued_seen :]
             self._issued_seen += len(new_issued)
             for _time, command in new_issued:
                 self.fsm_state["downstream_dispatch"] = "SUBMIT_COMPLETION"
@@ -230,9 +238,9 @@ class DmaSubsystemModel:
         while True:
             self.fsm_state["completion_collector"] = "POLL_COMPLETIONS"
             yield self.env.timeout(1)
-            new_completions = self.completion.completed[self._completions_seen:]
+            new_completions = self.completion.completed[self._completions_seen :]
             self._completions_seen += len(new_completions)
-            new_engine = self.gdma.completed_ids[self._engine_seen:]
+            new_engine = self.gdma.completed_ids[self._engine_seen :]
             self._engine_seen += len(new_engine)
 
             touched = []
@@ -268,7 +276,9 @@ class DmaSubsystemModel:
                     self.metrics["subsystem_irqs"] += 1
                     self.logger.info(
                         "descriptor complete descriptor=%s channel=%s latency=%s",
-                        desc_id, desc.channel_id, self.metrics["end_to_end_latency"],
+                        desc_id,
+                        desc.channel_id,
+                        self.metrics["end_to_end_latency"],
                     )
 
     def backpressure_monitor_process(self):

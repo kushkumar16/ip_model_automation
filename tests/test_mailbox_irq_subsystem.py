@@ -4,7 +4,6 @@ import simpy
 
 from ip_model_automation.ip import MailboxIrqSubsystemModel
 
-
 FAST_CONTROLLER = {
     "sample_latency": 1,
     "pending_latency": 1,

@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = REPO_ROOT / "templates"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "reports" / "template_docs"
@@ -70,7 +69,7 @@ def render_ip_section(template: dict[str, Any]) -> list[str]:
     lines = [
         f"# {ip.get('name', 'unknown_ip')} — Template Overview",
         "",
-        f"> Rendered from the YAML template. The YAML file remains the source of truth.",
+        "> Rendered from the YAML template. The YAML file remains the source of truth.",
         "",
         f"**Domain:** {md_escape(ip.get('domain'))}",
         "",
@@ -263,8 +262,7 @@ def render_timing_model(template: dict[str, Any]) -> list[str]:
     lines = [
         "## Timing Model",
         "",
-        f"**Clock:** {md_escape(timing.get('clock_mhz'))} MHz "
-        f"({md_escape(timing.get('cycle_time_ns'))} ns/cycle)",
+        f"**Clock:** {md_escape(timing.get('clock_mhz'))} MHz ({md_escape(timing.get('cycle_time_ns'))} ns/cycle)",
         "",
         f"**Assumption:** {md_escape(timing.get('assumption'))}",
         "",
@@ -438,9 +436,7 @@ def markdown_to_html(markdown: str, title: str) -> str:
                 "<tr>" + "".join(f"<th>{inline_html(cell)}</th>" for cell in table_cells(table_lines[0])) + "</tr>"
             )
             for row in table_lines[2:]:
-                body.append(
-                    "<tr>" + "".join(f"<td>{inline_html(cell)}</td>" for cell in table_cells(row)) + "</tr>"
-                )
+                body.append("<tr>" + "".join(f"<td>{inline_html(cell)}</td>" for cell in table_cells(row)) + "</tr>")
             body.append("</table>")
         elif stripped.startswith("- "):
             body.append("<ul>")
@@ -452,8 +448,8 @@ def markdown_to_html(markdown: str, title: str) -> str:
             body.append(f"<p>{inline_html(stripped)}</p>")
             idx += 1
     return (
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{html.escape(title)}</title>\n<style>{HTML_STYLE}</style>\n</head>\n<body>\n"
         + "\n".join(body)
         + "\n</body>\n</html>\n"
@@ -462,9 +458,7 @@ def markdown_to_html(markdown: str, title: str) -> str:
 
 def discover_templates() -> list[Path]:
     return sorted(
-        path
-        for path in TEMPLATES_DIR.glob("*.template.yaml")
-        if not path.name.endswith(".template.draft.yaml")
+        path for path in TEMPLATES_DIR.glob("*.template.yaml") if not path.name.endswith(".template.draft.yaml")
     )
 
 

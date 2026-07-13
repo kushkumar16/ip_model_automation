@@ -5,7 +5,6 @@ import simpy
 from ip_model_automation.common import Descriptor
 from ip_model_automation.ip import DmaSubsystemModel
 
-
 FAST_GDMA = {
     "fetch_latency": 2,
     "read_latency": 2,
@@ -86,7 +85,15 @@ class TestDmaSubsystemModel(unittest.TestCase):
         )
         subsystem.configure_channel(0)
         for index in range(4):
-            subsystem.submit(Descriptor(f"d{index}", channel_id=0, src_addr=0x1000 * (index + 1), dst_addr=0x2000 * (index + 1), length_bytes=4096))
+            subsystem.submit(
+                Descriptor(
+                    f"d{index}",
+                    channel_id=0,
+                    src_addr=0x1000 * (index + 1),
+                    dst_addr=0x2000 * (index + 1),
+                    length_bytes=4096,
+                )
+            )
         env.run(until=3000)
         self.assertGreaterEqual(subsystem.metrics["fabric_backpressure_events"], 1)
         self.assertEqual(subsystem.metrics["descriptors_completed"], 4)

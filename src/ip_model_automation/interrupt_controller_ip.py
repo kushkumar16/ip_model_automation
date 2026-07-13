@@ -102,7 +102,15 @@ class InterruptControllerIpModel:
             self.masked.add(src_id)
         else:
             self.masked.discard(src_id)
-        self.logger.info("configured source=%s priority=%s target=%s enabled=%s trigger=%s masked=%s", src_id, priority, target_id, enabled, trigger_type, masked)
+        self.logger.info(
+            "configured source=%s priority=%s target=%s enabled=%s trigger=%s masked=%s",
+            src_id,
+            priority,
+            target_id,
+            enabled,
+            trigger_type,
+            masked,
+        )
 
     def set_mask(self, src_id: int, masked: bool) -> None:
         if masked:
@@ -142,7 +150,9 @@ class InterruptControllerIpModel:
             self.pending.add(src_id)
 
     def ack_functional(self, target_id: str = "CPU0") -> Optional[int]:
-        eligible = [src for src in self.pending if self.targets.get(src, "CPU0") == target_id and src not in self.masked]
+        eligible = [
+            src for src in self.pending if self.targets.get(src, "CPU0") == target_id and src not in self.masked
+        ]
         if not eligible:
             return None
         selected = min(eligible, key=lambda src: self.priorities.get(src, 255))
@@ -189,7 +199,9 @@ class InterruptControllerIpModel:
             eligible = [src for src in self.pending if src in self.enabled and src not in self.masked]
             self.metrics["masked_irqs"] += len([src for src in self.pending if src in self.masked])
             if any(src in self.masked for src in self.pending):
-                self.logger.warning("masked pending sources=%s", sorted(src for src in self.pending if src in self.masked))
+                self.logger.warning(
+                    "masked pending sources=%s", sorted(src for src in self.pending if src in self.masked)
+                )
             if eligible:
                 yield self.priority_winner_queue.put(eligible)
 
@@ -214,7 +226,9 @@ class InterruptControllerIpModel:
             self.delivered.append((self.env.now, selected))
             self.last_delivered[self.targets.get(selected, "CPU0")] = selected
             self.metrics["delivered_irqs"] += 1
-            self.logger.info("delivered source=%s target=%s time=%s", selected, self.targets.get(selected, "CPU0"), self.env.now)
+            self.logger.info(
+                "delivered source=%s target=%s time=%s", selected, self.targets.get(selected, "CPU0"), self.env.now
+            )
 
     def acknowledge_process(self):
         while True:

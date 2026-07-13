@@ -90,7 +90,11 @@ class I3cIpModel:
         self.env.process(self.interrupt_control_process())
         self.logger.info(
             "initialized command_depth=%s tx_depth=%s rx_depth=%s ibi_depth=%s byte_bits=%s",
-            command_depth, tx_depth, rx_depth, ibi_depth, byte_bits,
+            command_depth,
+            tx_depth,
+            rx_depth,
+            ibi_depth,
+            byte_bits,
         )
 
     # ------------------------------------------------------------------ #
@@ -148,7 +152,11 @@ class I3cIpModel:
                 self.fsm_state["register_access"] = "WRITE_CONFIG"
                 if len(self.command_queue) < self.command_depth:
                     self.command_queue.append(
-                        {"cmd_id": update["cmd_id"], "direction": update["direction"], "byte_count": update["byte_count"]}
+                        {
+                            "cmd_id": update["cmd_id"],
+                            "direction": update["direction"],
+                            "byte_count": update["byte_count"],
+                        }
                     )
                     self.metrics["commands_issued"] += 1
                 else:

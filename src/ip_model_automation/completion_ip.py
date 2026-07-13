@@ -7,7 +7,6 @@ import simpy
 
 from .common import Command, WeightedOrder, get_ip_logger
 
-
 TOKEN_NAMES = ("read", "write", "read_bw", "write_bw")
 
 
@@ -181,7 +180,9 @@ class CompletionIpModel:
             self.completed.append((self.env.now, command))
             self.metrics[f"completed_{command.kind.lower()}"] += 1
             self.metrics["completed_commands"] += 1
-            self.logger.info("completed cmd=%s kind=%s tenant=%s time=%s", command.cmd_id, command.kind, tenant_id, self.env.now)
+            self.logger.info(
+                "completed cmd=%s kind=%s tenant=%s time=%s", command.cmd_id, command.kind, tenant_id, self.env.now
+            )
 
     def refill_once(self) -> None:
         snapshot = {"time": float(self.env.now), "completed": float(self.metrics["completed_commands"])}

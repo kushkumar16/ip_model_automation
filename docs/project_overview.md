@@ -344,6 +344,12 @@ Every model also ships with:
   public export surface: `ip.py`.
 - Per-IP tests in `tests/test_<ip>.py`, derived from the template's
   `test_scenarios`.
+- A written coding style guide,
+  [skills/ip-model-generation/references/coding_style.md](../skills/ip-model-generation/references/coding_style.md),
+  codifies formatting (ruff, 120 columns, sorted imports) and the model/test
+  structure conventions. It is enforced as a hard repo-wide pipeline gate —
+  `python tools\check_code_style.py` (add `--fix` to auto-repair) — and every
+  prompt pack instructs the implementing agent to follow it.
 
 Run the whole test suite from the repo root:
 

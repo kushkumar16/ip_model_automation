@@ -1,0 +1,20 @@
+# Coding style configuration for this repo — the machine-readable half of
+# skills/ip-model-generation/references/coding_style.md. Enforced by
+# tools/check_code_style.py (a repo-scope stage in harness/ip_generation_loop.yaml).
+
+line-length = 120
+target-version = "py311"
+
+# Only the project's own code; generated artifacts and caches are excluded.
+include = ["src/**/*.py", "tools/**/*.py", "tests/**/*.py"]
+
+[lint]
+# E/W: pycodestyle, F: pyflakes, I: import sorting (stdlib / third-party /
+# first-party groups, alphabetized — the order the existing models use).
+select = ["E", "F", "W", "I"]
+
+[lint.isort]
+known-first-party = ["ip_model_automation"]
+
+[format]
+quote-style = "double"

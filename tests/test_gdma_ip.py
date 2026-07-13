@@ -8,7 +8,15 @@ from ip_model_automation.ip import Descriptor, GdmaIpModel
 class TestGdmaIpModel(unittest.TestCase):
     def test_gdma_completes_descriptor(self):
         env = simpy.Environment()
-        model = GdmaIpModel(env, fetch_latency=1, read_latency=2, write_latency=3, completion_latency=1, channel_scan_latency=1, irq_latency=1)
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=2,
+            write_latency=3,
+            completion_latency=1,
+            channel_scan_latency=1,
+            irq_latency=1,
+        )
         model.enable_channel(0)
         model.submit(Descriptor("d0", channel_id=0))
         env.run(until=10)
@@ -29,7 +37,15 @@ class TestGdmaIpModel(unittest.TestCase):
 
     def test_gdma_write_backpressure_stalls_until_destination_ready(self):
         env = simpy.Environment()
-        model = GdmaIpModel(env, fetch_latency=1, read_latency=1, write_latency=1, completion_latency=1, channel_scan_latency=1, irq_latency=1)
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=1,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            irq_latency=1,
+        )
         model.enable_channel(0)
         model.set_memory_ready(destination=False)
         model.submit(Descriptor("d0", channel_id=0))
@@ -66,7 +82,15 @@ class TestGdmaIpModel(unittest.TestCase):
 
     def test_gdma_completion_backpressure_stalls_until_ready(self):
         env = simpy.Environment()
-        model = GdmaIpModel(env, fetch_latency=1, read_latency=1, write_latency=1, completion_latency=1, channel_scan_latency=1, irq_latency=1)
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=1,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            irq_latency=1,
+        )
         model.enable_channel(0)
         model.set_memory_ready(completion=False)
         model.submit(Descriptor("d0", channel_id=0))
@@ -89,7 +113,15 @@ class TestGdmaIpModel(unittest.TestCase):
 
     def test_gdma_full_data_buffer_counts_stall(self):
         env = simpy.Environment()
-        model = GdmaIpModel(env, fetch_latency=1, read_latency=1, write_latency=1, completion_latency=1, channel_scan_latency=1, buffer_depth=1)
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=1,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            buffer_depth=1,
+        )
         model.enable_channel(0)
         model.set_memory_ready(destination=False)
         model.submit(Descriptor("d0", channel_id=0))
@@ -100,7 +132,16 @@ class TestGdmaIpModel(unittest.TestCase):
 
     def test_gdma_interrupt_coalescing_threshold(self):
         env = simpy.Environment()
-        model = GdmaIpModel(env, fetch_latency=1, read_latency=1, write_latency=1, completion_latency=1, channel_scan_latency=1, irq_latency=1, coalesce_threshold=2)
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=1,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            irq_latency=1,
+            coalesce_threshold=2,
+        )
         model.enable_channel(0)
         model.submit(Descriptor("d0", channel_id=0))
         model.submit(Descriptor("d1", channel_id=0))

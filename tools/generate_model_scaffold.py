@@ -68,14 +68,14 @@ def render_scaffold(template: dict[str, Any]) -> str:
         "",
         "",
         f"class {class_name}:",
-        f"    \"\"\"Template-generated SimPy scaffold for {ip}.",
+        f'    """Template-generated SimPy scaffold for {ip}.',
         "",
         "    Fill the TODO hooks using only behavior present in the reviewed",
         "    template. Keep the generated FSM/process structure intact unless the",
         "    template changes and is linted again.",
-        "    \"\"\"",
+        '    """',
         "",
-        "    def __init__(self, env: simpy.Environment, log_level: str = \"WARNING\", log_file: str = \"run.log\"):",
+        '    def __init__(self, env: simpy.Environment, log_level: str = "WARNING", log_file: str = "run.log"):',
         "        self.env = env",
         f"        self.logger = get_ip_logger({ip!r}, log_level, log_file)",
         "        self.input_q = simpy.Store(env)",
@@ -106,11 +106,11 @@ def render_scaffold(template: dict[str, Any]) -> str:
 
     lines.extend(
         [
-            f"        self.logger.info(\"initialized\")",
+            '        self.logger.info("initialized")',
             "",
             "",
             "    def submit(self, command: Command):",
-            "        self.logger.info(\"submit cmd=%s kind=%s\", command.cmd_id, command.kind)",
+            '        self.logger.info("submit cmd=%s kind=%s", command.cmd_id, command.kind)',
             "        return self.input_q.put(command)",
             "",
         ]
@@ -125,10 +125,10 @@ def render_scaffold(template: dict[str, Any]) -> str:
         lines.extend(
             [
                 f"    def {method}_process(self):",
-                f"        \"\"\"FSM `{name}` states: {states}.\"\"\"",
+                f'        """FSM `{name}` states: {states}."""',
                 "        while True:",
                 f"            self.metrics[{name + '_ticks'!r}] += 1",
-                f"            self.logger.debug(\"fsm={name} tick time=%s\", self.env.now)",
+                f'            self.logger.debug("fsm={name} tick time=%s", self.env.now)',
                 "            # TODO: implement transitions/actions from template fsm_processes.",
                 "            # TODO: preserve queue/resource/interface behavior from the template.",
                 f"            yield self.env.timeout({default_cycles})",

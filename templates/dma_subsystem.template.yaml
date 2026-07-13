@@ -52,7 +52,7 @@ interfaces:
     clock_domain: bus_clk
     transactions:
       - name: qos_tenant_config
-        fields: [tenant_id, token_budget, limit_type]
+        fields: [tenant_id, token_budget]
         handshake: immediate
         timing_notes: takes effect before subsequent completion scheduling decisions
 
@@ -67,7 +67,7 @@ commands:
     timing_effects: [glue_intake_delay, member_ip_pipeline_delays]
   - name: CONFIGURE_QOS
     description: Configure a tenant's completion-IP token budget.
-    fields: [tenant_id, token_budget, limit_type]
+    fields: [tenant_id, token_budget]
     valid_conditions: [known_tenant]
     completion_conditions: [config_applied]
     error_conditions: []

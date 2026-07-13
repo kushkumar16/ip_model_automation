@@ -25,7 +25,7 @@ interfaces:
     clock_domain: core_clk
     transactions:
       - name: tenant_config
-        fields: [tenant_alive, limit_type, read_iops_per_sec, write_iops_per_sec, read_bw_kb_per_sec, write_bw_kb_per_sec, max_burst_read_iops, max_burst_write_iops, max_burst_read_bw, max_burst_write_bw]
+        fields: [tenant_alive, read_iops_per_sec, write_iops_per_sec, read_bw_kb_per_sec, write_bw_kb_per_sec]
         handshake: register_write_or_static_config
         timing_notes: sampled at reset and on config update
   - name: completion_queue_if
@@ -45,18 +45,12 @@ commands:
     valid_conditions: [service_latency_elapsed, tenant_alive, read_tokens_available, output_ready]
     completion_conditions: [completion_emitted]
     error_conditions: [tenant_inactive, read_token_starvation]
-  - name: WRITE_DEFAULT
-    description: Write completion in default token mode.
+  - name: WRITE
+    description: Write completion candidate.
     fields: [tenant_id, cmd_id, size_kb, status]
     valid_conditions: [service_latency_elapsed, tenant_alive, write_tokens_available, output_ready]
     completion_conditions: [completion_emitted]
     error_conditions: [tenant_inactive, write_token_starvation]
-  - name: WRITE_WWV
-    description: Write completion that also consumes read-side tokens by configured ratio.
-    fields: [tenant_id, cmd_id, size_kb, status]
-    valid_conditions: [service_latency_elapsed, tenant_alive, write_tokens_available, read_equivalent_tokens_available, output_ready]
-    completion_conditions: [completion_emitted]
-    error_conditions: [tenant_inactive, write_token_starvation, read_equivalent_token_starvation]
   - name: FLUSH
     description: Ordered completion command.
     fields: [tenant_id, cmd_id, status]
@@ -137,9 +131,9 @@ fsm_processes:
     queues_used: [tenant_pending_queues]
     resources_used: [completion_output_port]
   - name: refill
-    purpose: Refills base tokens, applies burst rules, and snapshots metrics.
+    purpose: Refills base tokens and snapshots metrics.
     simpy_process: true
-    states: [WAIT_WINDOW, ASSESS_USAGE, REFILL_BASE, APPLY_BURST, PUBLISH_METRICS]
+    states: [WAIT_WINDOW, ASSESS_USAGE, REFILL_BASE, PUBLISH_METRICS]
     transitions:
       - from: WAIT_WINDOW
         to: ASSESS_USAGE
@@ -152,13 +146,8 @@ fsm_processes:
         actions: [restore_base_tokens]
         latency_cycles: 0
       - from: REFILL_BASE
-        to: APPLY_BURST
-        condition: base_tokens_restored
-        actions: [apply_soft_limit_burst]
-        latency_cycles: 0
-      - from: APPLY_BURST
         to: PUBLISH_METRICS
-        condition: burst_rules_done
+        condition: base_tokens_restored
         actions: [write_window_metrics]
         latency_cycles: 0
       - from: PUBLISH_METRICS
@@ -192,18 +181,8 @@ qos:
   dispatch_tick_ms: 1
   bandwidth_token_bytes: 512
   token_scale: 2.0
-  write_token_modes: [DEFAULT, WWV]
-  default_write_token_mode: WWV
-  wwv_default_ratios:
-    write_iops: 3.0
-    read_iops: 2.0
-    write_bw: 3.0
-    read_bw: 2.0
-  tenant_limit_types: [SOFT, HARD]
-  soft_limit_behavior: may_consume_accumulated_burst_tokens
-  hard_limit_behavior: cannot_consume_burst_tokens
-  token_debit_order: base_tokens_before_burst_tokens
-  burst_token_classes: [read, write, read_bw, write_bw]
+  token_classes: [read, write, read_bw, write_bw]
+  insufficient_token_behavior: command_remains_pending_until_refill
 
 fsm_relationships:
   fsm_count: 3
@@ -214,7 +193,7 @@ fsm_relationships:
       path: [accept.ENQUEUE, completion_scheduler.SELECT_TENANT, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
       description: Command must be accepted before scheduler can check tokens and emit completion.
     - name: token_refill_path
-      path: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.APPLY_BURST, refill.PUBLISH_METRICS]
+      path: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.PUBLISH_METRICS]
       description: Refill updates token state observed by scheduler.
   gating_relationships:
     - source: token_availability
@@ -247,7 +226,6 @@ timing_model:
         - {name: refill_window, cycles: 5000000, ns: 10000000}
         - {name: usage_assessment, cycles: 20, ns: 40}
         - {name: base_refill, cycles: 10, ns: 20}
-        - {name: burst_apply, cycles: 20, ns: 40}
         - {name: metrics_publish, cycles: 10, ns: 20}
   end_to_end_paths:
     - name: no_stall_completion
@@ -257,13 +235,11 @@ timing_model:
 
 functionality_model:
   implemented_in_simpy: true
-  state_variables: [tenant_pending_queues, tenant_tokens, tenant_burst_tokens, tenant_limit_type, tenant_alive, completed_commands, window_metrics, stall_counters, fsm_state, transition_counts]
+  state_variables: [tenant_pending_queues, tenant_tokens, tenant_alive, completed_commands, window_metrics, stall_counters, fsm_state, transition_counts]
   apis: [configure_tenant, accept_command, set_completion_ready, run, get_completed, get_metrics]
   invariants:
     - A completion is emitted only after required tokens are debited.
-    - WWV writes consume write tokens and read-equivalent tokens.
-    - Hard-limit tenants cannot consume burst tokens.
-    - APPLY_BURST rolls a soft-limit tenant's unused base tokens (end-of-window leftover, read before REFILL_BASE restores them) into its burst pool, capped at the configured burst maximum; hard-limit tenants are untouched.
+    - A command whose tenant lacks sufficient base tokens remains pending until the next refill window.
   ignored_payload_details: [nvme_completion_entry_bit_layout, data_payload_bytes]
 
 performance_model:
@@ -280,15 +256,15 @@ performance_model:
   metrics: [completed_read_cmds, completed_write_cmds, latency, throughput, utilization, queue_depth, token_stalls, output_stalls]
 
 test_scenarios:
-  - name: wwv_write_debits_read_budget
-    description: A write in WWV mode consumes write tokens and read-equivalent tokens by configured ratio.
+  - name: write_debits_write_budget
+    description: A write completion consumes write IOPS and write bandwidth tokens only.
     input_sequence: [T0_WRITE_4K]
-    expected_functional_behavior: [completion_emitted_when_both_token_classes_available]
-    expected_performance_properties: [read_iops_tokens_reduced, write_iops_tokens_reduced]
+    expected_functional_behavior: [completion_emitted_when_write_tokens_available]
+    expected_performance_properties: [write_iops_tokens_reduced, read_iops_tokens_unchanged]
     fsm_coverage: [accept.ENQUEUE, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
-  - name: hard_limit_blocks_burst
-    description: Hard-limit tenant cannot complete using accumulated burst tokens.
-    input_sequence: [T0_WRITE_4K_WITH_ONLY_BURST_READ_TOKENS]
+  - name: token_starvation_blocks_completion
+    description: A tenant with insufficient base tokens cannot complete until refill.
+    input_sequence: [T0_WRITE_4K_WITH_ZERO_TOKENS]
     expected_functional_behavior: [completion_not_emitted]
     expected_performance_properties: [token_stall_incremented]
     fsm_coverage: [completion_scheduler.WAIT_TOKENS]
@@ -299,8 +275,8 @@ test_scenarios:
     expected_performance_properties: [output_stall_incremented]
     fsm_coverage: [completion_scheduler.STALL_OUTPUT]
   - name: refill_restores_token_window
-    description: Refill window restores base tokens, applies burst rules, and publishes metrics.
+    description: Refill window restores base tokens and publishes metrics.
     input_sequence: [TOKEN_WINDOW_EXPIRES]
-    expected_functional_behavior: [base_tokens_restored, burst_rules_applied]
+    expected_functional_behavior: [base_tokens_restored]
     expected_performance_properties: [window_metric_snapshot_recorded]
-    fsm_coverage: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.APPLY_BURST, refill.PUBLISH_METRICS]
+    fsm_coverage: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.PUBLISH_METRICS]

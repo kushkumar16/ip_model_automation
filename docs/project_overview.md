@@ -703,7 +703,7 @@ suite passing (run it for the current count).*
 | IP | What it models |
 | --- | --- |
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. |
-| `completion_ip` | Command completion scheduling with per-tenant QoS tokens, WWV write accounting, soft/hard burst behavior, output backpressure. |
+| `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. |
 | `gdma_ip` | Descriptor-driven DMA with multiple parallel/sequential FSMs. |
 | `timer_ip` | Register, tick, compare, watchdog, debug-freeze, and interrupt timer behavior. |
 | `axi_interconnect_ip` | AXI read/write routing, arbitration, response routing, decode-error handling. |

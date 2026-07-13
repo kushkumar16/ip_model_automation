@@ -63,7 +63,6 @@ Fields:
 
 - `tenant_id`
 - `token_budget`
-- `limit_type`
 
 Timing:
 

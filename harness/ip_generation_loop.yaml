@@ -34,6 +34,21 @@ inputs:
 
 agent_contract: agents/ip_model_generation_agent.md
 
+# Named agent commands for the two `kind: agent` stages. Select one with
+# `python tools/auto_ip_pipeline.py --agent <name>` (or pass a raw command
+# via --agent-cmd, which overrides any profile). The pipeline is
+# agent-agnostic — any coding agent works if its command:
+#   - runs non-interactively (headless / auto-approve mode),
+#   - reads the prompt from stdin,
+#   - can create and edit files under the repo root,
+#   - exits when done (exit code is logged; the gates decide pass/fail).
+# The commands below are starting points — check the flags against the
+# CLI version you have installed.
+agent_profiles:
+  claude: claude -p --permission-mode acceptEdits
+  codex: codex exec --full-auto -
+  gemini: gemini --yolo
+
 stages:
   - name: parse_dld
     command: python tools/dld_to_template.py {dld}

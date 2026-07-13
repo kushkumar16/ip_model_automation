@@ -23,8 +23,11 @@ authoritative reference):
 
 Agent stages: by default the runner writes a ready-to-send prompt to
 ``reports/agent_requests/<ip>.<stage>.prompt.md`` and reports the IP as
-*awaiting* that stage. Pass ``--agent-cmd`` to run them unattended, e.g.::
+*awaiting* that stage. To run them unattended, pick an agent profile from the
+harness YAML's ``agent_profiles`` (any vendor's coding agent works — see the
+requirements listed there), or pass a raw command::
 
+    python tools/auto_ip_pipeline.py --agent codex
     python tools/auto_ip_pipeline.py --agent-cmd "claude -p --permission-mode acceptEdits"
 
 The prompt is piped to the command's stdin; while the gates fail, the agent
@@ -243,6 +246,22 @@ def implementation_prompt(ip_name: str, extra_context: str = "") -> str:
     )
 
 
+def resolve_agent_command(agent: str | None, agent_cmd: str | None, harness: dict) -> str | None:
+    """Resolve the agent shell command from --agent-cmd (raw, wins) or an
+    ``agent_profiles`` entry in the harness YAML. Returns None when neither
+    is given (agent stages then write prompt requests instead of running)."""
+    if agent_cmd:
+        return agent_cmd
+    if not agent:
+        return None
+    profiles = harness.get("agent_profiles") or {}
+    command = profiles.get(agent)
+    if not command:
+        known = ", ".join(sorted(profiles)) or "none defined"
+        raise SystemExit(f"unknown agent profile '{agent}' (harness agent_profiles: {known})")
+    return str(command)
+
+
 def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str) -> bool:
     """Run the agent command with the prompt on stdin, or write a request file.
 
@@ -427,10 +446,17 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--force", action="store_true", help="Process even if the DLD content is unchanged")
     parser.add_argument(
+        "--agent",
+        help="Named agent profile from the harness YAML's agent_profiles (e.g. claude, codex, "
+        "gemini) to run agent stages unattended. Any vendor's coding agent qualifies if it "
+        "meets the requirements listed next to agent_profiles.",
+    )
+    parser.add_argument(
         "--agent-cmd",
-        help="Shell command to run agent stages unattended; the prompt is piped to stdin "
-        '(e.g. "claude -p --permission-mode acceptEdits"). Without it, agent prompts are '
-        "written to reports/agent_requests/ and the IP is reported as awaiting that stage.",
+        help="Raw shell command to run agent stages unattended (overrides --agent); the prompt "
+        'is piped to stdin (e.g. "claude -p --permission-mode acceptEdits"). Without either '
+        "flag, agent prompts are written to reports/agent_requests/ and the IP is reported "
+        "as awaiting that stage.",
     )
     parser.add_argument(
         "--skip-final-gate", action="store_true", help="Skip the repo-wide (scope: repo) harness stages at the end"
@@ -438,6 +464,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     harness = load_harness()
+    agent_cmd = resolve_agent_command(args.agent, args.agent_cmd, harness)
     state = load_state()
     sources = [p.resolve() for p in args.dlds] if args.dlds else discover_dld_sources()
     for src in sources:
@@ -452,7 +479,7 @@ def main(argv: list[str]) -> int:
     print(f"processing {len(changed)} DLD(s): {', '.join(p.name for p in changed)}")
     statuses: dict[str, str] = {}
     for src in changed:
-        status = process_dld(src, harness, args.agent_cmd)
+        status = process_dld(src, harness, agent_cmd)
         statuses[src.name] = status
         if status == "complete":
             state[state_key(src)] = sha256(src)

@@ -104,6 +104,8 @@ def semantic_errors(template: dict[str, Any]) -> list[str]:
                 errors.append(f"timing_model.{entry.get('fsm')}: each operation must include `cycles` and `ns`")
                 break
 
+    errors += timing_coherence_errors(template)
+
     # every FSM must appear in at least one test scenario's fsm_coverage
     covered = " ".join(
         str(item)
@@ -115,6 +117,50 @@ def semantic_errors(template: dict[str, Any]) -> list[str]:
         if name and f"{name}." not in covered and name not in covered.split():
             errors.append(f"test_scenarios: no scenario covers FSM `{name}`")
 
+    return errors
+
+
+def timing_coherence_errors(template: dict[str, Any]) -> list[str]:
+    """The template's own timing numbers must be internally consistent, so a
+    transcription slip (e.g. cycles: 2 with ns: 5) fails the gate rather than
+    silently seeding a wrong delay into a generated model. This checks the
+    template against itself; it does not assert the model uses these numbers.
+    """
+    errors: list[str] = []
+    timing = template.get("timing_model", {})
+    clock = timing.get("clock_mhz")
+    cycle_ns = timing.get("cycle_time_ns")
+    if isinstance(clock, (int, float)) and clock > 0 and isinstance(cycle_ns, (int, float)):
+        # one cycle at C MHz is 1000/C ns
+        if round(1000 / clock) != cycle_ns:
+            errors.append(
+                f"timing_model: cycle_time_ns={cycle_ns} disagrees with clock_mhz={clock} "
+                f"(expected {round(1000 / clock)} ns/cycle)"
+            )
+    if not isinstance(cycle_ns, (int, float)):
+        return errors
+
+    for entry in timing.get("fsm_process_delays", []):
+        if not isinstance(entry, dict):
+            continue
+        for op in entry.get("operations", []):
+            if not isinstance(op, dict):
+                continue
+            cycles, ns = op.get("cycles"), op.get("ns")
+            if isinstance(cycles, (int, float)) and isinstance(ns, (int, float)) and ns != cycles * cycle_ns:
+                errors.append(
+                    f"timing_model.{entry.get('fsm')}.{op.get('name')}: "
+                    f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns}"
+                )
+    for path in timing.get("end_to_end_paths", []):
+        if not isinstance(path, dict):
+            continue
+        cycles, ns = path.get("cycles"), path.get("ns")
+        if isinstance(cycles, (int, float)) and isinstance(ns, (int, float)) and ns != cycles * cycle_ns:
+            errors.append(
+                f"timing_model.end_to_end_paths.{path.get('name')}: "
+                f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns}"
+            )
     return errors
 
 

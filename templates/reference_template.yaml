@@ -176,12 +176,19 @@ fsm_relationships:
       gates: example_fsm.DECODE
       stall_reason: queue_empty
 
+# timing_model: template_lint checks this section is internally coherent —
+# cycle_time_ns must equal 1000/clock_mhz, and every operation's and
+# end_to_end path's `ns` must equal `cycles * cycle_time_ns`. These are the
+# reviewed reference delays; the model carries them as constructor defaults
+# (tests may override with smaller values for speed), so the numbers are a
+# checked-coherent reference, not a value the gate asserts the model equals.
 timing_model:
   clock_mhz: 500
-  cycle_time_ns: 2
+  cycle_time_ns: 2                       # must equal 1000 / clock_mhz
   assumption: Hard-coded starter timing from the <Name> IP DLD.
   # fsm_process_delays: one entry PER FSM; operations come from the DLD
   # "| FSM/process | Runs as | Delay model |" table ("<op>: <c> cycles = <n> ns").
+  # Each op's ns MUST equal cycles * cycle_time_ns.
   fsm_process_delays:
     - fsm: example_fsm
       mode: parallel_process

@@ -108,6 +108,27 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
         self.assertIn("templates: 11", text)
 
+    def test_agent_profile_resolution_supports_any_vendor(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        pipeline_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", pipeline_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(pipeline)
+
+        harness = pipeline.load_harness()
+        profiles = harness.get("agent_profiles") or {}
+        self.assertIn("claude", profiles)
+        self.assertIn("codex", profiles)
+        self.assertTrue(all(isinstance(cmd, str) and cmd.strip() for cmd in profiles.values()))
+
+        resolve = pipeline.resolve_agent_command
+        self.assertIsNone(resolve(None, None, harness))
+        self.assertEqual(resolve("codex", None, harness), profiles["codex"])
+        self.assertEqual(resolve("codex", "my-agent --auto", harness), "my-agent --auto")
+        with self.assertRaises(SystemExit):
+            resolve("unknown-agent", None, harness)
+
     def test_reference_template_is_lint_clean_and_undiscovered(self):
         repo_root = Path(__file__).resolve().parents[1]
         reference = repo_root / "templates" / "reference_template.yaml"

@@ -95,11 +95,14 @@ for those the pipeline either:
 - **writes a ready-to-send prompt** to `reports/agent_requests/` and pauses,
   telling you which IP is *awaiting* which step (you or an LLM complete it,
   then re-run), **or**
-- **runs unattended** if you give it an LLM command — it pipes the prompt in,
+- **runs unattended** if you give it a coding agent — any vendor's agent
+  works (Claude, Codex, Gemini, in-house) as long as it runs headless, reads
+  the prompt from stdin, and can edit files. The runner pipes the prompt in,
   validates the result, and retries with the failure log if validation fails:
 
   ```powershell
-  python tools\auto_ip_pipeline.py --agent-cmd "claude -p --permission-mode acceptEdits"
+  python tools\auto_ip_pipeline.py --agent codex        # named profile from the harness YAML
+  python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any raw command
   ```
 
 When the pipeline reports green, you have a validated model in
@@ -473,11 +476,18 @@ Details worth knowing:
 - **The two agent steps** (template review, model implementation) are the
   only places judgment is needed. Each declares `gates:` in the harness YAML
   — tool stages whose pass/fail decides everything: if the gates already
-  pass, the agent is skipped entirely. Without `--agent-cmd`, the runner
-  writes the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and
-  reports the IP as *awaiting*. With `--agent-cmd`, it pipes the prompt to
-  your LLM command and, while the gates fail, re-invokes it with the failure
-  log — up to `max_attempts` per stage (default `loop_policy.max_iterations`).
+  pass, the agent is skipped entirely. Without an agent, the runner writes
+  the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and reports
+  the IP as *awaiting*. With `--agent <profile>` (named commands in the
+  harness YAML's `agent_profiles`) or `--agent-cmd "<raw command>"`, it pipes
+  the prompt to that command and, while the gates fail, re-invokes it with
+  the failure log — up to `max_attempts` per stage (default
+  `loop_policy.max_iterations`).
+- **The agent is a plug-in point, not a dependency**: the prompt pack plus
+  the contract in `agents/ip_model_generation_agent.md` are the complete task
+  description, and the same gates (template coverage, lint, unit tests,
+  coding style, coverage thresholds) judge the output no matter which vendor's
+  agent — or which human — wrote the model and its tests.
 
 ## Beyond single IPs: subsystems
 

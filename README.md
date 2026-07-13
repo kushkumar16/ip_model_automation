@@ -144,15 +144,26 @@ python tools\auto_ip_pipeline.py --force              # reprocess everything
 ```
 
 The two harness agent stages (`review_template`, `agent_implementation`) need
-an LLM or a human. By default the runner writes a ready-to-send prompt to
-`reports\agent_requests\<ip>.<stage>.prompt.md` and reports the IP as
-*awaiting* that stage. To run them unattended, pass an agent command — the
-prompt is piped to its stdin, and failed validations re-invoke the agent with
-the failure log up to `loop_policy.max_iterations` from the harness:
+an LLM or a human. The pipeline is **agent-agnostic** — models and unit tests
+may be written by any vendor's coding agent that can run headless, read the
+prompt from stdin, and edit files (requirements and named profiles are in
+`harness/ip_generation_loop.yaml` under `agent_profiles`; the contract is
+`agents/ip_model_generation_agent.md`). By default the runner writes a
+ready-to-send prompt to `reports\agent_requests\<ip>.<stage>.prompt.md` and
+reports the IP as *awaiting* that stage. To run unattended, pick a profile or
+pass a raw command — the prompt is piped to the agent's stdin, and failed
+validations re-invoke it with the failure log up to
+`loop_policy.max_iterations` from the harness:
 
 ```powershell
-python tools\auto_ip_pipeline.py --agent-cmd "claude -p --permission-mode acceptEdits"
+python tools\auto_ip_pipeline.py --agent claude                  # profile from the harness YAML
+python tools\auto_ip_pipeline.py --agent codex                   # OpenAI Codex CLI profile
+python tools\auto_ip_pipeline.py --agent gemini                  # Gemini CLI profile
+python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any other agent, raw command
 ```
+
+Whichever agent writes the code, the same gates judge it: template coverage,
+lint, unit tests, the coding style check, and the coverage thresholds.
 
 ## Daily Validation
 
@@ -322,7 +333,7 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/run_loop_validation.py`: deterministic harness/agent loop validator.
 - `tools/validate_ip_flow.py`: unified validation command.
 - `examples/model_generation_skill.md`: LLM generation instructions.
-- `skills/ip-model-generation`: reusable Codex skill for template-driven IP model generation.
+- `skills/ip-model-generation`: reusable, agent-portable skill (SKILL.md format) for template-driven IP model generation.
 - `harness/ip_generation_loop.yaml`: generation-loop stages and pass criteria.
 - `agents/ip_model_generation_agent.md`: contract for human/LLM/model-generation agents.
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.

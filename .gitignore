@@ -9,3 +9,6 @@ dist/
 reports/
 templates/*.template.draft.yaml
 prompt_packs/
+# Office lock files
+~$*
+**/~$*

@@ -7,7 +7,6 @@ import simpy
 
 from .common import Command, WeightedOrder, get_ip_logger
 
-
 DEFAULT_TOPOLOGY = {
     "port0": {
         "tenants": {
@@ -67,7 +66,9 @@ class ArbitrationIpModel:
 
         self.port_policy = WeightedOrder(normalized_weights["ports"])
         self.tenant_policies = {
-            port_id: WeightedOrder({tenant: normalized_weights["tenants"].get(tenant, 1) for tenant in port_cfg["tenants"]})
+            port_id: WeightedOrder(
+                {tenant: normalized_weights["tenants"].get(tenant, 1) for tenant in port_cfg["tenants"]}
+            )
             for port_id, port_cfg in self.topology.items()
             if self.port_mode != "single" or port_id == "port0"
         }
@@ -101,13 +102,17 @@ class ArbitrationIpModel:
 
         self.selected_sq_q = simpy.Store(env, capacity=1)
         self.policy_update_q = simpy.Store(env)
-        self.queues: Dict[str, Dict[str, Dict[str, Deque[Command]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(deque)))
+        self.queues: Dict[str, Dict[str, Dict[str, Deque[Command]]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(deque))
+        )
         self.port_pending_bitmap: Dict[str, bool] = {port: False for port in self.topology}
         self.tenant_pending_bitmap: Dict[str, Dict[str, bool]] = {
             port: {tenant: False for tenant in cfg["tenants"]} for port, cfg in self.topology.items()
         }
         self.sq_pending_bitmap: Dict[str, Dict[str, bool]] = {
-            tenant: {sq: False for sq in sqs} for cfg in self.topology.values() for tenant, sqs in cfg["tenants"].items()
+            tenant: {sq: False for sq in sqs}
+            for cfg in self.topology.values()
+            for tenant, sqs in cfg["tenants"].items()
         }
         self.bitmap_dirty = False
         self.inflight_sqs = set()
@@ -152,7 +157,12 @@ class ArbitrationIpModel:
         self.bitmap_dirty = True
         self.logger.info("enqueue cmd=%s port=%s tenant=%s sq=%s", command.cmd_id, port_id, tenant_id, sq_id)
 
-    def configure_burst(self, device: Optional[int] = None, tenants: Optional[Dict[str, int]] = None, sqs: Optional[Dict[str, Dict[str, int]]] = None) -> None:
+    def configure_burst(
+        self,
+        device: Optional[int] = None,
+        tenants: Optional[Dict[str, int]] = None,
+        sqs: Optional[Dict[str, Dict[str, int]]] = None,
+    ) -> None:
         if device is not None:
             self.device_burst_available = int(device)
         for tenant_id, value in (tenants or {}).items():

@@ -8,7 +8,9 @@ from ip_model_automation.ip import InterruptControllerIpModel
 class TestInterruptControllerIpModel(unittest.TestCase):
     def test_interrupt_delivery(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, sample_latency=1, pending_latency=1, priority_latency=1, delivery_latency=1)
+        model = InterruptControllerIpModel(
+            env, sample_latency=1, pending_latency=1, priority_latency=1, delivery_latency=1
+        )
         model.configure_source(3, priority=0)
         model.assert_edge(3)
         env.run(until=8)
@@ -16,7 +18,16 @@ class TestInterruptControllerIpModel(unittest.TestCase):
 
     def test_interrupt_priority_mask_ack_and_eoi(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, ack_latency=1, eoi_latency=1)
+        model = InterruptControllerIpModel(
+            env,
+            sample_latency=1,
+            pending_latency=1,
+            filter_latency=1,
+            priority_latency=1,
+            delivery_latency=1,
+            ack_latency=1,
+            eoi_latency=1,
+        )
         model.configure_source(1, priority=5)
         model.configure_source(2, priority=0)
         model.assert_edge(1)
@@ -34,7 +45,9 @@ class TestInterruptControllerIpModel(unittest.TestCase):
 
     def test_interrupt_mask_blocks_delivery_until_unmasked(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1)
+        model = InterruptControllerIpModel(
+            env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1
+        )
         model.configure_source(4, priority=0, masked=True)
         model.assert_edge(4)
         env.run(until=8)
@@ -46,7 +59,16 @@ class TestInterruptControllerIpModel(unittest.TestCase):
 
     def test_interrupt_level_reasserts_after_eoi(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, ack_latency=1, eoi_latency=1)
+        model = InterruptControllerIpModel(
+            env,
+            sample_latency=1,
+            pending_latency=1,
+            filter_latency=1,
+            priority_latency=1,
+            delivery_latency=1,
+            ack_latency=1,
+            eoi_latency=1,
+        )
         model.configure_source(5, priority=0, trigger_type="LEVEL")
         model.set_level(5, True)
         env.run(until=8)
@@ -59,7 +81,9 @@ class TestInterruptControllerIpModel(unittest.TestCase):
 
     def test_interrupt_disabled_source_event_is_dropped(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1)
+        model = InterruptControllerIpModel(
+            env, sample_latency=1, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1
+        )
         model.configure_source(1, priority=1, enabled=False)
         self.assertNotIn(1, model.enabled)
         model.assert_edge(1)
@@ -85,7 +109,9 @@ class TestInterruptControllerIpModel(unittest.TestCase):
 
     def test_interrupt_software_interrupt_delivery(self):
         env = simpy.Environment()
-        model = InterruptControllerIpModel(env, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, software_latency=1)
+        model = InterruptControllerIpModel(
+            env, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, software_latency=1
+        )
         model.inject_software_interrupt(7)
         env.run(until=8)
         self.assertEqual(model.delivered[0][1], 7)

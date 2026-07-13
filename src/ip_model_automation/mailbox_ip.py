@@ -72,9 +72,7 @@ class MailboxIpModel:
     # Public API (functionality_model.apis)
     # ------------------------------------------------------------------ #
     def configure_channel(self, channel_id: int, enable: bool = True, masked: bool = False):
-        return self.register_if.put(
-            {"op": "config", "channel_id": channel_id, "enable": enable, "masked": masked}
-        )
+        return self.register_if.put({"op": "config", "channel_id": channel_id, "enable": enable, "masked": masked})
 
     def send_message(self, channel_id: int, message: Any):
         self.logger.info("send channel=%s", channel_id)

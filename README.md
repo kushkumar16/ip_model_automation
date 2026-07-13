@@ -176,6 +176,16 @@ Run only the FSM coverage report:
 python tools\report_model_coverage.py
 ```
 
+Check coding style — ruff lint + format over `src/`, `tools/`, and `tests/`
+(rules in `ruff.toml`, conventions documented in
+`skills/ip-model-generation/references/coding_style.md`; the automated
+pipeline runs this as a hard repo-wide gate):
+
+```powershell
+python tools\check_code_style.py          # check only
+python tools\check_code_style.py --fix    # auto-fix and reformat
+```
+
 Measure *code* coverage — which model lines the unit tests actually execute
 (distinct from the template FSM/scenario coverage above). The table lands in
 `reports\code_coverage\coverage.txt`; `--html` adds a browsable report at
@@ -302,6 +312,8 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/template_lint.py`: strict template contract checker.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
+- `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
+- `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.

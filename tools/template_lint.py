@@ -13,7 +13,6 @@ import re
 import sys
 from pathlib import Path
 
-
 REQUIRED_TOP_LEVEL = [
     "ip",
     "interfaces",
@@ -121,7 +120,13 @@ def collect_timing_fsms(text: str) -> set[str]:
         if stripped == "fsm_process_delays:":
             in_timing = True
             continue
-        if in_timing and line.startswith("  ") and not line.startswith("    ") and stripped.endswith(":") and stripped != "fsm_process_delays:":
+        if (
+            in_timing
+            and line.startswith("  ")
+            and not line.startswith("    ")
+            and stripped.endswith(":")
+            and stripped != "fsm_process_delays:"
+        ):
             in_timing = False
         if in_timing and stripped.startswith("- fsm:"):
             timing.add(stripped.split(":", 1)[1].strip())
@@ -208,7 +213,14 @@ def lint_generic_contract(text: str) -> list[str]:
     fsm_blocks = collect_fsm_blocks(text)
     for fsm_name, lines in fsm_blocks.items():
         block = "\n".join(lines)
-        for required in ["simpy_process: true", "states:", "transitions:", "interfaces_touched:", "queues_used:", "resources_used:"]:
+        for required in [
+            "simpy_process: true",
+            "states:",
+            "transitions:",
+            "interfaces_touched:",
+            "queues_used:",
+            "resources_used:",
+        ]:
             if required not in block:
                 errors.append(f"fsm_processes.{fsm_name}: missing `{required}`")
         if "- from:" not in block:
@@ -218,7 +230,9 @@ def lint_generic_contract(text: str) -> list[str]:
     if relationship_count is None:
         errors.append("fsm_relationships: missing integer fsm_count")
     elif relationship_count != len(fsm_names):
-        errors.append(f"fsm_relationships: fsm_count={relationship_count} but fsm_processes defines {len(fsm_names)} FSMs")
+        errors.append(
+            f"fsm_relationships: fsm_count={relationship_count} but fsm_processes defines {len(fsm_names)} FSMs"
+        )
 
     timing_fsms = collect_timing_fsms(text)
     missing_timing = sorted(set(fsm_names) - timing_fsms)
@@ -262,7 +276,11 @@ def lint_generic_contract(text: str) -> list[str]:
         if required not in scenario_text:
             errors.append(f"test_scenarios: missing `{required}` coverage field")
     for fsm_name in fsm_names:
-        if f"{fsm_name}." not in scenario_text and f"- {fsm_name}" not in scenario_text and f"[{fsm_name}" not in scenario_text:
+        if (
+            f"{fsm_name}." not in scenario_text
+            and f"- {fsm_name}" not in scenario_text
+            and f"[{fsm_name}" not in scenario_text
+        ):
             errors.append(f"test_scenarios: no scenario covers FSM `{fsm_name}`")
 
     return errors

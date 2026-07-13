@@ -75,6 +75,7 @@ dld_tool = _load_tool("dld_to_template")
 # docx -> markdown
 # --------------------------------------------------------------------------- #
 
+
 def docx_to_markdown(docx_path: Path) -> str:
     """Convert a DLD authored in Word into the markdown shape the extractor
     expects (headings, bullets, tables). Requires python-docx."""
@@ -138,6 +139,7 @@ def ensure_markdown_dld(source: Path) -> Path:
 # Change detection
 # --------------------------------------------------------------------------- #
 
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -168,6 +170,7 @@ def state_key(path: Path) -> str:
 # Stage helpers
 # --------------------------------------------------------------------------- #
 
+
 def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
     """Run one tool stage's harness command with {placeholder} substitution."""
     name = stage["name"]
@@ -195,6 +198,7 @@ def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
 # Agent stages
 # --------------------------------------------------------------------------- #
 
+
 def review_prompt(ip_name: str, extra_context: str = "") -> str:
     return "\n".join(
         [
@@ -208,7 +212,8 @@ def review_prompt(ip_name: str, extra_context: str = "") -> str:
             "   DLD-stated behavior. For DLD open items, choose a conservative default and record",
             "   it in the gaps report — never invent silent behavior.",
             f"3. Run: python tools/template_lint.py templates/{ip_name}.template.draft.yaml",
-            f"4. Run: python tools/check_template_coverage.py templates/{ip_name}.template.draft.yaml dlds/{ip_name}_dld.md",
+            f"4. Run: python tools/check_template_coverage.py templates/{ip_name}.template.draft.yaml"
+            f" dlds/{ip_name}_dld.md",
             f"5. When both pass with no TODO_REVIEW left, copy the draft to templates/{ip_name}.template.yaml",
             "   and re-run the coverage check with --strict on the promoted file.",
             extra_context,
@@ -316,6 +321,7 @@ def stage_context(harness: dict, ip_name: str | None = None, dld_md: Path | None
 # Per-IP pipeline (generic engine over the harness stage list)
 # --------------------------------------------------------------------------- #
 
+
 def run_gates(
     gate_names: list[str],
     stages_by_name: dict[str, dict],
@@ -412,9 +418,7 @@ def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "dlds",
         nargs="*",
@@ -424,7 +428,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--force", action="store_true", help="Process even if the DLD content is unchanged")
     parser.add_argument(
         "--agent-cmd",
-        help='Shell command to run agent stages unattended; the prompt is piped to stdin '
+        help="Shell command to run agent stages unattended; the prompt is piped to stdin "
         '(e.g. "claude -p --permission-mode acceptEdits"). Without it, agent prompts are '
         "written to reports/agent_requests/ and the IP is reported as awaiting that stage.",
     )
@@ -440,11 +444,7 @@ def main(argv: list[str]) -> int:
         if not src.is_file():
             raise SystemExit(f"DLD not found: {src}")
 
-    changed = [
-        src
-        for src in sources
-        if args.force or args.dlds or state.get(state_key(src)) != sha256(src)
-    ]
+    changed = [src for src in sources if args.force or args.dlds or state.get(state_key(src)) != sha256(src)]
     if not changed:
         print("no new or modified DLDs; nothing to do")
         return 0

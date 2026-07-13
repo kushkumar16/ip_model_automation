@@ -17,7 +17,9 @@ class TestAxiInterconnectIpModel(unittest.TestCase):
 
     def test_axi_routes_mapped_read_and_write(self):
         env = simpy.Environment()
-        model = AxiInterconnectIpModel(env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1)
+        model = AxiInterconnectIpModel(
+            env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1
+        )
         model.add_route(0x1000, 0x2000, "S0")
         model.submit(Command("r0", "READ", addr=0x1004))
         model.submit(Command("w0", "WRITE", addr=0x1008))
@@ -31,7 +33,9 @@ class TestAxiInterconnectIpModel(unittest.TestCase):
 
     def test_axi_write_backpressure_stalls_until_slave_ready(self):
         env = simpy.Environment()
-        model = AxiInterconnectIpModel(env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1)
+        model = AxiInterconnectIpModel(
+            env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1
+        )
         model.add_route(0x1000, 0x2000, "S0")
         model.set_slave_ready("S0", False)
         model.submit(Command("w0", "WRITE", addr=0x1008))
@@ -41,7 +45,6 @@ class TestAxiInterconnectIpModel(unittest.TestCase):
         model.set_slave_ready("S0", True)
         env.run(until=14)
         self.assertEqual(model.responses[0][1].cmd_id, "w0")
-
 
     def test_axi_write_decode_error_returns_decerr(self):
         env = simpy.Environment()
@@ -54,7 +57,9 @@ class TestAxiInterconnectIpModel(unittest.TestCase):
 
     def test_axi_read_backpressure_stalls_until_slave_ready(self):
         env = simpy.Environment()
-        model = AxiInterconnectIpModel(env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1)
+        model = AxiInterconnectIpModel(
+            env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1
+        )
         model.add_route(0x1000, 0x2000, "S0")
         model.set_slave_ready("S0", False)
         model.submit(Command("r0", "READ", addr=0x1004))
@@ -67,7 +72,9 @@ class TestAxiInterconnectIpModel(unittest.TestCase):
 
     def test_axi_write_join_waits_for_late_write_data(self):
         env = simpy.Environment()
-        model = AxiInterconnectIpModel(env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1)
+        model = AxiInterconnectIpModel(
+            env, decode_latency=1, arbitration_latency=1, slave_latency=1, response_latency=1, write_join_latency=1
+        )
         model.add_route(0x1000, 0x2000, "S0")
         command = Command("w0", "WRITE", addr=0x1008)
         model.aw_q.put((0, command))

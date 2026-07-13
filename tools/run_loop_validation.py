@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -60,7 +59,11 @@ def run_loop_once(repo_root: Path, harness: dict[str, Any]) -> list[GateResult]:
     model_dir = repo_root / harness.get("inputs", {}).get("model_dir", "src/ip_model_automation")
     results: list[GateResult] = []
 
-    lint_cmd = [sys.executable, str(repo_root / "tools" / "template_lint.py"), *[str(t.relative_to(repo_root)) for t in templates]]
+    lint_cmd = [
+        sys.executable,
+        str(repo_root / "tools" / "template_lint.py"),
+        *[str(t.relative_to(repo_root)) for t in templates],
+    ]
     results.append(run_command(repo_root, lint_cmd))
 
     with tempfile.TemporaryDirectory(prefix="ip_loop_scaffold_") as scaffold_tmp:
@@ -94,8 +97,14 @@ def run_loop_once(repo_root: Path, harness: dict[str, Any]) -> list[GateResult]:
             )
 
     results.append(run_command(repo_root, [sys.executable, str(repo_root / "tools" / "report_model_coverage.py")]))
-    results.append(run_command(repo_root, [sys.executable, "-m", "unittest", "discover", "-s", "tests"], env=python_env(repo_root)))
-    results.append(run_command(repo_root, [sys.executable, str(repo_root / "tools" / "validate_ip_flow.py")], env=python_env(repo_root)))
+    results.append(
+        run_command(repo_root, [sys.executable, "-m", "unittest", "discover", "-s", "tests"], env=python_env(repo_root))
+    )
+    results.append(
+        run_command(
+            repo_root, [sys.executable, str(repo_root / "tools" / "validate_ip_flow.py")], env=python_env(repo_root)
+        )
+    )
 
     if not model_dir.is_dir():
         results.append(GateResult("model_dir_exists", False, f"missing {model_dir}"))

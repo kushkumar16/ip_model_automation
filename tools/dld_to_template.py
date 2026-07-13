@@ -34,9 +34,7 @@ def require_yaml():
     try:
         import yaml  # type: ignore
     except ModuleNotFoundError as exc:  # pragma: no cover - environment guard
-        raise SystemExit(
-            "PyYAML is required. Install project requirements before running this tool."
-        ) from exc
+        raise SystemExit("PyYAML is required. Install project requirements before running this tool.") from exc
     return yaml
 
 
@@ -69,6 +67,7 @@ def snake(name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Low-level markdown helpers
 # --------------------------------------------------------------------------- #
+
 
 def split_blocks(lines: list[str], pattern: re.Pattern[str]) -> list[tuple[str, list[str]]]:
     """Group lines into (heading_capture, block_lines) for headings matching pattern.
@@ -238,7 +237,7 @@ def extract_timing_table(lines: list[str], fsm_names: list[str]) -> dict[str, li
 
 def extract_open_items(lines: list[str]) -> list[str]:
     for raw_name, block in split_blocks(lines, re.compile(r"^#{2}\s+[\d.]*\s*(Open Items.*)$", re.IGNORECASE)):
-        return [strip_code(l.strip()[2:]) for l in block if l.strip().startswith("- ")]
+        return [strip_code(line.strip()[2:]) for line in block if line.strip().startswith("- ")]
     return []
 
 
@@ -250,6 +249,7 @@ def extract_fsm_count(text: str, fallback: int) -> int:
 # --------------------------------------------------------------------------- #
 # Draft assembly
 # --------------------------------------------------------------------------- #
+
 
 def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
     lines = text.splitlines()
@@ -280,11 +280,9 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
             "clock_domains": [{"name": "core_clk", "frequency_mhz": clock_mhz}],
             "reset": {"type": "sync", "behavior": f"{TODO}_reset_behavior"},
         },
-        "interfaces": [strip_raw(i) for i in interfaces]
-        or [placeholder_interface()],
+        "interfaces": [strip_raw(i) for i in interfaces] or [placeholder_interface()],
         "commands": [placeholder_command()],
-        "fsm_processes": [build_fsm_entry(f, interfaces) for f in fsms]
-        or [placeholder_fsm()],
+        "fsm_processes": [build_fsm_entry(f, interfaces) for f in fsms] or [placeholder_fsm()],
         "fsm_relationships": {
             "fsm_count": extract_fsm_count(text, len(fsm_names)),
             "parallel_processes": [fsm_names or [f"{TODO}_fsm"]],
@@ -329,8 +327,7 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
     missing_timing = [n for n in fsm_names if n not in timing_ops]
     if missing_timing:
         gaps.append(
-            "timing_model: no DLD timing row for FSMs "
-            f"{', '.join(missing_timing)}; TODO_REVIEW operations emitted"
+            f"timing_model: no DLD timing row for FSMs {', '.join(missing_timing)}; TODO_REVIEW operations emitted"
         )
     return draft, gaps
 
@@ -450,6 +447,7 @@ def placeholder_fsm() -> dict[str, Any]:
 # Gaps report
 # --------------------------------------------------------------------------- #
 
+
 def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], open_items: list[str]) -> str:
     fsms = [f["name"] for f in draft["fsm_processes"]]
     interfaces = [i["name"] for i in draft["interfaces"]]
@@ -479,8 +477,11 @@ def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], ope
         "2. If the DLD does not state a detail, choose a conservative default and note",
         "   it here rather than inventing silent behavior.",
         "3. Run `python tools/template_lint.py templates/" + ip_name + ".template.draft.yaml`.",
-        "4. Run `python tools/check_template_coverage.py templates/" + ip_name
-        + ".template.draft.yaml dlds/" + ip_name + "_dld.md`.",
+        "4. Run `python tools/check_template_coverage.py templates/"
+        + ip_name
+        + ".template.draft.yaml dlds/"
+        + ip_name
+        + "_dld.md`.",
         "5. Promote the draft to the golden template name and re-run validation.",
         "",
     ]
@@ -490,6 +491,7 @@ def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], ope
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+
 
 def ip_name_from_path(path: Path) -> str:
     stem = path.name

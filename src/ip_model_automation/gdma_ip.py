@@ -105,14 +105,21 @@ class GdmaIpModel:
         self.channel_state[channel_id] = "HALTED"
         self.logger.warning("channel halted channel=%s", channel_id)
 
-    def set_memory_ready(self, source: bool | None = None, destination: bool | None = None, completion: bool | None = None) -> None:
+    def set_memory_ready(
+        self, source: bool | None = None, destination: bool | None = None, completion: bool | None = None
+    ) -> None:
         if source is not None:
             self.source_ready = source
         if destination is not None:
             self.destination_ready = destination
         if completion is not None:
             self.completion_ready = completion
-        self.logger.info("memory_ready source=%s destination=%s completion=%s", self.source_ready, self.destination_ready, self.completion_ready)
+        self.logger.info(
+            "memory_ready source=%s destination=%s completion=%s",
+            self.source_ready,
+            self.destination_ready,
+            self.completion_ready,
+        )
 
     def submit(self, desc: Descriptor):
         self.descriptor_start[desc.desc_id] = self.env.now
@@ -123,7 +130,9 @@ class GdmaIpModel:
         if desc.channel_id not in self.enabled:
             self.errors.append("channel_disabled")
             self.channel_state[desc.channel_id] = "ERROR"
-            self.logger.error("descriptor rejected disabled channel descriptor=%s channel=%s", desc.desc_id, desc.channel_id)
+            self.logger.error(
+                "descriptor rejected disabled channel descriptor=%s channel=%s", desc.desc_id, desc.channel_id
+            )
             return False
         if desc.length_bytes <= 0:
             self.errors.append("bad_descriptor")
@@ -199,7 +208,9 @@ class GdmaIpModel:
             self.fsm_state["read_response"] = "WRITE_BUFFER"
             yield self.internal_data_buffer.put(desc)
             self.metrics["buffer_writes"] += 1
-            self.metrics["buffer_occupancy"] = max(self.metrics["buffer_occupancy"], len(self.internal_data_buffer.items))
+            self.metrics["buffer_occupancy"] = max(
+                self.metrics["buffer_occupancy"], len(self.internal_data_buffer.items)
+            )
 
     def write_issue_process(self):
         while True:

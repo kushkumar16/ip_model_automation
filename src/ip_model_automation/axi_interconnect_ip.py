@@ -201,7 +201,9 @@ class AxiInterconnectIpModel:
             self.responses.append((self.env.now, response))
             self.metrics["write_latency"] = self.env.now - float(entry["start"])
             self.metrics["outstanding_depth"] = max(self.metrics["outstanding_depth"], len(self.outstanding))
-            self.logger.info("write response routed cmd=%s status=%s time=%s", command.cmd_id, response.status, self.env.now)
+            self.logger.info(
+                "write response routed cmd=%s status=%s time=%s", command.cmd_id, response.status, self.env.now
+            )
 
     def read_address_ingress_process(self):
         while True:
@@ -273,4 +275,6 @@ class AxiInterconnectIpModel:
             self.responses.append((self.env.now, response))
             self.metrics["decode_errors"] += 1
             self.metrics[f"{command.kind.lower()}_latency"] = self.env.now - start
-            self.logger.error("decode error response cmd=%s kind=%s time=%s", command.cmd_id, command.kind, self.env.now)
+            self.logger.error(
+                "decode error response cmd=%s kind=%s time=%s", command.cmd_id, command.kind, self.env.now
+            )

@@ -14,16 +14,20 @@ subsystem:
     - {ip: mailbox_ip, model: MailboxIpModel, role: doorbell_interrupt_source}
     - {ip: interrupt_controller_ip, model: InterruptControllerIpModel, role: delivery_fabric}
   connections:
-    - {from: host_message, to: mailbox_ip.send_message, payload: channel_message}
+    # ack: see templates/reference_template.yaml — none | completion_event |
+    # level_until_serviced. The doorbell path is the level_until_serviced
+    # example: the mailbox holds the level asserted while unserviced messages
+    # remain, so an EOI before the queue drains re-pends the source.
+    - {from: host_message, to: mailbox_ip.send_message, payload: channel_message, ack: none}
     - {from: mailbox_ip.interrupts, to: irq_source_bridge, payload: doorbell_irq}
-    - {from: irq_source_bridge, to: interrupt_controller_ip.set_level, payload: level_assert}
+    - {from: irq_source_bridge, to: interrupt_controller_ip.set_level, payload: level_assert, ack: level_until_serviced, ack_via: software_handler -> mailbox_ip.clear_interrupt + interrupt_controller_ip.eoi}
     - {from: interrupt_controller_ip.delivered, to: cpu_service, payload: delivered_irq}
-    - {from: cpu_service, to: interrupt_controller_ip.ack, payload: cpu_ack}
+    - {from: cpu_service, to: interrupt_controller_ip.ack, payload: cpu_ack, ack: completion_event, ack_via: interrupt_controller_ip.acknowledged -> software_handler}
     - {from: interrupt_controller_ip.acknowledged, to: software_handler, payload: acked_irq}
-    - {from: software_handler, to: mailbox_ip.read_message, payload: message_read}
-    - {from: software_handler, to: mailbox_ip.clear_interrupt, payload: doorbell_clear}
-    - {from: software_handler, to: interrupt_controller_ip.eoi, payload: end_of_interrupt}
-    - {from: storm_monitor, to: interrupt_controller_ip.set_mask, payload: storm_throttle}
+    - {from: software_handler, to: mailbox_ip.read_message, payload: message_read, ack: none}
+    - {from: software_handler, to: mailbox_ip.clear_interrupt, payload: doorbell_clear, ack: none}
+    - {from: software_handler, to: interrupt_controller_ip.eoi, payload: end_of_interrupt, ack: none}
+    - {from: storm_monitor, to: interrupt_controller_ip.set_mask, payload: storm_throttle, ack: none}
 
 interfaces:
   - name: host_message_if

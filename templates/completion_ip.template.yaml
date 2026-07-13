@@ -172,7 +172,8 @@ queues:
   - name: tenant_pending_queues
     producer: accepted_cmd_if
     consumer: completion_scheduler
-    depth: null
+    depth: unbounded
+    depth_note: DLD leaves completion queue depth open; the model keeps per-tenant pending queues unbounded — backpressure comes from QoS token gating and output cpl_ready, not queue capacity.
     blocking_behavior: stall
     ordering: fifo_per_tenant
 

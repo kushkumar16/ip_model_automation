@@ -206,7 +206,8 @@ queues:
   - name: sq_ingress_queues
     producer: nvme_frontend
     consumer: arbitration_ip
-    depth: null
+    depth: unbounded
+    depth_note: DLD does not bound SQ ingress; the model keeps per-SQ queues unbounded — issue rate is limited by burst credits and downstream readiness, not queue capacity.
     blocking_behavior: stall
     ordering: fifo_per_sq
 

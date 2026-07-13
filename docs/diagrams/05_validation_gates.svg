@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 790" font-family="Segoe UI, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 900" font-family="Segoe UI, Arial, sans-serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
@@ -7,7 +7,7 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#34a853"/>
     </marker>
   </defs>
-  <rect width="760" height="790" fill="#ffffff"/>
+  <rect width="760" height="900" fill="#ffffff"/>
   <text x="380" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The gate chain: what "validated" means</text>
   <text x="380" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Nothing advances until its gate is green. One command runs them all.</text>
 
@@ -48,5 +48,12 @@
   <line x1="380" y1="473" x2="380" y2="498" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
   <line x1="380" y1="575" x2="380" y2="620" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
 
-  <text x="380" y="740" text-anchor="middle" font-size="13" fill="#5f6368">Run all gates for every IP in the repo:  python tools\validate_dld_flow.py</text>
+  <!-- Repo-wide hard gates (automated pipeline) -->
+  <line x1="380" y1="689" x2="380" y2="714" stroke="#9a6400" stroke-width="2" stroke-dasharray="6 5"/>
+  <rect x="100" y="719" width="560" height="92" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="380" y="747" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">+ two repo-wide hard gates in the automated pipeline</text>
+  <text x="380" y="770" text-anchor="middle" font-size="13" fill="#9a6400">check_code_style.py — ruff lint + format clean</text>
+  <text x="380" y="792" text-anchor="middle" font-size="13" fill="#9a6400">run_code_coverage.py — 95%+ line coverage, total and per model file</text>
+
+  <text x="380" y="856" text-anchor="middle" font-size="13" fill="#5f6368">Run all gates for every IP in the repo:  python tools\validate_dld_flow.py</text>
 </svg>

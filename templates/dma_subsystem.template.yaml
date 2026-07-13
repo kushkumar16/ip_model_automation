@@ -16,16 +16,23 @@ subsystem:
     - {ip: arbitration_ip, model: ArbitrationIpModel, role: downstream_scheduler}
     - {ip: completion_ip, model: CompletionIpModel, role: qos_accounting}
   connections:
-    - {from: host_command, to: gdma_ip.submit, payload: descriptor}
-    - {from: host_command, to: axi_interconnect_ip.submit, payload: read_and_write_commands}
+    # ack: does the source (or the subsystem on its behalf) wait for a done
+    # signal from the destination before the work counts as complete?
+    #   none                 -> fire-and-forget; only queue backpressure applies
+    #   completion_event     -> a completion record must come back (ack_via
+    #                           names the return path that carries it)
+    #   level_until_serviced -> a level signal stays asserted until the
+    #                           destination side services and clears it
+    - {from: host_command, to: gdma_ip.submit, payload: descriptor, ack: completion_event, ack_via: gdma_ip.completed_ids -> completion_collector}
+    - {from: host_command, to: axi_interconnect_ip.submit, payload: read_and_write_commands, ack: completion_event, ack_via: axi_interconnect_ip.responses -> fabric_bridge}
     - {from: axi_interconnect_ip.responses, to: fabric_bridge, payload: routed_command}
-    - {from: fabric_bridge, to: arbitration_ip.enqueue, payload: tenant_mapped_command}
+    - {from: fabric_bridge, to: arbitration_ip.enqueue, payload: tenant_mapped_command, ack: none}
     - {from: arbitration_ip.issued, to: downstream_dispatch, payload: issued_command}
-    - {from: downstream_dispatch, to: completion_ip.submit, payload: qos_command}
+    - {from: downstream_dispatch, to: completion_ip.submit, payload: qos_command, ack: completion_event, ack_via: completion_ip.completed -> completion_collector}
     - {from: completion_ip.completed, to: completion_collector, payload: accounted_completion}
     - {from: gdma_ip.completed_ids, to: completion_collector, payload: engine_completion}
-    - {from: backpressure_monitor, to: gdma_ip.set_memory_ready, payload: fabric_congestion}
-    - {from: backpressure_monitor, to: arbitration_ip.set_issue_ready, payload: completion_backlog}
+    - {from: backpressure_monitor, to: gdma_ip.set_memory_ready, payload: fabric_congestion, ack: none}
+    - {from: backpressure_monitor, to: arbitration_ip.set_issue_ready, payload: completion_backlog, ack: none}
 
 interfaces:
   - name: host_descriptor_if

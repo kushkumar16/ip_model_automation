@@ -112,6 +112,55 @@ def collect_fsm_blocks(text: str) -> dict[str, list[str]]:
     return blocks
 
 
+def collect_queue_blocks(text: str) -> dict[str, list[str]]:
+    blocks: dict[str, list[str]] = {}
+    current_name: str | None = None
+    current_lines: list[str] = []
+    for line in section_lines(text, "queues"):
+        if line.startswith("  - name:"):
+            if current_name is not None:
+                blocks[current_name] = current_lines
+            current_name = line.split(":", 1)[1].strip()
+            current_lines = [line]
+            continue
+        if current_name is not None:
+            current_lines.append(line)
+    if current_name is not None:
+        blocks[current_name] = current_lines
+    return blocks
+
+
+def lint_queue_contract(text: str) -> list[str]:
+    """Every queue (FIFO within an IP or between IPs) must declare a real
+    capacity: an integer depth >= 1, or the explicit value `unbounded`
+    accompanied by a `depth_note:` explaining where backpressure comes from
+    instead. `blocking_behavior`, `ordering`, `producer`, and `consumer`
+    are always required."""
+    errors: list[str] = []
+    for queue_name, lines in collect_queue_blocks(text).items():
+        block = "\n".join(lines)
+        for required in ["producer:", "consumer:", "blocking_behavior:", "ordering:"]:
+            if required not in block:
+                errors.append(f"queues.{queue_name}: missing `{required}`")
+        depth_match = re.search(r"^\s*depth:\s*(\S+)\s*(?:#.*)?$", block, re.MULTILINE)
+        if depth_match is None:
+            errors.append(f"queues.{queue_name}: missing `depth:`")
+            continue
+        depth = depth_match.group(1)
+        if depth == "unbounded":
+            if "depth_note:" not in block:
+                errors.append(
+                    f"queues.{queue_name}: `depth: unbounded` requires a `depth_note:` "
+                    "explaining where backpressure comes from instead"
+                )
+        elif not depth.isdigit() or int(depth) < 1:
+            errors.append(
+                f"queues.{queue_name}: `depth` must be an integer >= 1 or the explicit "
+                f"value `unbounded` (got `{depth}`)"
+            )
+    return errors
+
+
 def collect_timing_fsms(text: str) -> set[str]:
     timing = set()
     in_timing = False
@@ -263,6 +312,8 @@ def lint_generic_contract(text: str) -> list[str]:
         errors.append("timing_model: `fsm_process_delays` must contain at least one item")
     if not list_has_items(text, "end_to_end_paths"):
         errors.append("timing_model: `end_to_end_paths` must contain at least one item")
+
+    errors.extend(lint_queue_contract(text))
 
     validate_required_text(text, REQUIRED_PERFORMANCE_FIELDS, errors, "performance_model")
     validate_required_text(text, REQUIRED_FUNCTIONALITY_FIELDS, errors, "functionality_model")

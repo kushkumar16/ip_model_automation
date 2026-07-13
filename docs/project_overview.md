@@ -211,8 +211,10 @@ flowchart LR
 ```
 
 The template captures, in one fixed shape regardless of how the DLD was
-written: the IP's FSM processes and states, interfaces, commands, timing
-model, invariants, and test scenarios. The annotated
+written: the IP's FSM processes and states, how they relate (parallel groups,
+sequential paths, gating), interfaces, commands, queues (every FIFO with a
+declared capacity — bounded depth, or an explicit `unbounded` with the reason),
+resources, timing model, invariants, and test scenarios. The annotated
 `templates/reference_template.yaml` documents every section.
 
 ### Two sources of truth — but only one at a time
@@ -423,9 +425,10 @@ flowchart TD
 
     G1 --> G2 --> G3 --> G4 --> G5
     G5 --> OK["validate_dld_flow.py: OK"]
+    OK -.-> R["+ repo-wide hard gates in the automated pipeline:<br/>check_code_style.py (ruff lint + format)<br/>run_code_coverage.py (95%+ total and per file)"]
 
     classDef gate fill:#fff4e5,stroke:#f5a623;
-    class G1,G2,G3,G4,G5 gate;
+    class G1,G2,G3,G4,G5,R gate;
 ```
 
 One command — `python tools\validate_dld_flow.py` — runs the front-end gate
@@ -457,9 +460,9 @@ flowchart LR
     GATES["template gates"]
     SCAF["scaffold<br/>(new IPs only)"]
     PACK["prompt pack"]
-    AGENT["agent steps:<br/>review · implement"]
+    AGENT["agent steps (human / any agent):<br/>review · implement"]
     TESTS["unit tests"]
-    REPO["repo-wide<br/>validation gate"]
+    REPO["repo-wide gates:<br/>style · coverage · full validation"]
 
     WATCH --> CONV --> EXT --> GATES --> SCAF --> PACK --> AGENT --> TESTS --> REPO
     REPO -->|fail: re-invoke agent<br/>with the failure log| AGENT
@@ -497,7 +500,12 @@ models are its resources. It rides the same DLD → template → model → tests
 pipeline, so every gate applies unchanged. One extra check,
 `tools/check_subsystem_wiring.py`, verifies the wiring is real: members
 exist, the member APIs and glue FSMs referenced by `connections:` exist, and
-the model actually instantiates its members.
+the model actually instantiates its members. Connections can also declare
+**ack semantics** — whether the source waits for the destination's done
+signal (`ack: none | completion_event | level_until_serviced`, with `ack_via`
+naming the return path): the DMA subsystem's IRQ waits for completion events
+from both legs, and the mailbox IRQ subsystem's doorbell is the
+level-until-serviced example.
 
 ## Map of the repository
 
@@ -517,6 +525,7 @@ flowchart TB
         T7["validate_ip_flow.py"]
         T8["validate_dld_flow.py"]
         T9["run_code_coverage.py"]
+        T10["check_code_style.py"]
     end
     subgraph guidance["Guidance for humans/LLMs"]
         SK["skills/ip-model-generation/"]
@@ -758,7 +767,7 @@ drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
-*As of 2026-07-12: all gates green — `validate_dld_flow.py` OK, full unit
+*As of 2026-07-13: all gates green — `validate_dld_flow.py` OK, full unit
 suite passing (run it for the current count).*
 
 ## Modeled IPs (9)
@@ -793,6 +802,12 @@ suite passing (run it for the current count).*
 - A written coding style guide with a ruff-based `code_style` hard gate keeps
   all model, tool, and test code on one convention; prompt packs carry the
   style rules so newly generated models follow it from the start.
+- The pipeline is agent-agnostic: named `agent_profiles` in the harness YAML
+  (select with `--agent <name>`) let any vendor's headless coding agent — or
+  a human — fill the two judgment steps; the same gates judge the output.
+- The template contract declares FIFO capacities (bounded depth or explicit
+  `unbounded` with a reason — lint-enforced) and, for subsystems, per-connection
+  ack semantics (`none` / `completion_event` / `level_until_serviced`).
 - Extractor calibration holds for every golden IP (FSM name set + count
   reproduce exactly).
 

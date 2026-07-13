@@ -56,7 +56,21 @@ ip:
 #   members:
 #     - {ip: some_member_ip, model: SomeMemberIpModel, role: what_it_does}
 #   connections:
-#     - {from: example_fsm, to: some_member_ip.submit, payload: what_flows}
+#     - {from: example_fsm, to: some_member_ip.submit, payload: what_flows,
+#        ack: completion_event, ack_via: some_member_ip.completed -> example_fsm}
+#
+# connections[].ack (OPTIONAL): does the source wait for a done signal from
+# the destination before the handed-off work counts as complete?
+#   none                 -> fire-and-forget; only queue backpressure applies.
+#   completion_event     -> a completion record must come back; `ack_via`
+#                          names the return path that carries it. Example:
+#                          dma_subsystem fires its IRQ only after BOTH the
+#                          engine leg and the fabric leg ack their work.
+#   level_until_serviced -> a level signal stays asserted until the consumer
+#                          services and clears it (re-pends if cleared early).
+#                          Example: mailbox_irq_subsystem's doorbell path.
+# Annotate at least the connections where the answer is not `none` — they are
+# what the glue FSMs and the subsystem tests must observe.
 
 # interfaces: from DLD "### N.M <Name> Interface" sections.
 interfaces:
@@ -115,27 +129,48 @@ resources:
     arbitration: bus_order
     sharing_scope: global              # global | subsystem
 
-# queues: producer/consumer links between FSMs.
+# queues: producer/consumer links between FSMs — every FIFO the model has,
+# whether it sits inside one IP or between member IPs in a subsystem.
+# template_lint.py enforces per entry: producer, consumer, blocking_behavior,
+# ordering, and a real capacity — `depth` must be an integer >= 1, or the
+# explicit value `unbounded` together with a `depth_note:` stating where
+# backpressure comes from instead (e.g. token gating). `depth: null` fails.
 queues:
   - name: example_queue
     producer: example_fsm              # an FSM name, or "host" for external input
     consumer: example_fsm
-    depth: 8
+    depth: 8                           # bounded FIFO: capacity in entries
     blocking_behavior: backpressure    # backpressure | stall | drop_on_full
     ordering: fifo
+#  - name: example_unbounded_queue    # only when the DLD truly leaves depth
+#    producer: example_fsm            # open AND the model does not bound it:
+#    consumer: example_fsm
+#    depth: unbounded
+#    depth_note: DLD leaves depth open; backpressure comes from credit gating, not capacity.
+#    blocking_behavior: stall
+#    ordering: fifo
 
+# fsm_relationships: THE section that answers "how are the FSMs related —
+# what runs concurrently, what must happen in order, and what blocks what".
+# Nothing is left implicit: every FSM is either in a parallel group, on a
+# sequential path, or both (a per-channel FSM can run parallel across
+# channels while sitting on a sequential path within one transaction).
 fsm_relationships:
   # fsm_count MUST equal the DLD "Total FSM/processes: N" line.
   fsm_count: 1
-  # parallel_processes: groups that run concurrently.
+  # parallel_processes: groups that run concurrently (each is its own
+  # env.process loop; members of a group make progress independently).
   parallel_processes:
     - [example_fsm]
-  # sequential_paths: ordered FSM.STATE chains from the DLD.
+  # sequential_paths: ordered FSM.STATE chains from the DLD — "A must finish
+  # this state before B can enter that one". This is the ordering contract
+  # the tests observe end to end.
   sequential_paths:
     - name: example_path
       path: [example_fsm.DECODE, example_fsm.EXECUTE]
       description: What must happen before what, per the DLD.
-  # gating_relationships: what stalls what, and why.
+  # gating_relationships: what stalls what, and why (queue full/empty,
+  # missing credit/token, output not ready...).
   gating_relationships:
     - source: example_queue
       gates: example_fsm.DECODE

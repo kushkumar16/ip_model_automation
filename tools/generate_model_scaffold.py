@@ -4,10 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _profile():
+    """Load the target profile (paths + naming conventions) for this repo."""
+    path = Path(__file__).resolve().parent / "target_profile.py"
+    spec = importlib.util.spec_from_file_location("target_profile", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_profile(REPO_ROOT)
 
 
 def require_yaml():
@@ -16,10 +28,6 @@ def require_yaml():
     except ModuleNotFoundError as exc:
         raise SystemExit("PyYAML is required. Install project requirements before running this tool.") from exc
     return yaml
-
-
-def snake_to_camel(name: str) -> str:
-    return "".join(part.capitalize() for part in re.split(r"[_\-\s]+", name) if part)
 
 
 def sanitize_identifier(name: str) -> str:
@@ -48,7 +56,7 @@ def first_operation_cycles(operations: list[dict[str, Any]]) -> int:
 
 def render_scaffold(template: dict[str, Any]) -> str:
     ip = template["ip"]["name"]
-    class_name = f"{snake_to_camel(ip)}Model"
+    class_name = _profile().model_class(ip)
     fsm_processes = [fsm for fsm in template["fsm_processes"] if fsm.get("simpy_process") is True]
     timing_by_fsm = timing_operations(template)
     metrics = template.get("performance_model", {}).get("metrics", [])
@@ -155,7 +163,7 @@ def write_scaffold(template_path: Path, output_dir: Path | None, stdout: bool) -
         print(rendered, end="")
         return None
     ip_name = template["ip"]["name"]
-    target_dir = output_dir or Path("src") / "ip_model_automation"
+    target_dir = output_dir or _profile().model_dir
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{ip_name}.py"
     target.write_text(rendered, encoding="utf-8")

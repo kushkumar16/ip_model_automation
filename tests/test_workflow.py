@@ -182,6 +182,52 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
         self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
 
+    def test_target_profile_defaults_match_repo_and_override(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "target_profile.py"
+        spec = importlib.util.spec_from_file_location("target_profile", tool_path)
+        tp = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(tp)
+
+        # Default profile resolves to this repo's layout, and its model_class
+        # convention matches the actual class in every promoted model file.
+        profile = tp.load_profile(repo_root)
+        self.assertEqual(profile.model_dir, repo_root / "src" / "ip_model_automation")
+        for template in profile.templates_dir.glob("*.template.yaml"):
+            ip = template.name[: -len(".template.yaml")]
+            model_file = profile.model_file(ip)
+            self.assertTrue(model_file.is_file(), f"{ip}: model file not found via profile")
+            self.assertIn(
+                f"class {profile.model_class(ip)}",
+                model_file.read_text(encoding="utf-8"),
+                f"{ip}: profile.model_class does not match the actual model class",
+            )
+
+        # A foreign profile redirects every path and renames artifacts, with no
+        # tool-code change — the seam that enables reuse in another framework.
+        foreign = tp.Profile(
+            Path("/other/framework"),
+            {
+                "model_dir": "sim/models",
+                "tests_dir": "sim/tests",
+                "templates_dir": "specs",
+                "dlds_dir": "docs",
+                "reports_dir": "out",
+                "prompt_packs_dir": "out/prompts",
+            },
+            {
+                "model_file": "{ip}_model.py",
+                "test_file": "{ip}_test.py",
+                "template_file": "{ip}.yaml",
+                "draft_file": "{ip}.draft.yaml",
+                "dld_file": "{ip}.md",
+                "model_class": "Sim{camel}",
+            },
+        )
+        self.assertEqual(foreign.model_file("mailbox_ip").as_posix(), "/other/framework/sim/models/mailbox_ip_model.py")
+        self.assertEqual(foreign.model_class("mailbox_ip"), "SimMailboxIp")
+
     def test_pipeline_selects_generate_vs_amend_path(self):
         repo_root = Path(__file__).resolve().parents[1]
         tool_path = repo_root / "tools" / "auto_ip_pipeline.py"

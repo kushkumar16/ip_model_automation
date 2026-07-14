@@ -25,8 +25,8 @@ def load_tool(module_name: str, path: Path):
     return module
 
 
-def snake_to_camel(name: str) -> str:
-    return "".join(part.capitalize() for part in re.split(r"[_\-\s]+", name) if part)
+def _profile(repo_root: Path):
+    return load_tool("target_profile", repo_root / "tools" / "target_profile.py").load_profile(repo_root)
 
 
 def sanitize_identifier(name: str) -> str:
@@ -37,7 +37,7 @@ def sanitize_identifier(name: str) -> str:
 
 
 def discover_templates(repo_root: Path) -> list[Path]:
-    return sorted((repo_root / "templates").glob("*.template.yaml"))
+    return sorted(_profile(repo_root).templates_dir.glob("*.template.yaml"))
 
 
 def run_template_lint(repo_root: Path, templates: list[Path]) -> None:
@@ -46,9 +46,9 @@ def run_template_lint(repo_root: Path, templates: list[Path]) -> None:
     subprocess.run(cmd, cwd=repo_root, check=True)
 
 
-def scaffold_expectations(template: dict[str, Any]) -> tuple[str, list[str]]:
+def scaffold_expectations(template: dict[str, Any], repo_root: Path = REPO_ROOT) -> tuple[str, list[str]]:
     ip_name = template["ip"]["name"]
-    class_name = f"{snake_to_camel(ip_name)}Model"
+    class_name = _profile(repo_root).model_class(ip_name)
     process_names = [
         f"def {sanitize_identifier(str(fsm['name']))}_process"
         for fsm in template.get("fsm_processes", [])

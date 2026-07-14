@@ -19,7 +19,10 @@ description: Template-driven loop for generating and validating SimPy IP models.
 #         not re-run when reached in the main sequence.
 #   max_attempts: agent stages only — attempts before the pipeline fails;
 #         defaults to loop_policy.max_iterations.
-#   when: model_missing — run the stage only if the IP has no model file yet.
+#   when: model_new / model_exists — gate a stage on whether the IP's model
+#         file existed at the START of this run (snapshot, not live): model_new
+#         is the greenfield generate path, model_exists is the brownfield amend
+#         path. They are mutually exclusive.
 #   scope: repo — run once after all changed IPs complete, not per IP
 #         (skipped by --skip-final-gate).
 
@@ -71,7 +74,7 @@ stages:
   - name: generate_scaffold
     command: python tools/generate_model_scaffold.py {template} --output-dir {model_dir}
     required: true
-    when: model_missing
+    when: model_new
     notes: New IPs only — never overwrites an existing model implementation.
   - name: generate_prompt_pack
     command: python tools/generate_prompt_pack.py {template} --output-dir {prompt_pack_dir}
@@ -80,12 +83,24 @@ stages:
     kind: agent
     command: external_agent_or_manual_edit
     required: false
+    when: model_new
     gates: [unit_tests]
-    notes: Agent fills model and tests using prompt pack and agent contract; re-invoked with the failure log while unit_tests fails.
+    notes: Greenfield only — agent fills a new model and tests from the prompt pack and agent contract; re-invoked with the failure log while unit_tests fails.
+  - name: amend_implementation
+    kind: agent
+    command: external_agent_or_manual_edit
+    required: false
+    when: model_exists
+    gates: [unit_tests]
+    notes: Brownfield only — the DLD of an existing IP changed. The agent gets the structured template diff (tools/diff_template.py, prev committed template vs current) and edits the existing model/tests in place instead of rewriting. Skipped when unit_tests already pass.
   - name: unit_tests
     command: python -m unittest tests.test_{ip}
     required: true
-    notes: Per-IP unit tests — the gate that drives the agent_implementation loop.
+    notes: Per-IP unit tests — the gate that drives the agent_implementation / amend_implementation loop.
+  - name: stamp_provenance
+    command: python tools/check_model_provenance.py --stamp {ip}
+    required: true
+    notes: Record the template revision this model is now in sync with (templates/model_baselines.json), so a later DLD edit is detected as drift. Runs for both greenfield and amend once unit_tests pass.
   - name: coverage_report
     command: python tools/report_model_coverage.py
     required: true
@@ -126,5 +141,6 @@ pass_criteria:
   - scaffold generation passes
   - prompt pack generation passes
   - every template FSM has scenario coverage
-  - unit tests pass
+  - unit tests pass (greenfield generate, or brownfield amend from the template diff)
+  - model provenance baseline stamped after unit tests pass
   - code style check passes (ruff lint + format)

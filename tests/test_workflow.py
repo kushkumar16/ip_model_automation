@@ -182,6 +182,37 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
         self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
 
+    def test_pipeline_selects_generate_vs_amend_path(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        # Greenfield vs brownfield is decided by the model_preexisted snapshot.
+        new_ctx = {"model_preexisted": ""}
+        old_ctx = {"model_preexisted": "1"}
+        self.assertTrue(pipeline.STAGE_CONDITIONS["model_new"](new_ctx))
+        self.assertFalse(pipeline.STAGE_CONDITIONS["model_exists"](new_ctx))
+        self.assertFalse(pipeline.STAGE_CONDITIONS["model_new"](old_ctx))
+        self.assertTrue(pipeline.STAGE_CONDITIONS["model_exists"](old_ctx))
+
+        # The amend stage is wired: registered builder + a harness stage gated on model_exists.
+        self.assertIn("amend_implementation", pipeline.AGENT_PROMPT_BUILDERS)
+        harness = pipeline.load_harness()
+        stages = {s["name"]: s for s in harness["stages"]}
+        self.assertEqual(stages["agent_implementation"]["when"], "model_new")
+        self.assertEqual(stages["amend_implementation"]["when"], "model_exists")
+        self.assertIn("unit_tests", stages["amend_implementation"]["gates"])
+        self.assertIn("stamp_provenance", stages)
+
+        # amend_prompt exercises `git show HEAD:...`; with the working tree in sync
+        # it finds no delta and falls back to the full implementation prompt.
+        prompt = pipeline.amend_prompt("mailbox_ip")
+        self.assertIn("mailbox_ip", prompt)
+
     def test_template_diff_classifies_changes(self):
         repo_root = Path(__file__).resolve().parents[1]
         tool_path = repo_root / "tools" / "diff_template.py"

@@ -518,6 +518,10 @@ Details worth knowing:
   description, and the same gates (template coverage, lint, unit tests,
   coding style, coverage thresholds) judge the output no matter which vendor's
   agent — or which human — wrote the model and its tests.
+- **Greenfield vs. brownfield is automatic**: the runner snapshots whether the
+  model file already exists before any stage runs. A new IP takes the generate
+  path (`scaffold` + `agent_implementation`); an existing IP whose DLD changed
+  takes the amend path (`amend_implementation`), described next.
 
 ## Editing a DLD without rewriting the model
 
@@ -576,10 +580,15 @@ scenario added, and a state added to the doorbell FSM) prints as:
 ```
 
 The agent that applies this is the same agent-agnostic step as first-time
-generation — only the prompt differs (amend vs. generate). Wiring the amend
-prompt into `auto_ip_pipeline.py` as a `when: model_exists` stage (the mirror
-of the `model_missing` scaffold stage) is the natural next step; the tools
-above are the foundation it builds on.
+generation — only the prompt differs (amend vs. generate). This is **wired into
+the pipeline**: `auto_ip_pipeline.py` decides greenfield vs. brownfield from a
+snapshot taken at the start of each run — did the model file already exist? A
+new IP runs `generate_scaffold` + `agent_implementation` (`when: model_new`); an
+existing IP whose DLD changed runs `amend_implementation` (`when: model_exists`),
+which feeds the agent the structured template diff instead of the full prompt
+pack. Both paths end at the same `unit_tests` gate, then `stamp_provenance`
+records the new baseline. If the template change is trivial enough that the
+existing tests still pass, the amend agent is skipped entirely.
 
 ## Beyond single IPs: subsystems
 

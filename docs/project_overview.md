@@ -519,6 +519,68 @@ Details worth knowing:
   coding style, coverage thresholds) judge the output no matter which vendor's
   agent — or which human — wrote the model and its tests.
 
+## Editing a DLD without rewriting the model
+
+When a DLD changes, you rarely want to regenerate the whole model and tests
+from scratch — you want the **minimal edits** that match what actually changed.
+The key insight: don't diff the DLD (prose — noisy, reworded, reordered), diff
+the **template**. Because the template is the normalized source of truth, two
+revisions of it produce a clean, *typed* change list that maps almost
+one-to-one to model and test edit sites.
+
+```mermaid
+flowchart LR
+    EDIT["edit DLD"] --> RETPL["re-extract →<br/>new template"]
+    OLD["previous template<br/>(git history)"] --> DIFF
+    RETPL --> DIFF["diff_template.py<br/>structured, typed delta"]
+    DIFF --> PROMPT["amend prompt:<br/>model + tests + delta"]
+    PROMPT --> AGENT["agent edits in place<br/>(minimal changes)"]
+    AGENT --> GATE["gates: lint · timing ·<br/>tests · coverage"]
+    GATE --> STAMP["re-stamp baseline<br/>(check_model_provenance.py)"]
+    classDef gate fill:#fff4e5,stroke:#f5a623;
+    class GATE gate;
+```
+
+Three pieces make this work, and they reuse what already exists:
+
+- **`tools/diff_template.py`** computes the structured delta between two
+  templates and tags every change with a **blast radius** — `SURGICAL` (a
+  localized value or addition: a queue depth, a timing number, a new scenario)
+  or `STRUCTURAL` (a topology change: an FSM, state, interface, or command
+  added/removed, which may cascade). A single structural change escalates the
+  whole delta so the implementer knows to review before editing surgically.
+  `--amend-prompt` wraps the delta into a ready-to-send instruction: *"here is
+  the current model and tests, here is exactly what changed — make the minimal
+  corresponding edits, do not rewrite."*
+- **Git is the history store.** The "previous" template is just the last
+  committed one — `git show HEAD:templates/<ip>.template.yaml` — so no separate
+  DLD/template version store is needed.
+- **`tools/check_model_provenance.py`** records, per IP, the hash of the
+  template each model was last generated or amended against
+  (`templates/model_baselines.json`, committed). Its check fails when a
+  template has moved on from its recorded baseline — the signal that an amend
+  is due — and `--stamp <ip>` refreshes the baseline once the model is back in
+  sync. This is the same provenance discipline the docx guard uses, applied to
+  the DLD → template → model chain.
+
+A real delta for `mailbox_ip` (message FIFO deepened, an enqueue op re-timed, a
+scenario added, and a state added to the doorbell FSM) prints as:
+
+```text
+4 change(s), overall blast radius: STRUCTURAL
+
+  [STRUCTURAL] FSM `doorbell` states: +['COALESCE'] -[]
+  [SURGICAL  ] queue `message_fifo`.depth: 8 -> 16
+  [SURGICAL  ] timing op `message_push.enqueue`: 1cyc/2ns -> 2cyc/4ns
+  [SURGICAL  ] test_scenario `fifo_high_watermark_backpressure` added
+```
+
+The agent that applies this is the same agent-agnostic step as first-time
+generation — only the prompt differs (amend vs. generate). Wiring the amend
+prompt into `auto_ip_pipeline.py` as a `when: model_exists` stage (the mirror
+of the `model_missing` scaffold stage) is the natural next step; the tools
+above are the foundation it builds on.
+
 ## Beyond single IPs: subsystems
 
 A subsystem (several IPs wired together) is modeled as **"just another IP"**:

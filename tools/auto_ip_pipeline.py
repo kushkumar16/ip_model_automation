@@ -67,11 +67,14 @@ def _load_tool(module_name: str):
     if spec is None or spec.loader is None:  # pragma: no cover
         raise RuntimeError(f"cannot load tool: {path}")
     module = importlib.util.module_from_spec(spec)
+    # Register before exec so tools that use @dataclass can resolve annotations.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
 dld_tool = _load_tool("dld_to_template")
+diff_tool = _load_tool("diff_template")
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +249,50 @@ def implementation_prompt(ip_name: str, extra_context: str = "") -> str:
     )
 
 
+def _previous_template(ip_name: str) -> str | None:
+    """The last committed template for this IP (git is the history store), or
+    None if it is not committed yet."""
+    result = subprocess.run(
+        ["git", "show", f"HEAD:templates/{ip_name}.template.yaml"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def amend_prompt(ip_name: str, extra_context: str = "") -> str:
+    """Amend prompt for an IP whose model already exists: diff the previous
+    (committed) template against the current one and instruct the agent to make
+    only the corresponding edits. Falls back to a full implementation prompt if
+    there is no committed baseline to diff against."""
+    import yaml  # type: ignore
+
+    old_text = _previous_template(ip_name)
+    current = TEMPLATES_DIR / f"{ip_name}.template.yaml"
+    if old_text is None or not current.is_file():
+        return implementation_prompt(ip_name, extra_context)
+    old = yaml.safe_load(old_text)
+    new = yaml.safe_load(current.read_text(encoding="utf-8"))
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return implementation_prompt(ip_name, extra_context)
+    changes = diff_tool.diff_templates(old, new)
+    if not changes:
+        # Template unchanged vs HEAD; nothing to amend beyond what the gates check.
+        return implementation_prompt(ip_name, extra_context)
+    return "\n".join(
+        [
+            f"Work in the repository at {REPO_ROOT}.",
+            f"Follow the agent contract in {AGENT_CONTRACT_PATH.relative_to(REPO_ROOT).as_posix()}.",
+            "",
+            diff_tool.render_amend_prompt(changes, ip_name),
+            extra_context,
+        ]
+    )
+
+
 def resolve_agent_command(agent: str | None, agent_cmd: str | None, harness: dict) -> str | None:
     """Resolve the agent shell command from --agent-cmd (raw, wins) or an
     ``agent_profiles`` entry in the harness YAML. Returns None when neither
@@ -290,11 +337,17 @@ AGENT_STAGE_MARKER = "external_agent_or_manual_edit"
 AGENT_PROMPT_BUILDERS = {
     "review_template": review_prompt,
     "agent_implementation": implementation_prompt,
+    "amend_implementation": amend_prompt,
 }
 
 # Conditions usable as a stage's `when:` field, keyed by condition name.
+# Both read a snapshot (`model_preexisted`) taken when the per-IP context is
+# built, BEFORE any stage runs — so `generate_scaffold` creating the model file
+# does not flip `model_exists` mid-run. This is what separates the greenfield
+# (generate) path from the brownfield (amend) path.
 STAGE_CONDITIONS = {
-    "model_missing": lambda ctx: not Path(ctx["model_file"]).is_file(),
+    "model_new": lambda ctx: not ctx.get("model_preexisted"),
+    "model_exists": lambda ctx: bool(ctx.get("model_preexisted")),
 }
 
 
@@ -326,12 +379,15 @@ def stage_context(harness: dict, ip_name: str | None = None, dld_md: Path | None
         "reports_dir": str(REPO_ROOT / inputs.get("reports_dir", "reports")),
     }
     if ip_name is not None and dld_md is not None:
+        model_file = Path(ctx["model_dir"]) / f"{ip_name}.py"
         ctx.update(
             ip=ip_name,
             dld=str(dld_md),
             template=str(TEMPLATES_DIR / f"{ip_name}.template.yaml"),
             draft=str(TEMPLATES_DIR / f"{ip_name}.template.draft.yaml"),
-            model_file=str(Path(ctx["model_dir"]) / f"{ip_name}.py"),
+            model_file=str(model_file),
+            # Snapshot at run start: did the model exist before any stage ran?
+            model_preexisted="1" if model_file.is_file() else "",
         )
     return ctx
 

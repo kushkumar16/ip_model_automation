@@ -277,6 +277,27 @@ Log lines include the IP tag:
 Model constructors default to `WARNING` to keep validation output compact. Use
 `log_level="INFO"` or `log_level="DEBUG"` when running a trace/debug scenario.
 
+## Amending An IP After A DLD Edit
+
+When a DLD changes, amend the existing model instead of regenerating it. Diff
+the **template** (not the prose DLD) to get a typed, blast-radius-tagged delta,
+then drive a minimal in-place edit:
+
+```powershell
+# 1. Re-extract/review the template from the edited DLD (produces the new templates\<ip>.template.yaml)
+# 2. Diff it against the previous committed template (git is the history store)
+git show HEAD:templates\<ip>.template.yaml > old.yaml
+python tools\diff_template.py old.yaml templates\<ip>.template.yaml                       # see the delta
+python tools\diff_template.py old.yaml templates\<ip>.template.yaml --amend-prompt --ip <ip>   # agent instruction
+
+# 3. Apply the amend (agent or human edits src\ip_model_automation\<ip>.py and tests\test_<ip>.py), then:
+python tools\validate_dld_flow.py
+python tools\check_model_provenance.py --stamp <ip>          # refresh the baseline once back in sync
+```
+
+`check_model_provenance.py` (no args) reports any template that has drifted from
+the model baseline it was last built against — the signal that an amend is due.
+
 ## Adding A New IP
 
 1. Write `dlds/<ip_name>_dld.md`.
@@ -325,6 +346,8 @@ Model constructors default to `WARNING` to keep validation output compact. Use
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
 - `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).
+- `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).
+- `tools/check_model_provenance.py`: records/checks which template revision each model was last built against (`templates/model_baselines.json`).
 - `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).

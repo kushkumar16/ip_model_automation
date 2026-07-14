@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import logging
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -180,6 +181,50 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         broken_semantics["fsm_relationships"]["fsm_count"] = 99
         errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
         self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
+
+    def test_template_diff_classifies_changes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "diff_template.py"
+        spec = importlib.util.spec_from_file_location("diff_template", tool_path)
+        diff = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        # Register before exec so @dataclass can resolve annotations via sys.modules.
+        sys.modules[spec.name] = diff
+        spec.loader.exec_module(diff)
+
+        import yaml
+
+        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+        after = copy.deepcopy(base)
+        for q in after["queues"]:
+            if q["name"] == "message_fifo":
+                q["depth"] = 16
+        for f in after["fsm_processes"]:
+            if f["name"] == "doorbell":
+                f["states"].append("COALESCE")
+
+        # Identical templates -> no changes.
+        self.assertEqual(diff.diff_templates(base, base), [])
+
+        changes = diff.diff_templates(base, after)
+        details = {c.detail: c.radius for c in changes}
+        depth_change = next(d for d in details if "message_fifo`.depth" in d)
+        state_change = next(d for d in details if "doorbell` states" in d)
+        self.assertEqual(details[depth_change], diff.SURGICAL)
+        self.assertEqual(details[state_change], diff.STRUCTURAL)
+        # A structural change dominates the overall radius.
+        self.assertEqual(diff.overall_radius(changes), diff.STRUCTURAL)
+
+    def test_model_provenance_tracks_templates(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "check_model_provenance.py"
+        spec = importlib.util.spec_from_file_location("check_model_provenance", tool_path)
+        tool = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(tool)
+
+        # Every promoted template is stamped and in sync with its model baseline.
+        self.assertEqual(tool.check(), [], "a model template has drifted from its recorded baseline")
 
     def test_overview_docx_tracks_markdown(self):
         repo_root = Path(__file__).resolve().parents[1]

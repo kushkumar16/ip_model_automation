@@ -1,0 +1,23 @@
+# Target profile — which codebase the IP-model tooling operates on.
+#
+# The values below describe THIS repo and match the tooling's built-in defaults,
+# so this file is documentation-as-config: editing it (or copying it into another
+# SimPy framework and repointing the paths/patterns) makes the same extraction,
+# lint, diff, amend, and validation tools operate on that codebase — no tool-code
+# changes. See tools/target_profile.py for the loader and the fallback defaults.
+
+paths:
+  model_dir: src/ip_model_automation   # where generated SimPy model files live
+  tests_dir: tests                     # where per-IP unit tests live
+  templates_dir: templates             # reviewed *.template.yaml (source of truth)
+  dlds_dir: dlds                        # authoring DLDs
+  reports_dir: reports                 # generated reports (gitignored)
+  prompt_packs_dir: prompt_packs       # generated LLM prompt bundles (gitignored)
+
+naming:
+  model_file: "{ip}.py"                # one flat model file per IP, under model_dir
+  test_file: "test_{ip}.py"            # unittest module per IP, under tests_dir
+  template_file: "{ip}.template.yaml"  # promoted template, under templates_dir
+  draft_file: "{ip}.template.draft.yaml"
+  dld_file: "{ip}_dld.md"
+  model_class: "{camel}Model"          # {camel} = CamelCase of the IP name (mailbox_ip -> MailboxIp)

@@ -298,6 +298,32 @@ python tools\check_model_provenance.py --stamp <ip>          # refresh the basel
 `check_model_provenance.py` (no args) reports any template that has drifted from
 the model baseline it was last built against — the signal that an amend is due.
 
+## Pointing The Tooling At Another Codebase
+
+Where the tools look for models, tests, templates, and DLDs — and how a model
+file and class are named — is declared in `target_profile.yaml` (loaded by
+`tools/target_profile.py`), not hardcoded. The committed profile describes this
+repo and matches the built-in defaults, so with it in place nothing changes.
+
+To drive a different SimPy framework, point the profile at that codebase's
+layout and naming, for example:
+
+```yaml
+paths:
+  model_dir: sim/models
+  tests_dir: sim/tests
+  templates_dir: specs
+naming:
+  model_file: "{ip}_model.py"
+  model_class: "Sim{camel}"     # {camel} = CamelCase of the IP name
+```
+
+The same extraction, generation, diff/amend, and validation tools then operate
+on that project with no tool-code change. This is an in-progress seam: the
+per-IP artifact paths and the model-class convention already route through the
+profile; remaining hardcoded paths are being migrated incrementally (each still
+resolves to the same default, so nothing breaks in the meantime).
+
 ## Adding A New IP
 
 1. Write `dlds/<ip_name>_dld.md`.
@@ -337,6 +363,7 @@ the model baseline it was last built against — the signal that an amend is due
 - `templates/*.template.draft.yaml`: extractor output awaiting review (gitignored).
 - `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored).
 - `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
+- `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).

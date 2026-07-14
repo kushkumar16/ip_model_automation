@@ -26,12 +26,22 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = REPO_ROOT / "tools"
+
+
+def _profile(repo_root: Path):
+    """Load the target profile (paths + naming conventions)."""
+    path = TOOLS_DIR / "target_profile.py"
+    spec = importlib.util.spec_from_file_location("target_profile", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_profile(repo_root)
 
 
 def require_yaml():
@@ -50,13 +60,9 @@ def load_template(path: Path) -> dict[str, Any]:
     return data
 
 
-def camel_model_name(ip_name: str) -> str:
-    return "".join(part.capitalize() for part in ip_name.split("_")) + "Model"
-
-
 def discover_subsystem_templates(repo_root: Path) -> list[Path]:
     found = []
-    for template in sorted((repo_root / "templates").glob("*.template.yaml")):
+    for template in sorted(_profile(repo_root).templates_dir.glob("*.template.yaml")):
         data = load_template(template)
         if isinstance(data.get("subsystem"), dict):
             found.append(template)
@@ -77,6 +83,7 @@ def _member_has_api(member_text: str, api: str) -> bool:
 
 def check_file(repo_root: Path, template_path: Path) -> list[str]:
     errors: list[str] = []
+    profile = _profile(repo_root)
     template = load_template(template_path)
     subsystem = template.get("subsystem")
     if not isinstance(subsystem, dict):
@@ -94,28 +101,26 @@ def check_file(repo_root: Path, template_path: Path) -> list[str]:
     if not members:
         errors.append("subsystem.members: no `{ip: ..., model: ...}` entries found")
 
-    package_dir = repo_root / "src" / "ip_model_automation"
     member_texts: dict[str, str] = {}
     for ip_name, model_class in members:
-        member_template = repo_root / "templates" / f"{ip_name}.template.yaml"
-        if not member_template.is_file():
+        if not profile.template_file(ip_name).is_file():
             errors.append(f"member `{ip_name}`: no promoted template templates/{ip_name}.template.yaml")
-        member_model_path = package_dir / f"{ip_name}.py"
+        member_model_path = profile.model_file(ip_name)
         if not member_model_path.is_file():
-            errors.append(f"member `{ip_name}`: no model file src/ip_model_automation/{ip_name}.py")
+            errors.append(f"member `{ip_name}`: no model file for {ip_name}")
             continue
         member_text = member_model_path.read_text(encoding="utf-8")
         member_texts[ip_name] = member_text
         if f"class {model_class}" not in member_text:
             errors.append(f"member `{ip_name}`: class `{model_class}` not found in {ip_name}.py")
 
-    subsystem_model_path = package_dir / f"{subsystem_name}.py"
+    subsystem_model_path = profile.model_file(subsystem_name)
     if not subsystem_model_path.is_file():
-        errors.append(f"no subsystem model file src/ip_model_automation/{subsystem_name}.py")
+        errors.append(f"no subsystem model file for {subsystem_name}")
         subsystem_model_text = ""
     else:
         subsystem_model_text = subsystem_model_path.read_text(encoding="utf-8")
-        expected_class = camel_model_name(subsystem_name)
+        expected_class = profile.model_class(subsystem_name)
         if f"class {expected_class}" not in subsystem_model_text:
             errors.append(f"{subsystem_name}.py: class `{expected_class}` not found")
         for ip_name, model_class in members:

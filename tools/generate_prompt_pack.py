@@ -4,10 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import re
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _profile():
+    """Load the target profile (paths + naming conventions) for this repo."""
+    path = Path(__file__).resolve().parent / "target_profile.py"
+    spec = importlib.util.spec_from_file_location("target_profile", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_profile(REPO_ROOT)
 
 
 def require_yaml():
@@ -16,10 +27,6 @@ def require_yaml():
     except ModuleNotFoundError as exc:
         raise SystemExit("PyYAML is required. Install project requirements before running this tool.") from exc
     return yaml
-
-
-def snake_to_camel(name: str) -> str:
-    return "".join(part.capitalize() for part in re.split(r"[_\-\s]+", name) if part)
 
 
 def load_template(path: Path) -> dict[str, Any]:
@@ -38,7 +45,11 @@ def bullet_list(values: list[Any], indent: str = "- ") -> list[str]:
 
 def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
     ip_name = template["ip"]["name"]
-    class_name = f"{snake_to_camel(ip_name)}Model"
+    profile = _profile()
+    class_name = profile.model_class(ip_name)
+    model_rel = profile.model_file(ip_name).relative_to(profile.repo_root).as_posix()
+    test_rel = profile.test_file(ip_name).relative_to(profile.repo_root).as_posix()
+    model_root = profile.model_dir.relative_to(profile.repo_root).as_posix()
     lines: list[str] = [
         f"# Prompt Pack: {ip_name}",
         "",
@@ -51,7 +62,7 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
         "- Do not invent FSMs, protocols, queues, resources, timing values, side effects, or tests"
         " not represented in the template.",
         "- If the template is incomplete, stop and report the missing fields.",
-        "- Keep one flat Python model file under `src/ip_model_automation/`.",
+        f"- Keep one flat Python model file under `{model_root}/`.",
         "- Do not create SystemC models, per-IP folders, `perf_model.py`, or `functional_model.py`.",
         "",
         "## Coding Style",
@@ -66,9 +77,9 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
         "## Target Artifacts",
         "",
         f"- Template: `{template_path.as_posix()}`",
-        f"- Model file: `src/ip_model_automation/{ip_name}.py`",
+        f"- Model file: `{model_rel}`",
         f"- Model class: `{class_name}`",
-        f"- Test file: `tests/test_{ip_name}.py`",
+        f"- Test file: `{test_rel}`",
         "",
         "## IP Summary",
         "",
@@ -143,7 +154,7 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
             "```powershell",
             "python tools\\template_lint.py templates\\*.template.yaml",
             f"python tools\\generate_model_scaffold.py templates\\{ip_name}.template.yaml"
-            " --output-dir src\\ip_model_automation",
+            f" --output-dir {model_root.replace('/', chr(92))}",
             "python tools\\report_model_coverage.py",
             "python tools\\validate_ip_flow.py",
             "```",

@@ -377,6 +377,10 @@ Every model also ships with:
 - Per-IP tests in `tests/test_<ip>.py`, derived from the template's
   `test_scenarios`.
 - Every Python file follows the written coding style guide (next section).
+- These paths and the `<CamelIp>Model` naming are **not hardcoded** — they come
+  from `target_profile.yaml` (defaults describe this repo). Repointing that
+  profile lets the same tooling operate on another SimPy codebase without
+  editing tool code; see "Reusing the tooling elsewhere" below.
 
 Run the whole test suite from the repo root:
 
@@ -589,6 +593,31 @@ which feeds the agent the structured template diff instead of the full prompt
 pack. Both paths end at the same `unit_tests` gate, then `stamp_provenance`
 records the new baseline. If the template change is trivial enough that the
 existing tests still pass, the amend agent is skipped entirely.
+
+## Reusing the tooling elsewhere
+
+Everything above operates on *this* repo, but nothing in the tools is bound to
+it. Where models, tests, templates, and DLDs live — and how a model file and
+class are named — is declared in one place, `target_profile.yaml`, loaded by
+`tools/target_profile.py`. The committed profile describes this repo and matches
+the tools' built-in defaults, so it changes nothing here; but repointing it lets
+the same extraction, generation, diff/amend, and validation tooling run against
+a different SimPy framework:
+
+```yaml
+paths: {model_dir: sim/models, tests_dir: sim/tests, templates_dir: specs}
+naming: {model_file: "{ip}_model.py", model_class: "Sim{camel}"}
+```
+
+With that profile, `profile.model_file("mailbox_ip")` resolves to
+`sim/models/mailbox_ip_model.py` and `profile.model_class("mailbox_ip")` to
+`SimMailboxIp` — no tool-code change. This is the seam that turns the pipeline
+from "builds this repo's models" into "an engine you can point at another
+codebase." It is being introduced incrementally: the per-IP artifact paths and
+the model-class convention already route through the profile (the previously
+duplicated camel-case-plus-`Model` logic now lives only in `target_profile.py`);
+the remaining hardcoded paths each still resolve to the same default and are
+migrated as the other-framework integration firms up.
 
 ## Beyond single IPs: subsystems
 

@@ -74,9 +74,9 @@ DLD markdown
   -> dld_to_template extraction  (draft template + gaps report)
   -> review/fill TODO_REVIEW     (only DLD-stated behavior)
   -> DLD coverage + lint gate    (promote to reviewed template)
-  -> SimPy scaffold generation
-  -> model implementation from template
-  -> unit tests and validation
+  -> new IP:      scaffold -> model implementation from template
+     existing IP: template diff -> amend model/tests in place
+  -> unit tests, validation, provenance stamp
 ```
 
 The DLD is the only source for *authoring* the template; the reviewed template
@@ -129,9 +129,12 @@ python tools\check_subsystem_wiring.py
 `tools/auto_ip_pipeline.py` watches `dlds/*_dld.md` (and `*_dld.docx`) for new
 or modified DLDs and executes the stage sequence declared in
 `harness/ip_generation_loop.yaml` for each changed IP: docx -> markdown
-conversion (python-docx), draft extraction, template gates, scaffold (new IPs
-only), prompt pack, model/test generation, unit tests, and the repo-wide
-validation gate. The harness YAML is the single source of truth for the
+conversion (python-docx), draft extraction, template gates, then either the
+**greenfield** path (scaffold + prompt pack + model/test generation, for an IP
+with no model yet) or the **brownfield** path (`amend_implementation` — a
+structured template diff drives an in-place edit of the existing model and
+tests), followed by unit tests, the provenance stamp, and the repo-wide gates
+(style, coverage, full validation). The harness YAML is the single source of truth for the
 pipeline — adding, removing, or reordering a stage is a YAML edit, not a
 runner change (the stage schema is documented at the top of that file).
 Change detection hashes DLD content into `reports/.dld_pipeline_state.json`;

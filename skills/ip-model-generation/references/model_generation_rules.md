@@ -47,6 +47,15 @@
   - expected stall counters
   - FSM coverage intent from the template
 
+## Amending An Existing Model
+
+If the model already exists and its DLD changed, do not regenerate it. Work from
+the structured template diff (`tools/diff_template.py`, or the amend prompt the
+pipeline pipes you): make only the edits the delta requires, leave unrelated code
+untouched, and treat a `STRUCTURAL` change (FSM/state/interface/command added or
+removed) as a signal to check for cascade before editing. See the "Stage 2"
+section of the agent contract.
+
 ## Validation
 
 Run:

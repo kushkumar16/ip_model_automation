@@ -72,6 +72,30 @@ the "stated vs inferred" rule.
    python tools\validate_dld_flow.py
    ```
 
+## Amending An Existing Model (DLD Changed)
+
+When the IP already has a model, do **not** regenerate it. Diff the template
+(not the prose DLD — the template is normalized, so its diff is a clean typed
+change list) and make only the corresponding edits:
+
+```powershell
+git show HEAD:templates\<ip_name>.template.yaml > old.yaml
+python tools\diff_template.py old.yaml templates\<ip_name>.template.yaml
+python tools\diff_template.py old.yaml templates\<ip_name>.template.yaml --amend-prompt --ip <ip_name>
+```
+
+Each change is tagged `SURGICAL` (localized value/addition — edit in place) or
+`STRUCTURAL` (FSM/state/interface/command added or removed — check for cascade
+first). After the edits pass `validate_dld_flow.py`, refresh the baseline:
+
+```powershell
+python tools\check_model_provenance.py --stamp <ip_name>
+```
+
+`python tools\check_model_provenance.py` (no args) reports any template that has
+drifted from the model baseline it was last built against. The automated
+pipeline runs all of this for you as the `amend_implementation` stage.
+
 ## Prompt Packs
 
 When asked to prepare LLM input for another model, generate a prompt pack:
@@ -87,6 +111,9 @@ unstated behavior from the DLD.
 
 - Keep one flat model file: `src\ip_model_automation\<ip_name>.py`.
 - Generate one class named `<CamelIpName>Model`.
+- Those paths and that class-naming rule come from `target_profile.yaml` (see
+  `tools/target_profile.py`); the values above are this repo's profile. If you
+  are driving another codebase, read its profile rather than assuming these.
 - Generate one SimPy process per `fsm_processes` entry with `simpy_process: true`.
 - Use only `timing_model.fsm_process_delays` for hard-coded delays.
 - Preserve `fsm_relationships.sequential_paths` and parallel process structure.

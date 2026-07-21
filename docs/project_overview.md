@@ -489,14 +489,19 @@ flowchart LR
     CONV["docx → markdown<br/>(if needed)"]
     EXT["extract draft<br/>+ gaps report"]
     GATES["template gates"]
-    SCAF["scaffold<br/>(new IPs only)"]
-    PACK["prompt pack"]
-    AGENT["agent steps (human / any agent):<br/>review · implement"]
+    REVIEW["agent: review template"]
+    FORK{"model already<br/>exists?"}
+    GEN["no → scaffold + prompt pack<br/>agent: implement"]
+    AMEND["yes → template diff<br/>agent: amend in place"]
     TESTS["unit tests"]
+    STAMP["stamp provenance<br/>baseline"]
     REPO["repo-wide gates:<br/>style · coverage · full validation"]
 
-    WATCH --> CONV --> EXT --> GATES --> SCAF --> PACK --> AGENT --> TESTS --> REPO
-    REPO -->|fail: re-invoke agent<br/>with the failure log| AGENT
+    WATCH --> CONV --> EXT --> GATES --> REVIEW --> FORK
+    FORK -->|greenfield| GEN --> TESTS
+    FORK -->|brownfield| AMEND --> TESTS
+    TESTS --> STAMP --> REPO
+    TESTS -->|fail: re-invoke agent<br/>with the failure log| FORK
     classDef gate fill:#fff4e5,stroke:#f5a623;
     class GATES,REPO gate;
 ```
@@ -894,7 +899,7 @@ drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
-*As of 2026-07-13: all gates green — `validate_dld_flow.py` OK, full unit
+*As of 2026-07-14: all gates green — `validate_dld_flow.py` OK, full unit
 suite passing (run it for the current count).*
 
 ## Modeled IPs (9)
@@ -935,6 +940,16 @@ suite passing (run it for the current count).*
 - The template contract declares FIFO capacities (bounded depth or explicit
   `unbounded` with a reason — lint-enforced) and, for subsystems, per-connection
   ack semantics (`none` / `completion_event` / `level_until_serviced`).
+- The contract is enforced in two non-overlapping layers — the JSON Schema owns
+  structure (validated with `jsonschema`), the linter owns cross-field semantics
+  — and the template's own timing numbers are checked for coherence.
+- **Editing a DLD amends rather than regenerates**: the pipeline picks the
+  greenfield or brownfield path automatically, feeds the agent a structured
+  template diff (blast-radius tagged), and stamps a model→template provenance
+  baseline so later drift is detected.
+- A **target profile** (`target_profile.yaml`) supplies the paths and the
+  model-class naming, so the same tooling can be pointed at another SimPy
+  codebase; migration of the remaining hardcoded paths is incremental.
 - Extractor calibration holds for every golden IP (FSM name set + count
   reproduce exactly).
 

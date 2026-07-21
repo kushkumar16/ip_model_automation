@@ -61,6 +61,31 @@ output to the same conventions.
 7. Add assertions for functionality and performance effects from `test_scenarios`.
 8. Run `python tools/validate_dld_flow.py` (front-end gate + model/test flow).
 
+### Stage 2: amending an existing model (brownfield)
+
+When the IP already has a model and its DLD changed, the pipeline runs the
+`amend_implementation` stage instead of Stage 1 and pipes you a **structured
+template diff** (from `tools/diff_template.py`) rather than the full prompt
+pack. The task is different: **edit in place, do not regenerate.**
+
+1. Read the delta. Every change is tagged with a blast radius:
+   - `SURGICAL` — a localized value or addition (queue depth, timing number, a
+     new scenario). Make the minimal corresponding edit.
+   - `STRUCTURAL` — a topology change (FSM, state, interface, or command
+     added/removed). Check whether it cascades before editing.
+2. Change only what the delta requires. Leave unrelated model and test code
+   untouched — an unrelated rewrite is a contract violation, not a style
+   preference.
+3. Keep timing values, queue depths, and FSM structure consistent with the new
+   template; add or update tests for changed/added scenarios and keep every FSM
+   covered.
+4. Run `python tools/validate_dld_flow.py`. The pipeline stamps the new
+   provenance baseline (`tools/check_model_provenance.py --stamp <ip>`) once the
+   gates pass.
+
+If the template change is trivial enough that the existing tests still pass, the
+stage is skipped entirely — you will not be invoked.
+
 ## Forbidden Actions
 
 - Do not invent template fields absent from the DLD; record them as gaps and
@@ -72,6 +97,8 @@ output to the same conventions.
 - Do not create per-IP model folders.
 - Do not add `perf_model.py`, `functional_model.py`, or `soc_models.py`.
 - Do not remove existing IPs from registry or validation.
+- During an amend (Stage 2), do not rewrite the model or tests from scratch and
+  do not change code the template delta does not touch.
 
 ## Completion Report
 

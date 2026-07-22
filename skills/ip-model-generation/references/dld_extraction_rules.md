@@ -22,6 +22,10 @@ absent. It parses these markdown shapes:
 - **Interfaces** — `### <n.m> <Name> Interface[s]` headings; fields from a
   `Fields:` bullet list. Interface names are best-effort (`<name>_if`) and are
   *report-only* in coverage — templates may consolidate interface sections.
+- **Interface wait models** — a `Wait model:` bullet block inside each interface
+  section (see below). Unlike interface names, this one is *not* report-only:
+  `check_template_coverage.py --strict` fails a promoted template whose wait
+  model was assumed rather than stated.
 - **FSMs** — `### <n.m> <Name> FSM` headings; states from a `States:` bullet
   list; purpose from a `Role:`/`Purpose:` line. The snake-cased FSM name is the
   key that must match the template (`Compare/Event FSM` -> `compare_event`).
@@ -32,6 +36,41 @@ absent. It parses these markdown shapes:
   `cycle_time_ns` (defaults 500 / 2 with a gap note if absent).
 - **Open Items** — bullets under an `## ... Open Items` heading are copied into
   the gaps report verbatim.
+
+## Interface Wait Models
+
+Every interface section must state how the requester (IP1) waits on the
+responder (IP2). There are exactly three ways:
+
+| Mode | What happens | Must also state |
+| --- | --- | --- |
+| `wait_for_response` | IP1 blocks — indefinitely — until IP2's response returns, and uses the returned result to pick its next step | `Response used for:` |
+| `wait_for_ack_inline` | IP1 blocks at the request site until IP2 acks, then continues the same pipeline; no result is needed | — |
+| `wait_for_ack_before_next_request` | IP1 does not block at the request site; the outstanding ack is collected before the *next* command/packet starts | `Outstanding limit:` |
+
+Write it as a labelled bullet block anywhere in the interface section:
+
+```markdown
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_notify.WAIT_SW_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: the doorbell does not block the message path; the clear gates the next assertion
+```
+
+`Waits in:` is one or more `<fsm>.<STATE>` names from this IP's own FSM
+sections — where this IP stalls (`Requester: this IP`) or where it releases the
+peer (`Requester: peer`). `template_lint.py` checks each one against
+`fsm_processes` and its states, so a typo fails the gate. Optional labels:
+`Timeout:`, `Peer:`, `Note:`.
+
+**If a section states no wait model**, the extractor fills
+`wait_for_ack_inline` (approach 2) and stamps `source: assumed_default`, and
+the gaps report calls it out. Do not promote a template in that state — go add
+the block to the DLD.
 
 ## Fields Usually Left As TODO_REVIEW
 

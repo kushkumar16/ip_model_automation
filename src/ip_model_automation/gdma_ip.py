@@ -60,6 +60,9 @@ class GdmaIpModel:
 
         self.completed_ids: List[str] = []
         self.irqs: List[int] = []
+        # interrupt_if is wait_for_ack_before_next_request with outstanding_limit 1:
+        # one coalesced IRQ is outstanding until software clears it.
+        self.irq_clear_event: simpy.Event | None = None
         self.errors: List[str] = []
         self.completed: List[tuple[float, Descriptor]] = []
         self.metrics = defaultdict(int)
@@ -121,6 +124,15 @@ class GdmaIpModel:
             self.completion_ready,
         )
 
+    def clear_interrupt(self) -> None:
+        """Software INT_STATUS clear: releases the coalescing process from WAIT_CLEAR."""
+        self.irqs.clear()
+        self.metrics["irq_clears"] += 1
+        if self.irq_clear_event is not None and not self.irq_clear_event.triggered:
+            self.irq_clear_event.succeed()
+            self.irq_clear_event = None
+        self.logger.info("irq cleared time=%s", self.env.now)
+
     def submit(self, desc: Descriptor):
         self.descriptor_start[desc.desc_id] = self.env.now
         self.logger.info("submit descriptor=%s channel=%s length=%s", desc.desc_id, desc.channel_id, desc.length_bytes)
@@ -158,6 +170,10 @@ class GdmaIpModel:
             self.fsm_state["descriptor_fetch"] = "ISSUE_FETCH"
             with self.descriptor_read_port.request() as req:
                 yield req
+                # descriptor_read_if is wait_for_response: the fetch blocks here
+                # until the descriptor comes back, because its fields decide what
+                # is validated and enqueued next.
+                self.fsm_state["descriptor_fetch"] = "WAIT_FETCH_RESP"
                 yield self.env.timeout(self.lat["fetch"])
             self.fsm_state["descriptor_fetch"] = "VALIDATE"
             if not self.validate_descriptor(desc):
@@ -273,3 +289,12 @@ class GdmaIpModel:
                 self.metrics["irq_count"] += 1
                 self.logger.info("irq asserted channel=%s time=%s", desc.channel_id, self.env.now)
                 pending_count = 0
+                # interrupt_if is wait_for_ack_before_next_request: the data path
+                # keeps running, but the next coalescing window only starts once
+                # software clears this interrupt.
+                self.irq_clear_event = self.env.event()
+                self.fsm_state["interrupt_coalescing"] = "WAIT_CLEAR"
+                self.metrics["irq_clear_waits"] += 1
+                yield self.irq_clear_event
+                self.fsm_state["interrupt_coalescing"] = "IDLE"
+                self.logger.debug("irq cleared channel=%s time=%s", desc.channel_id, self.env.now)

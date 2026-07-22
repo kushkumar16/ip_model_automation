@@ -57,7 +57,10 @@ the "stated vs inferred" rule.
    python tools\generate_model_scaffold.py templates\<ip_name>.template.yaml --output-dir src\ip_model_automation
    ```
 
-4. Fill model behavior using only template fields.
+4. Fill model behavior using only template fields — including each interface's
+   `wait_model`: the process must park at the `<fsm>.<STATE>` its `wait_points`
+   name and publish that state through `fsm_state`
+   (`python tools\check_wait_model_coverage.py` is the gate).
 5. Add or update `tests\test_<ip_name>.py` from `test_scenarios`.
 6. Run the full validation flow:
 
@@ -93,8 +96,11 @@ python tools\check_model_provenance.py --stamp <ip_name>
 ```
 
 `python tools\check_model_provenance.py` (no args) reports any template that has
-drifted from the model baseline it was last built against. The automated
-pipeline runs all of this for you as the `amend_implementation` stage.
+drifted from the model baseline it was last built against. Stamp per IP and only
+after the amend: the stamp asserts the model was amended against that revision,
+which the hash itself cannot verify (`--stamp-all` refuses once baselines exist,
+since it would make that claim for every IP at once). The automated pipeline
+runs all of this for you as the `amend_implementation` stage.
 
 ## Prompt Packs
 

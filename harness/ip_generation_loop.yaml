@@ -106,6 +106,11 @@ stages:
     required: true
     scope: repo
     notes: FSM/scenario coverage declared in the templates.
+  - name: wait_model_coverage
+    command: python tools/check_wait_model_coverage.py
+    required: true
+    scope: repo
+    notes: Hard gate — every interface wait point declared in a template must be a state the model actually enters, so a declared block (response wait, inline ack, deferred ack) cannot be documentation only.
   - name: code_style
     command: python tools/check_code_style.py
     required: true

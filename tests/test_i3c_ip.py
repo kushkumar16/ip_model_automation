@@ -109,6 +109,24 @@ class TestI3cIpModel(unittest.TestCase):
         self.assertGreaterEqual(model.metrics["masked_interrupts"], 1)
         self.assertEqual(model.metrics["interrupt_count"], 0)
 
+    def test_interrupt_holds_until_cleared_then_asserts_again(self):
+        """interrupt_if: wait_for_ack_before_next_request, outstanding_limit 1."""
+        env = simpy.Environment()
+        model = I3cIpModel(env, byte_bits=2, shift_latency=1, interrupt_latency=1)
+        for index in range(2):
+            model.queue_command(f"cmd{index}", "WRITE", byte_count=1)
+            model.write_tx(0x10 + index)
+        env.run(until=60)
+
+        # Transfers keep running; the second transfer-done waits for the clear.
+        self.assertGreaterEqual(model.metrics["transfers_completed"], 2)
+        self.assertEqual(model.metrics["interrupt_count"], 1)
+        self.assertEqual(model.fsm_state["interrupt_control"], "WAIT_SW_CLEAR")
+
+        model.clear_interrupt()
+        env.run(until=90)
+        self.assertEqual(model.metrics["interrupt_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

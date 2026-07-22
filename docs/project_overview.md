@@ -176,6 +176,7 @@ The extractor understands common DLD conventions. It reliably picks up:
 
 - FSM names, their states, and the total FSM count
 - Interface sections
+- Per-interface wait models (the `Wait model:` block each interface states)
 - Per-FSM timing operations and the clock rate
 
 It deliberately leaves for human review: command encodings, test scenarios,
@@ -217,8 +218,11 @@ The template captures, in one fixed shape regardless of how the DLD was
 written: the IP's FSM processes and states, how they relate (parallel groups,
 sequential paths, gating), interfaces, commands, queues (every FIFO with a
 declared capacity — bounded depth, or an explicit `unbounded` with the reason),
-resources, timing model, invariants, and test scenarios. The annotated
-`templates/reference_template.yaml` documents every section.
+resources, timing model, invariants, and test scenarios. Each interface also
+carries its wait model — whether the requester blocks until the response comes
+back, blocks in place for an ack, or collects the ack before starting its next
+request. The annotated `templates/reference_template.yaml` documents every
+section.
 
 The contract for that fixed shape is enforced in **two non-overlapping layers**,
 both run by `tools/template_lint.py`:
@@ -451,16 +455,23 @@ flowchart TD
     G1["template_lint.py<br/>JSON Schema structure + cross-field semantics"]
     G2["check_template_coverage.py --strict<br/>template captures every DLD FSM + count,<br/>zero TODO_REVIEW left"]
     G3["report_model_coverage.py<br/>every FSM has a test scenario"]
-    G4["generate_model_scaffold.py<br/>model shape: class + one process per FSM"]
-    G5["unit tests<br/>functional + timing assertions pass"]
+    G4["check_wait_model_coverage.py<br/>the model enters every interface wait point"]
+    G5["generate_model_scaffold.py<br/>model shape: class + one process per FSM"]
+    G6["unit tests<br/>functional + timing assertions pass"]
 
-    G1 --> G2 --> G3 --> G4 --> G5
-    G5 --> OK["validate_dld_flow.py: OK"]
+    G1 --> G2 --> G3 --> G4 --> G5 --> G6
+    G6 --> OK["validate_dld_flow.py: OK"]
     OK -.-> R["+ repo-wide hard gates in the automated pipeline:<br/>check_code_style.py (ruff lint + format)<br/>run_code_coverage.py (95%+ total and per file)"]
 
     classDef gate fill:#fff4e5,stroke:#f5a623;
-    class G1,G2,G3,G4,G5,R gate;
+    class G1,G2,G3,G4,G5,G6,R gate;
 ```
+
+The wait-model gate is the one that keeps interface semantics honest in both
+directions: `template_lint.py` proves each declared wait point names a real FSM
+state, and `check_wait_model_coverage.py` proves the model actually enters it —
+so a template cannot claim the requester blocks for a software clear while the
+model asserts the interrupt and loops on.
 
 One command — `python tools\validate_dld_flow.py` — runs the front-end gate
 for **every** DLD in the repo (template exists, lints, covers its DLD), then
@@ -887,7 +898,7 @@ reused unchanged as the doorbell source inside the `mailbox_irq_subsystem`.
 | --- | --- | --- | --- |
 | "A full channel applies backpressure to the sender" (§4.2) | `SEND_MESSAGE.error_conditions: [fifo_full]`; `queues.message_fifo.blocking_behavior: backpressure` | `message_push_process` `REJECT_FULL` branch | `test_full_fifo_applies_backpressure` |
 | "Enqueue precedes doorbell; doorbell precedes interrupt" (§11) | `sequential_paths: message_to_interrupt_path` | `doorbell_queue` → `interrupt_pending_queue` hand-offs | `test_message_enqueue_delivers_and_interrupts` |
-| "Doorbell interrupt is level, asserted until software clears" (§4.4) | invariant: "stays asserted until software clears it" | `clear_interrupt()` API + `doorbell_status` set | subsystem tests (`mailbox_irq_subsystem`) |
+| "Doorbell interrupt is level, asserted until software clears" (§4.4) | `interrupt_output_if.wait_model: wait_for_ack_before_next_request`, `outstanding_limit: 1`, waiting in `interrupt_notify.WAIT_SW_CLEAR` | `interrupt_notify` parks in `WAIT_SW_CLEAR` after asserting; `clear_interrupt()` releases it | `test_interrupt_waits_for_software_clear_before_next_assertion` |
 | Per-FSM cycle counts (§11 timing table) | `timing_model.fsm_process_delays` | latency constructor parameters (`self.lat`) | timing assertions in per-IP tests |
 | Open Items: channel count, FIFO depth (§12) | gaps report + `queues.message_fifo.depth` | `num_channels` / `fifo_depth` constructor parameters | swept by `run_experiments.py` scenarios |
 
@@ -921,7 +932,7 @@ suite passing (run it for the current count).*
 | Subsystem | What it composes |
 | --- | --- |
 | `dma_subsystem` | Connected data-mover composing `gdma_ip`, `axi_interconnect_ip`, `arbitration_ip`, `completion_ip`. Descriptors fan out to an engine leg and a fabric leg; the subsystem IRQ fires when both legs complete. A backpressure monitor couples fabric congestion to GDMA memory readiness and completion backlog to arbitration issue readiness. |
-| `mailbox_irq_subsystem` | Interrupt-delivery cluster composing `mailbox_ip` (doorbell source) and `interrupt_controller_ip` (delivery fabric) with a modeled software service loop (ack, read, clear, EOI). True level-triggered semantics (EOI re-pends while unserviced messages remain) and duty-cycle interrupt-storm throttling. |
+| `mailbox_irq_subsystem` | Interrupt-delivery cluster composing `mailbox_ip` (doorbell source) and `interrupt_controller_ip` (delivery fabric) with a modeled software service loop (ack, read, level deassert, EOI). The bridge acknowledges each mailbox doorbell as it hands the level to the controller, satisfying the mailbox's one-outstanding-interrupt wait model. True level-triggered semantics (EOI re-pends while unserviced messages remain) and duty-cycle interrupt-storm throttling. |
 
 ## Pipeline maturity
 

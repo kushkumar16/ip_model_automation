@@ -108,6 +108,16 @@ covers the DLD and promote it:
 python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md --strict
 ```
 
+Every interface must state its **wait model** — how the requester waits on the
+responder across it: `wait_for_response` (blocks until the response returns and
+uses the result), `wait_for_ack_inline` (blocks at the request site for an ack,
+then continues the same pipeline), or `wait_for_ack_before_next_request`
+(continues after issuing; the ack is collected before the next request). Write
+it as a `Wait model:` bullet block in the DLD's interface section
+(see any `dlds/*_dld.md`); a section that states none is read as
+`wait_for_ack_inline`, and the strict coverage check above fails a promoted
+template still carrying that assumed default.
+
 Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
 subsystem wiring is consistent, then the model/test flow). When the gate
 passes it also regenerates the readable Markdown + HTML docs for every
@@ -182,6 +192,7 @@ This command:
 - smoke-generates a scaffold for every IP in a temporary directory
 - verifies each scaffold has the expected model class and FSM process methods
 - checks template FSM coverage from `test_scenarios`
+- checks each model enters every interface wait point its template declares
 - runs the unit test suite
 
 Run only the FSM coverage report:
@@ -300,6 +311,11 @@ python tools\check_model_provenance.py --stamp <ip>          # refresh the basel
 
 `check_model_provenance.py` (no args) reports any template that has drifted from
 the model baseline it was last built against — the signal that an amend is due.
+Stamp one IP at a time, after the amend: the stamp asserts that model was
+amended against that template revision, a claim the hash comparison itself
+cannot verify. `--stamp-all` is for bootstrapping provenance only and refuses to
+run once baselines exist (`--force` overrides, for a deliberate bulk
+re-baseline).
 
 ## Pointing The Tooling At Another Codebase
 
@@ -371,8 +387,9 @@ resolves to the same default, so nothing breaks in the meantime).
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
-- `tools/template_lint.py`: template contract checker — validates *structure* against the JSON Schema and enforces the cross-field *semantics* (fsm_count parity, per-FSM timing, scenario coverage) the schema cannot express.
+- `tools/template_lint.py`: template contract checker — validates *structure* against the JSON Schema and enforces the cross-field *semantics* (fsm_count parity, per-FSM timing, scenario coverage, interface wait points naming real FSM states) the schema cannot express.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
+- `tools/check_wait_model_coverage.py`: gate that each model enters every interface wait point its template declares (the model-side half of the interface wait-model contract).
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
 - `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).

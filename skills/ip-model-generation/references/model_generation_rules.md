@@ -29,6 +29,22 @@
 - Start every parallel FSM with `env.process(...)`.
 - Preserve sequential paths by handing transactions through queues/stores.
 - Model backpressure when interfaces, queues, resources, or config gates block progress.
+- Implement each interface's `wait_model` where it says the wait happens — the
+  `wait_points` name the exact `<fsm>.<STATE>` that blocks:
+  - `wait_for_response` — the process parks at that state until the response
+    event fires (no timeout), and the returned value drives the next
+    transition, per `response_used_for`.
+  - `wait_for_ack_inline` — the process blocks at the request site for the ack,
+    then continues the same transaction.
+  - `wait_for_ack_before_next_request` — the process does *not* block after
+    issuing; it collects the outstanding ack before starting the next
+    command/packet, with at most `outstanding_limit` requests in flight.
+  Publish each wait point through `fsm_state` while the process is parked there
+  (`self.fsm_state["interrupt_notify"] = "WAIT_SW_CLEAR"`), so the wait is
+  observable to tests. `tools/check_wait_model_coverage.py` fails the build if a
+  model never enters a state its template declares as a wait point — asserting
+  an interrupt and looping on, where the template says the next assertion waits
+  for a software clear, is the exact drift it catches.
 - Use template timing operations for timeouts; tests may override constructor delays for speed.
 - Keep payloads abstract unless the template explicitly requires payload modeling.
 - Log FSM transitions at `DEBUG`, command lifecycle at `INFO`, expected stalls
@@ -63,6 +79,7 @@ Run:
 ```powershell
 python tools\template_lint.py templates\*.template.yaml
 python tools\report_model_coverage.py
+python tools\check_wait_model_coverage.py
 python tools\check_code_style.py
 python tools\validate_ip_flow.py
 ```

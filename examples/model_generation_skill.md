@@ -88,6 +88,11 @@ FSM. After scaffold generation, fill the TODO hooks using only template fields:
 - `commands` for validity, completion, and error behavior.
 - `fsm_processes` for states, transitions, actions, interfaces, queues, and
   resources.
+- `interfaces[].wait_model` for where the model blocks on each interface: park
+  the process at the `<fsm>.<STATE>` in `wait_points` and publish that state
+  through `fsm_state` (`wait_for_response` blocks until the response returns,
+  `wait_for_ack_inline` blocks at the request site, and
+  `wait_for_ack_before_next_request` collects the ack before the next request).
 - `fsm_relationships` for sequential and parallel behavior.
 - `timing_model.fsm_process_delays` for all hard-coded delays.
 - `functionality_model.state_variables` and `performance_model.metrics` for

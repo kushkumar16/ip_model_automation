@@ -35,6 +35,7 @@ class InterruptControllerIpModel:
         self.delivery_queue = simpy.Store(env)
         self.ack_queue = simpy.Store(env)
         self.eoi_queue = simpy.Store(env)
+        self.register_read_queue = simpy.Store(env)
 
         self.enabled = set()
         self.masked = set()
@@ -59,6 +60,10 @@ class InterruptControllerIpModel:
             "software": software_latency,
         }
         self.last_delivered: Dict[str, int] = {}
+        # cpu_irq_if is wait_for_ack_before_next_request with outstanding_limit 1
+        # per target: delivery completes on assertion, but the acknowledge must
+        # arrive before the next interrupt is delivered to that target.
+        self.delivery_ack_events: Dict[str, simpy.Event] = {}
         self.fsm_state = {
             "source_sampling": "SAMPLE_SOURCES",
             "pending_update": "WAIT_EVENT",
@@ -141,6 +146,12 @@ class InterruptControllerIpModel:
         self.logger.info("ack requested target=%s", target_id)
         return self.ack_queue.put(target_id)
 
+    def read_state(self) -> simpy.Event:
+        """Register read: `state = yield model.read_state()` (register_if waits for the response)."""
+        response = self.env.event()
+        self.register_read_queue.put({"op": "read_state", "response": response})
+        return response
+
     def eoi(self, src_id: int) -> None:
         self.eoi_queue.put(src_id)
         self.logger.info("eoi requested source=%s", src_id)
@@ -221,14 +232,29 @@ class InterruptControllerIpModel:
         while True:
             self.fsm_state["cpu_delivery"] = "IDLE"
             selected = yield self.delivery_queue.get()
+            if selected not in self.pending:
+                # Resolved before this delivery got its turn (acknowledged or
+                # cleared meanwhile): deliver the current winner, not a stale one.
+                self.fsm_state["cpu_delivery"] = "DELIVERY_STALL"
+                self.metrics["stale_delivery_skips"] += 1
+                self.logger.debug("stale delivery skipped source=%s", selected)
+                continue
             self.fsm_state["cpu_delivery"] = "ASSERT_IRQ"
             yield self.env.timeout(self.lat["delivery"])
+            target_id = self.targets.get(selected, "CPU0")
             self.delivered.append((self.env.now, selected))
-            self.last_delivered[self.targets.get(selected, "CPU0")] = selected
+            self.last_delivered[target_id] = selected
             self.metrics["delivered_irqs"] += 1
-            self.logger.info(
-                "delivered source=%s target=%s time=%s", selected, self.targets.get(selected, "CPU0"), self.env.now
-            )
+            self.logger.info("delivered source=%s target=%s time=%s", selected, target_id, self.env.now)
+            # One interrupt in flight per target: hold the level here until the
+            # CPU acknowledges, then deliver the next winner.
+            ack_event = self.env.event()
+            self.delivery_ack_events[target_id] = ack_event
+            self.fsm_state["cpu_delivery"] = "WAIT_ACK"
+            self.metrics["delivery_ack_waits"] += 1
+            yield ack_event
+            self.fsm_state["cpu_delivery"] = "HOLD_LEVEL"
+            self.logger.debug("delivery acknowledged source=%s target=%s", selected, target_id)
 
     def acknowledge_process(self):
         while True:
@@ -250,6 +276,14 @@ class InterruptControllerIpModel:
             self.acknowledged.append((self.env.now, selected))
             self.metrics["ack_count"] += 1
             self.logger.info("acknowledged source=%s target=%s", selected, target_id)
+            # Releases cpu_delivery from WAIT_ACK so the next winner for this
+            # target can be delivered.
+            ack_event = self.delivery_ack_events.pop(target_id, None)
+            if ack_event is not None and not ack_event.triggered:
+                ack_event.succeed()
+            # The acknowledged source left the pending set, so re-resolve: a
+            # lower-priority pending interrupt may now be the winner.
+            yield self.eligible_set_queue.put("post_ack")
 
     def end_of_interrupt_process(self):
         while True:
@@ -270,7 +304,21 @@ class InterruptControllerIpModel:
     def register_access_process(self):
         while True:
             self.fsm_state["register_access"] = "IDLE"
-            yield self.env.timeout(1)
+            request = yield self.register_read_queue.get()
+            self.fsm_state["register_access"] = "DECODE_ACCESS"
+            yield self.env.timeout(self.lat["register"])
+            # register_if is wait_for_response: software blocks on the read and
+            # decides what to write next from what comes back.
+            self.fsm_state["register_access"] = "READ_STATE"
+            request["response"].succeed(
+                {
+                    "pending": sorted(self.pending),
+                    "active": sorted(self.active),
+                    "enabled": sorted(self.enabled),
+                    "masked": sorted(self.masked),
+                }
+            )
+            self.metrics["register_reads"] += 1
 
     def software_interrupt_process(self):
         while True:

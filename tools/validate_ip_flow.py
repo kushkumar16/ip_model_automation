@@ -90,6 +90,11 @@ def run_coverage_report(repo_root: Path) -> None:
     subprocess.run([sys.executable, str(reporter)], cwd=repo_root, check=True)
 
 
+def run_wait_model_coverage(repo_root: Path) -> None:
+    checker = repo_root / "tools" / "check_wait_model_coverage.py"
+    subprocess.run([sys.executable, str(checker)], cwd=repo_root, check=True)
+
+
 def validate_prompt_packs(repo_root: Path, templates: list[Path]) -> None:
     generator = load_tool("generate_prompt_pack", repo_root / "tools" / "generate_prompt_pack.py")
     with tempfile.TemporaryDirectory(prefix="ip_prompt_pack_") as tmpdir:
@@ -118,6 +123,8 @@ def validate(repo_root: Path, skip_tests: bool = False) -> None:
     validate_scaffolds(repo_root, templates)
     print("checking template FSM coverage")
     run_coverage_report(repo_root)
+    print("checking interface wait model coverage")
+    run_wait_model_coverage(repo_root)
     print("generating prompt packs")
     validate_prompt_packs(repo_root, templates)
     if not skip_tests:

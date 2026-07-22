@@ -107,6 +107,50 @@ class TestInterruptControllerIpModel(unittest.TestCase):
         self.assertEqual(model.ack_functional("CPU0"), 2)
         self.assertIsNone(model.ack_functional("CPU0"))
 
+    def test_register_read_returns_controller_state(self):
+        """register_if: wait_for_response — software blocks on the read."""
+        env = simpy.Environment()
+        model = InterruptControllerIpModel(
+            env, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, register_latency=2
+        )
+        model.configure_source(4, priority=1)
+        model.assert_edge(4)
+        seen = {}
+
+        def reader():
+            yield env.timeout(10)
+            started = env.now
+            seen["state"] = yield model.read_state()
+            seen["elapsed"] = env.now - started
+
+        env.process(reader())
+        env.run(until=30)
+        self.assertIn(4, seen["state"]["enabled"])
+        self.assertGreaterEqual(seen["elapsed"], 2)
+
+    def test_delivery_waits_for_cpu_ack_before_next_interrupt(self):
+        """cpu_irq_if: wait_for_ack_before_next_request, outstanding_limit 1 per target."""
+        env = simpy.Environment()
+        model = InterruptControllerIpModel(
+            env, pending_latency=1, filter_latency=1, priority_latency=1, delivery_latency=1, ack_latency=1
+        )
+        model.configure_source(1, priority=1)
+        model.configure_source(2, priority=2)
+        model.assert_edge(1)
+        model.assert_edge(2)
+        env.run(until=20)
+
+        # The higher-priority source is delivered and the level is held: the
+        # second interrupt is not delivered until the CPU acknowledges.
+        self.assertEqual(len(model.delivered), 1)
+        self.assertEqual(model.delivered[0][1], 1)
+        self.assertEqual(model.fsm_state["cpu_delivery"], "WAIT_ACK")
+
+        model.ack("CPU0")
+        env.run(until=40)
+        self.assertEqual(len(model.delivered), 2)
+        self.assertEqual(model.delivered[1][1], 2)
+
     def test_interrupt_software_interrupt_delivery(self):
         env = simpy.Environment()
         model = InterruptControllerIpModel(

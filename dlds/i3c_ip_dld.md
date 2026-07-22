@@ -56,6 +56,14 @@ and ACKed before its payload byte is read.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Register Interface
 
 Type: APB/AHB/AXI-lite style control interface.
@@ -81,6 +89,15 @@ Timing:
 - Configuration and command writes update shadow state before a transfer
   starts.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_STATUS`
+- Resumes on: `register_access_complete`
+- Response used for: software consumes `read_data` (status, RX bytes, IBI payload) before its next access
+- Note: configuration and command writes are acknowledged in place as shadow state updates
+
 ### 4.2 I3C Bus Interface
 
 Fields:
@@ -95,6 +112,14 @@ Timing:
 - The bus is open-drain during address and IBI arbitration and push-pull
   during SDR data phases.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `command_engine.WAIT_ACK`, `bit_transfer_engine.CHECK_ACK`
+- Resumes on: `target_ack_or_nack`
+- Response used for: the ACK/NACK and the returned read bytes decide whether the transfer dispatches, aborts, or is captured
+
 ### 4.3 Interrupt Output Interface
 
 Fields:
@@ -107,6 +132,15 @@ Timing:
 
 - Transfer-done, NACK, and IBI-received interrupts are level and remain
   asserted until software clears status.
+
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_control.WAIT_SW_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: the transfer pipeline does not block on the interrupt; the clear must be seen before the next interrupt is asserted
 
 ## 5. Transfer Types
 

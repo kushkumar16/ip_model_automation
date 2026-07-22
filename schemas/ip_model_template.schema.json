@@ -72,14 +72,90 @@
     },
     "interface": {
       "type": "object",
-      "required": ["name", "type", "direction", "transactions"],
+      "required": ["name", "type", "direction", "transactions", "wait_model"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
         "type": {"type": "string", "minLength": 1},
         "direction": {"type": "string", "minLength": 1},
         "clock_domain": {"type": "string"},
-        "transactions": {"type": "array", "minItems": 1}
+        "transactions": {"type": "array", "minItems": 1},
+        "wait_model": {"$ref": "#/$defs/wait_model"}
       }
+    },
+    "wait_model": {
+      "$comment": "How the requester on an IP-to-IP interface waits on the responder. Every interface declares one; when a DLD is silent the extractor fills wait_for_ack_inline with source: assumed_default.",
+      "type": "object",
+      "required": ["mode", "requester", "wait_points", "resumes_on", "source"],
+      "properties": {
+        "mode": {
+          "enum": [
+            "wait_for_response",
+            "wait_for_ack_inline",
+            "wait_for_ack_before_next_request"
+          ]
+        },
+        "requester": {
+          "enum": ["this_ip", "peer"],
+          "$comment": "who plays IP1: this IP drives the request, or the peer does"
+        },
+        "wait_points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(TODO_REVIEW|[a-z_][a-z0-9_]*\\.[A-Z][A-Z0-9_]*)$",
+            "$comment": "<fsm>.<STATE> in THIS template: where this IP stalls (requester: this_ip) or where it releases the peer (requester: peer)"
+          }
+        },
+        "resumes_on": {"type": "string", "minLength": 1},
+        "timeout": {
+          "oneOf": [
+            {"const": "indefinite"},
+            {"type": "integer", "minimum": 1}
+          ]
+        },
+        "response_used_for": {"type": "string", "minLength": 1},
+        "outstanding_limit": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "minLength": 1}
+          ],
+          "$comment": "requests allowed in flight before the ack barrier; an integer, or the name of the config knob that bounds it"
+        },
+        "peer": {"type": "string", "minLength": 1},
+        "source": {
+          "enum": ["dld", "assumed_default"],
+          "$comment": "dld = the DLD states this wait model; assumed_default = the DLD is silent and the wait_for_ack_inline default was applied"
+        },
+        "notes": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "wait_for_response"}}, "required": ["mode"]},
+          "then": {
+            "required": ["response_used_for"],
+            "properties": {"timeout": {"const": "indefinite"}},
+            "$comment": "approach 1 blocks indefinitely, and must say what the returned result drives"
+          }
+        },
+        {
+          "if": {
+            "properties": {"mode": {"const": "wait_for_ack_before_next_request"}},
+            "required": ["mode"]
+          },
+          "then": {
+            "required": ["outstanding_limit"],
+            "$comment": "approach 3 defers the ack, so it must state how many requests may be in flight before the barrier"
+          }
+        },
+        {
+          "if": {"properties": {"source": {"const": "assumed_default"}}, "required": ["source"]},
+          "then": {
+            "properties": {"mode": {"const": "wait_for_ack_inline"}},
+            "$comment": "the documented fallback when a DLD does not state a wait model is approach 2"
+          }
+        }
+      ]
     },
     "command": {
       "type": "object",

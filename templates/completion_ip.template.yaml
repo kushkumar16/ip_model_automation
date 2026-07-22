@@ -14,6 +14,13 @@ interfaces:
     type: command_accept
     direction: input
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [accept.ENQUEUE]
+      resumes_on: accept_ready
+      source: dld
+      notes: "the producer needs no result, only the accept; a full pending queue holds the FSM in `BACKPRESSURE` and deasserts `ready`"
     transactions:
       - name: accept_command
         fields: [cmd_id, tenant_id, source_id, opcode, size_kb, arrival_time, nominal_service_latency, status_hint]
@@ -23,6 +30,12 @@ interfaces:
     type: configuration
     direction: input
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [refill.REFILL_BASE]
+      resumes_on: config_applied
+      source: dld
     transactions:
       - name: tenant_config
         fields: [tenant_alive, read_iops_per_sec, write_iops_per_sec, read_bw_kb_per_sec, write_bw_kb_per_sec]
@@ -32,6 +45,13 @@ interfaces:
     type: completion_output
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: this_ip
+      wait_points: [completion_scheduler.EMIT]
+      resumes_on: cpl_ready
+      source: dld
+      notes: "while `cpl_ready` is low the scheduler holds in `STALL_OUTPUT` and the completion stays queued"
     transactions:
       - name: emit_completion
         fields: [cmd_id, tenant_id, status, latency]

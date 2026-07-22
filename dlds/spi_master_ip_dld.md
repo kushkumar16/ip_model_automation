@@ -43,6 +43,14 @@ and completion must be observed before the transfer-done interrupt asserts.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Register Interface
 
 Type: APB/AHB/AXI-lite style control interface.
@@ -67,6 +75,15 @@ Timing:
 
 - Configuration writes update shadow state before a transfer starts.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_STATUS`
+- Resumes on: `register_access_complete`
+- Response used for: software consumes `RX_DATA` and `STATUS` reads before its next access
+- Note: configuration writes are acknowledged in place as shadow state updates
+
 ### 4.2 SPI Bus Interface
 
 Fields:
@@ -81,6 +98,14 @@ Timing:
 - Each bit takes one shift period derived from the baud divider.
 - Chip-select frames a byte transfer.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `transmit_engine.WAIT_SHIFT_DONE`
+- Resumes on: `byte_shift_complete`
+- Response used for: the sampled MISO byte is pushed into the receive FIFO, and the next byte loads only after the shift completes
+
 ### 4.3 Interrupt Output Interface
 
 Fields:
@@ -93,6 +118,15 @@ Timing:
 
 - Transfer-done and threshold interrupts are level and remain asserted until
   software clears status.
+
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_control.WAIT_SW_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: transfers continue while the interrupt is pending; the clear gates the next assertion
 
 ## 5. Transfer Modes
 

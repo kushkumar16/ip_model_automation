@@ -14,6 +14,15 @@ interfaces:
     type: <protocol_or_logical_type>
     direction: input
     clock_domain: core_clk
+    wait_model:
+      # wait_for_response | wait_for_ack_inline | wait_for_ack_before_next_request
+      # (see templates/reference_template.yaml; wait_for_ack_inline is the default
+      #  when the DLD does not state one)
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [<fsm_name>.<STATE>]
+      resumes_on: <event_that_ends_the_wait>
+      source: dld
     transactions:
       - name: <transaction_name>
         fields: [field0, field1]

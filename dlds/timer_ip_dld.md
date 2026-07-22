@@ -48,6 +48,14 @@ match precedes reload, and interrupt clear follows software acknowledgement.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Register Interface
 
 Type: APB/AHB/AXI-lite style control interface.
@@ -66,6 +74,15 @@ Important registers:
 - `WDT_TIMEOUT`: watchdog timeout threshold.
 - `WDT_KICK`: watchdog heartbeat write.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_RETURN`
+- Resumes on: `register_access_complete`
+- Response used for: software consumes counter and status reads before its next access
+- Note: writes land in shadow state, are acknowledged in place, and are then crossed by the configuration synchronizer
+
 ### 4.2 Tick Clock Interface
 
 Fields:
@@ -78,6 +95,14 @@ Timing:
 
 - Tick generation may be modeled as a periodic SimPy timeout.
 - Prescaler determines when a timer channel observes an effective count tick.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `prescaler.WAIT_RAW_TICK`
+- Resumes on: `raw_tick_observed`
+- Note: a tick carries no result; it is consumed in the cycle it is presented
 
 ### 4.3 Interrupt Output Interface
 
@@ -93,6 +118,15 @@ Timing:
 - Interrupt may be level or pulse depending on configuration.
 - Level interrupt remains asserted until software clears status.
 
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_aggregation.WAIT_SW_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: counting continues while the interrupt is pending; the clear gates the next assertion
+
 ### 4.4 Watchdog Heartbeat Interface
 
 Fields:
@@ -105,6 +139,14 @@ Timing:
 
 - Watchdog counter resets on accepted kick.
 - Timeout event occurs if no kick is observed before threshold.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `watchdog.KICK_RELOAD`
+- Resumes on: `kick_accepted`
+- Note: the kicker needs no result, only the accept that reloads the watchdog counter
 
 ## 5. Timer Modes
 

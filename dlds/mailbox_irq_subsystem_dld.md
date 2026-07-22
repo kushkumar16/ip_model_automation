@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-The Mailbox IRQ Subsystem is a connected interrupt-delivery cluster built from two existing IPs: the Mailbox IP as the interrupt source and the Interrupt Controller IP as the delivery fabric. A sender agent writes messages into mailbox channels; each doorbell becomes a level-triggered interrupt source at the controller, which prioritizes and delivers it to a CPU. A modeled software handler acknowledges the delivery, reads the message, clears the doorbell, and signals end-of-interrupt, closing the full message-to-EOI round trip.
+The Mailbox IRQ Subsystem is a connected interrupt-delivery cluster built from two existing IPs: the Mailbox IP as the interrupt source and the Interrupt Controller IP as the delivery fabric. A sender agent writes messages into mailbox channels; each doorbell becomes a level-triggered interrupt source at the controller, which prioritizes and delivers it to a CPU. The bridge acknowledges the mailbox doorbell as it hands the level to the controller, so the mailbox is free to raise the next one; a modeled software handler then acknowledges the delivery, reads the message, deasserts the level once the channel drains, and signals end-of-interrupt, closing the full message-to-EOI round trip.
 
 The performance model must represent the concurrent member IPs and the glue processes that connect them, including level-triggered semantics (a doorbell stays asserted while unserviced messages remain, so end-of-interrupt re-pends the source) and interrupt-storm throttling (a flooding channel is masked at the controller until it drains).
 
@@ -11,7 +11,7 @@ The performance model must represent the concurrent member IPs and the glue proc
 In scope:
 
 - Message intake and forwarding to mailbox channels.
-- Bridging mailbox doorbell interrupts to controller level-triggered sources.
+- Bridging mailbox doorbell interrupts to controller level-triggered sources, including the doorbell acknowledge that lets the mailbox notify the next message.
 - CPU delivery acknowledgement and the software service loop (read, clear, EOI).
 - Level reassert behavior when a channel still holds unserviced messages at EOI.
 - Interrupt-storm throttling by masking a flooding source at the controller.
@@ -27,9 +27,19 @@ Out of scope:
 
 Doorbell interrupts are the canonical mailbox use: a producer writes a message, the consumer is interrupted, reads the message, clears the doorbell, and completes the interrupt. Modeling the connected cluster exposes behavior invisible in single-IP models: message-to-EOI round-trip latency through both IPs, pending collapse (multiple doorbells on one channel collapse to one pending controller source, recovered by level reassert at EOI), and storm scenarios where one flooding channel is masked so it cannot starve the system.
 
-The subsystem treats the two member IP models as internal resources. Its own processes are glue: they move events between member boundaries and model the CPU-side service loop. Some glue processes are naturally parallel: message intake, interrupt bridging, CPU service, software handling, and storm monitoring all run concurrently. Some operations are sequential: a doorbell is bridged only after the mailbox asserts it; the CPU acknowledges only after the controller delivers; the software handler reads and clears only after acknowledgement; EOI follows service completion.
+The subsystem treats the two member IP models as internal resources. Its own processes are glue: they move events between member boundaries and model the CPU-side service loop. Some glue processes are naturally parallel: message intake, interrupt bridging, CPU service, software handling, and storm monitoring all run concurrently. Some operations are sequential: a doorbell is bridged only after the mailbox asserts it; the CPU acknowledges only after the controller delivers; the software handler reads and deasserts only after acknowledgement; EOI follows service completion.
+
+Because each member IP carries its own interface wait model, the glue must satisfy them. The Mailbox IP's interrupt output is `wait_for_ack_before_next_request` with one outstanding interrupt: it holds the doorbell asserted and notifies nothing further until software clears it. The subsystem therefore acknowledges the doorbell in the bridge, at the moment the level is handed to the controller — at that point the doorbell has done its job, and the controller's level is what keeps the source pending. Deferring that acknowledge to the software handler instead would cap the subsystem at one message in flight per channel, which would make both the level-reassert and the storm-throttle behavior below unreachable.
 
 ## 4. Interfaces
+
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
 
 ### 4.1 Host Message Interface
 
@@ -42,6 +52,13 @@ Timing:
 
 - A message is accepted into the intake queue immediately; mailbox FIFO backpressure applies inside the member IP.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `host_message.ACCEPT_MESSAGE`
+- Resumes on: `intake_queue_accept`
+
 ### 4.2 CPU Service Interface
 
 Fields:
@@ -52,6 +69,15 @@ Fields:
 Timing:
 
 - Acknowledge latency and software service latency are modeled as fixed glue delays plus member IP latencies.
+
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `cpu_service.ISSUE_ACK`, `software_handler.ISSUE_EOI`
+- Resumes on: `cpu_ack_and_eoi`
+- Outstanding limit: 1
+- Note: one delivery per source is in flight; the ack/EOI pair must complete before that source is delivered again
 
 ### 4.3 Storm Control Interface
 
@@ -66,6 +92,13 @@ Timing:
 
 - A source is masked when its outstanding message count reaches the storm limit and unmasked after the throttle window elapses; it is re-masked if it is still flooding (duty-cycle throttling). The release is time-windowed because the controller's pending set collapses a flooding source to one in-flight delivery at a time, so a masked source cannot drain below the limit on its own.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `storm_monitor.APPLY_MASK`
+- Resumes on: `mask_applied`
+
 ## 5. Interrupt Flow
 
 `SEND`:
@@ -74,7 +107,7 @@ Timing:
 
 `BRIDGE`:
 
-- The mailbox doorbell interrupt is consumed and asserted as a level-triggered source at the interrupt controller.
+- The mailbox doorbell interrupt is consumed and asserted as a level-triggered source at the interrupt controller, and the doorbell is acknowledged so the mailbox can notify the next message on that channel.
 
 `DELIVER`:
 
@@ -82,7 +115,7 @@ Timing:
 
 `SERVICE`:
 
-- The CPU acknowledges; the software handler reads the message, clears the doorbell when the channel is drained, and issues end-of-interrupt.
+- The CPU acknowledges; the software handler reads the message, deasserts the controller level when the channel is drained, and issues end-of-interrupt.
 
 `REASSERT`:
 
@@ -114,7 +147,7 @@ Parallel interaction:
 
 ### 6.2 Irq Source Bridge FSM
 
-Role: Consume mailbox doorbell interrupts and assert the mapped level-triggered source at the interrupt controller.
+Role: Consume mailbox doorbell interrupts, assert the mapped level-triggered source at the interrupt controller, and acknowledge the doorbell.
 
 States:
 
@@ -127,6 +160,12 @@ Sequential dependencies:
 
 - A source is asserted only after the mailbox raises the doorbell interrupt.
 - Channel-to-source mapping occurs before level assertion.
+- The mailbox doorbell is acknowledged (status cleared) as the level is
+  asserted. The Mailbox IP allows one outstanding doorbell interrupt and raises
+  no further one until it is cleared, so acknowledging here is what lets a
+  second message on the same channel be notified. From that point the interrupt
+  controller's level — held until the channel drains — is what keeps the source
+  pending.
 
 Parallel interaction:
 
@@ -152,7 +191,7 @@ Parallel interaction:
 
 ### 6.4 Software Handler FSM
 
-Role: Service acknowledged interrupts: read the message, clear the doorbell when the channel drains, and issue end-of-interrupt.
+Role: Service acknowledged interrupts: read the message, deassert the controller level when the channel drains, and issue end-of-interrupt.
 
 States:
 
@@ -165,7 +204,7 @@ States:
 Sequential dependencies:
 
 - The message is read only after acknowledgement.
-- The doorbell is cleared and the level deasserted only when no unserviced messages remain on the channel.
+- The controller level is deasserted only when no unserviced messages remain on the channel; any residual doorbell status is cleared at the same point (the bridge normally acknowledged it already).
 - End-of-interrupt follows service completion; a still-asserted level re-pends the source.
 
 Parallel interaction:
@@ -200,10 +239,10 @@ Sequential interrupt path:
 Host Message
   -> Host Message (forward)
   -> Mailbox IP (push, doorbell, notify)      [member IP]
-  -> Irq Source Bridge (consume + assert level)
+  -> Irq Source Bridge (consume + assert level + ack doorbell)
   -> Interrupt Controller IP (pend, filter, prioritize, deliver) [member IP]
   -> Cpu Service (ack)
-  -> Software Handler (read, clear, EOI)
+  -> Software Handler (read, deassert level when drained, EOI)
   -> level reassert if messages remain
 ```
 
@@ -237,9 +276,9 @@ Resources:
 The SimPy model shall include:
 
 - A host-message process that forwards messages and timestamps them.
-- An interrupt-bridge process from mailbox doorbells to controller level sources.
+- An interrupt-bridge process from mailbox doorbells to controller level sources, which acknowledges each doorbell as it asserts the level.
 - A CPU-service process that acknowledges deliveries.
-- A software-handler process with read, conditional clear/deassert, and EOI.
+- A software-handler process with read, conditional level deassert, and EOI.
 - A storm-monitor process with mask at the storm limit and time-windowed unmask.
 - Metrics for messages sent, interrupts bridged, deliveries observed, acknowledges issued, messages serviced, EOIs issued, level reasserts used, storm throttle events, and message-to-EOI round-trip latency.
 
@@ -249,7 +288,7 @@ The generated SimPy delay model shall include:
 
 - Instantiation of the two member IP models with configurable parameters.
 - Channel-to-source mapping (channel N maps to controller source N).
-- Level-triggered assert/deassert coupling with conditional doorbell clear.
+- Level-triggered assert/deassert coupling, with the doorbell acknowledged at bridge time and the level released when the channel drains.
 - Outstanding-count bookkeeping shared by the bridge, handler, and monitor.
 - Storm masking at the controller with time-windowed release.
 
@@ -274,7 +313,7 @@ Per-process timing:
 | FSM/process | Runs as | Delay model |
 | --- | --- | --- |
 | Host Message FSM | Parallel intake process | Accept message: 1 cycle = 2 ns. Forward mailbox: 1 cycle = 2 ns. |
-| Irq Source Bridge FSM | Parallel bridge process | Consume mailbox irq: 1 cycle = 2 ns. Map source: 1 cycle = 2 ns. Assert level: 1 cycle = 2 ns. |
+| Irq Source Bridge FSM | Parallel bridge process | Consume mailbox irq: 1 cycle = 2 ns. Map source: 1 cycle = 2 ns. Assert level: 1 cycle = 2 ns (the doorbell acknowledge happens in this step). |
 | Cpu Service FSM | Parallel service process | Poll delivered: 1 cycle = 2 ns. Issue ack: 1 cycle = 2 ns. |
 | Software Handler FSM | Parallel handler process | Poll acked: 1 cycle = 2 ns. Read message: 2 cycles = 4 ns. Issue eoi: 1 cycle = 2 ns. |
 | Storm Monitor FSM | Parallel monitor process | Sample outstanding: 2 cycles = 4 ns. Apply mask: 1 cycle = 2 ns. |
@@ -307,5 +346,6 @@ Parallel:
 - Depth of the message intake queue.
 - Storm limit and throttle window defaults, and whether they should be per-channel.
 - Whether the software handler should batch-read all channel messages per EOI or service one message per delivery round (current model: one per round).
+- Whether the doorbell acknowledge belongs in the bridge (current design, so the mailbox can notify the next message while the controller holds the level) or in the software handler at drain time (which would serialize the channel to one message in flight). Real systems place it wherever the mailbox status register is actually written; this is the modeling choice to confirm against the target SoC.
 - Channel-to-source mapping table (currently identity: channel N is source N).
 - Whether storm masking should escalate to disabling the mailbox channel.

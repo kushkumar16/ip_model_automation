@@ -42,6 +42,14 @@ metadata is command type, transfer size, tenant, timing, and status.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Accepted Command Interface
 
 Producer: upstream execution or scheduler block.
@@ -64,6 +72,14 @@ Timing:
 - A command enters Completion IP when `valid && ready`.
 - Accepted commands are placed into a per-tenant pending queue.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `accept.ENQUEUE`
+- Resumes on: `accept_ready`
+- Note: the producer needs no result, only the accept; a full pending queue holds the FSM in `BACKPRESSURE` and deasserts `ready`
+
 ### 4.2 QoS Configuration Interface
 
 Configuration per tenant:
@@ -78,6 +94,13 @@ Global configuration:
 
 - `window_ms`
 - `dispatch_tick_ms`
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `refill.REFILL_BASE`
+- Resumes on: `config_applied`
 
 ### 4.3 Completion Queue Interface
 
@@ -97,6 +120,14 @@ Timing:
 - Completion is emitted only when status is ready, required tokens are
   available, and output backpressure allows delivery.
 - If `cpl_ready` is low, completions remain queued.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: this IP
+- Waits in: `completion_scheduler.EMIT`
+- Resumes on: `cpl_ready`
+- Note: while `cpl_ready` is low the scheduler holds in `STALL_OUTPUT` and the completion stays queued
 
 ## 5. Commands
 

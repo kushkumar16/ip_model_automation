@@ -8,7 +8,9 @@ Hard failures (exit 1):
   * a DLD FSM has no matching template FSM, or
   * the DLD's stated ``Total FSM/processes`` count disagrees with the template's
     ``fsm_relationships.fsm_count``, or
-  * (with ``--strict``) the template still contains ``TODO_REVIEW`` markers.
+  * (with ``--strict``) the template still contains ``TODO_REVIEW`` markers, or
+  * (with ``--strict``) an interface carries an assumed-default wait model —
+    every interface's wait model must be stated in the DLD.
 
 Interfaces are reported but not hard-failed: golden templates legitimately
 consolidate DLD interface sections (e.g. a watchdog-heartbeat section folded into
@@ -55,6 +57,39 @@ def dld_interface_names(dld_text: str) -> list[str]:
     return [i["name"] for i in dld.extract_interfaces(dld_text.splitlines())]
 
 
+def wait_model_coverage(template: dict[str, Any], dld_text: str, strict: bool) -> tuple[list[str], list[str]]:
+    """Check that every interface's wait model came from the DLD, not the default.
+
+    Unlike interface *names* — which templates may legitimately consolidate —
+    the wait model is a behavior the DLD is required to state for every
+    interface. A promoted template carrying ``source: assumed_default`` means
+    the DLD stayed silent and approach 2 was assumed on its behalf, so
+    ``--strict`` (the promotion gate) fails on it.
+    """
+    report: list[str] = []
+    errors: list[str] = []
+
+    stated = {i["name"]: i["wait_model"]["mode"] for i in dld.extract_interfaces(dld_text.splitlines())}
+    report.append(f"DLD-stated wait models: {stated or '(none)'}")
+
+    for interface in template.get("interfaces", []):
+        if not isinstance(interface, dict):
+            continue
+        name = interface.get("name")
+        wait_model = interface.get("wait_model") or {}
+        report.append(f"  {name}: {wait_model.get('mode')} (source={wait_model.get('source')})")
+        if wait_model.get("source") != "dld":
+            message = (
+                f"interface `{name}`: wait model is an assumed default; "
+                "state it in the DLD's interface section (`Wait model:` block)"
+            )
+            if strict:
+                errors.append(message)
+            else:
+                report.append(f"  warning: {message}")
+    return report, errors
+
+
 def coverage(template_path: Path, dld_path: Path, strict: bool) -> tuple[list[str], list[str]]:
     template = load_template(template_path)
     dld_text = dld_path.read_text(encoding="utf-8")
@@ -85,6 +120,10 @@ def coverage(template_path: Path, dld_path: Path, strict: bool) -> tuple[list[st
     doc_ifaces = dld_interface_names(dld_text)
     tmpl_ifaces = [str(i.get("name")) for i in template.get("interfaces", [])]
     report.append(f"interfaces (report-only): template={tmpl_ifaces} dld_sections={doc_ifaces}")
+
+    wait_report, wait_errors = wait_model_coverage(template, dld_text, strict)
+    report += wait_report
+    errors += wait_errors
 
     todo_count = template_path.read_text(encoding="utf-8").count(dld.TODO)
     if todo_count:

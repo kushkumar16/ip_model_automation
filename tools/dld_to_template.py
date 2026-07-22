@@ -159,12 +159,16 @@ def extract_interfaces(lines: list[str]) -> list[dict[str, Any]]:
         base = snake(raw_name)
         name = base if base.endswith("_if") else f"{base}_if"
         fields = [snake(strip_code(t).split()[0]) for t in bullet_tokens_after(block, "Fields") if strip_code(t)]
-        direction = guess_direction(raw_name, block)
+        # Guess direction from the section's own prose only: the wait-model block
+        # talks about responses and acks on every interface, which would drown out
+        # the words this heuristic reads.
+        direction = guess_direction(raw_name, without_wait_model(block))
         interfaces.append(
             {
                 "name": name,
                 "type": TODO,
                 "direction": direction,
+                "wait_model": extract_wait_model(block, direction),
                 "transactions": [
                     {
                         "name": f"{base}_access",
@@ -177,6 +181,141 @@ def extract_interfaces(lines: list[str]) -> list[dict[str, Any]]:
             }
         )
     return interfaces
+
+
+# The three ways an IP-to-IP interface can make the requester wait. See the
+# `wait_model` block in templates/reference_template.yaml for what each means.
+WAIT_MODES = (
+    "wait_for_response",
+    "wait_for_ack_inline",
+    "wait_for_ack_before_next_request",
+)
+# A DLD that says nothing about waiting gets approach 2: the requester blocks
+# at the request site for an ack and then continues the same pipeline.
+DEFAULT_WAIT_MODE = "wait_for_ack_inline"
+
+# `Wait model:` bullet label -> template key. Labels are matched case-insensitively.
+WAIT_LABELS = {
+    "mode": "mode",
+    "requester": "requester",
+    "waits in": "wait_points",
+    "resumes on": "resumes_on",
+    "timeout": "timeout",
+    "response used for": "response_used_for",
+    "outstanding limit": "outstanding_limit",
+    "peer": "peer",
+    "note": "notes",
+    "notes": "notes",
+}
+
+
+def without_wait_model(block: list[str]) -> list[str]:
+    """The block minus its ``Wait model:`` label and bullets."""
+    kept: list[str] = []
+    in_wait_model = False
+    for line in block:
+        stripped = line.strip()
+        if stripped.lower() == "wait model:":
+            in_wait_model = True
+            continue
+        if in_wait_model:
+            if not stripped or stripped.startswith("- "):
+                continue
+            in_wait_model = False
+        kept.append(line)
+    return kept
+
+
+def unwrap_code(value: str) -> str:
+    """Strip the backticks around a wholly code-quoted value, but leave prose alone.
+
+    ```wait_for_response``` -> ``wait_for_response``, while a sentence that merely
+    *contains* code spans keeps every backtick it had.
+    """
+    text = value.strip()
+    if text.startswith("`") and text.endswith("`") and text.count("`") == 2:
+        return text[1:-1].strip()
+    return text
+
+
+def labelled_bullets(block: list[str], label: str) -> dict[str, str]:
+    """Parse ``- <Label>: <value>`` bullets under a ``<label>:`` line."""
+    parsed: dict[str, str] = {}
+    for token in bullet_tokens_after(block, label):
+        if ":" not in token:
+            continue
+        key, value = token.split(":", 1)
+        parsed[strip_code(key).lower()] = unwrap_code(value)
+    return parsed
+
+
+def extract_wait_model(block: list[str], direction: str) -> dict[str, Any]:
+    """Build an interface `wait_model` from a DLD ``Wait model:`` bullet block.
+
+    The block is optional. When it is absent the documented default applies —
+    approach 2, stamped ``source: assumed_default`` so the assumption shows up
+    in the template and the gaps report instead of passing as a stated fact.
+    """
+    stated = labelled_bullets(block, "Wait model")
+    values = {WAIT_LABELS[key]: value for key, value in stated.items() if key in WAIT_LABELS and value}
+
+    mode = values.get("mode", "")
+    mode = mode if mode in WAIT_MODES else ""
+
+    wait_model: dict[str, Any] = {
+        "mode": mode or DEFAULT_WAIT_MODE,
+        # An output interface is normally driven by this IP; an input one by the peer.
+        "requester": normalize_requester(values.get("requester"), direction),
+        "wait_points": [p.strip("`") for p in re.split(r"[,\s]+", values.get("wait_points", "")) if p.strip("`")]
+        or [TODO],
+        "resumes_on": values.get("resumes_on", TODO),
+        "source": "dld" if mode else "assumed_default",
+    }
+    for key in ("timeout", "response_used_for", "peer", "notes"):
+        if values.get(key):
+            wait_model[key] = values[key]
+    if "outstanding_limit" in values:
+        limit = values["outstanding_limit"]
+        wait_model["outstanding_limit"] = int(limit) if limit.isdigit() else limit
+
+    if wait_model["mode"] == "wait_for_response":
+        wait_model.setdefault("response_used_for", TODO)
+        wait_model["timeout"] = "indefinite"  # approach 1 waits indefinitely, by definition
+    if wait_model["mode"] == "wait_for_ack_before_next_request":
+        wait_model.setdefault("outstanding_limit", TODO)
+    if not mode:
+        wait_model["notes"] = (
+            "DLD states no wait model for this interface; defaulted to "
+            f"{DEFAULT_WAIT_MODE}. State it in the DLD to remove the assumption."
+        )
+    return wait_model
+
+
+def wait_model_gaps(interfaces: list[dict[str, Any]]) -> list[str]:
+    """Report every interface whose wait model was assumed rather than stated."""
+    gaps: list[str] = []
+    assumed = [i["name"] for i in interfaces if i["wait_model"]["source"] == "assumed_default"]
+    if assumed:
+        gaps.append(
+            f"interfaces: no DLD `Wait model:` block for {', '.join(assumed)}; "
+            f"defaulted to {DEFAULT_WAIT_MODE} (approach 2). Add the block to the DLD."
+        )
+    unplaced = [i["name"] for i in interfaces if TODO in i["wait_model"]["wait_points"]]
+    if unplaced:
+        gaps.append(
+            f"interfaces: wait_model.wait_points not stated for {', '.join(unplaced)}; "
+            "name the <fsm>.<STATE> that stalls (or releases the peer)"
+        )
+    return gaps
+
+
+def normalize_requester(stated: str | None, direction: str) -> str:
+    text = (stated or "").lower()
+    if "this" in text or "self" in text:
+        return "this_ip"
+    if "peer" in text or "remote" in text or "other" in text:
+        return "peer"
+    return "this_ip" if direction == "output" else "peer"
 
 
 def guess_direction(raw_name: str, block: list[str]) -> str:
@@ -263,6 +402,7 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
     interfaces = extract_interfaces(lines)
     if not interfaces:
         gaps.append("interfaces: no `### N.M <Name> Interface` sections found in DLD")
+    gaps.extend(wait_model_gaps(interfaces))
 
     clock_mhz, cycle_ns, clock_gaps = extract_clock(text)
     gaps.extend(clock_gaps)
@@ -422,6 +562,7 @@ def placeholder_interface() -> dict[str, Any]:
         "name": f"{TODO}_if",
         "type": TODO,
         "direction": TODO,
+        "wait_model": extract_wait_model([], TODO),
         "transactions": [{"name": f"{TODO}_txn", "fields": [TODO], "handshake": TODO, "timing_notes": TODO}],
     }
 
@@ -462,6 +603,14 @@ def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], ope
         f"- FSMs ({len(fsms)}): {', '.join(fsms)}",
         f"- Interfaces ({len(interfaces)}): {', '.join(interfaces)}",
         f"- Declared fsm_count: {draft['fsm_relationships']['fsm_count']}",
+        "",
+        "### Interface wait models",
+        "",
+        *[
+            f"- `{i['name']}`: {i['wait_model']['mode']} "
+            f"({'stated in DLD' if i['wait_model']['source'] == 'dld' else 'ASSUMED default'})"
+            for i in draft["interfaces"]
+        ],
         "",
         "## Missing / To Review",
         "",

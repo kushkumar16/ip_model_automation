@@ -14,6 +14,15 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [register_access.READ_STATUS]
+      resumes_on: register_access_complete
+      timeout: indefinite
+      response_used_for: "software consumes `read_data` (status, RX bytes, IBI payload) before its next access"
+      source: dld
+      notes: "configuration and command writes are acknowledged in place as shadow state updates"
     transactions:
       - name: i3c_cfg_access
         fields: [addr, write_data, read_data]
@@ -23,6 +32,14 @@ interfaces:
     type: i3c_open_drain_serial
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [command_engine.WAIT_ACK, bit_transfer_engine.CHECK_ACK]
+      resumes_on: target_ack_or_nack
+      timeout: indefinite
+      response_used_for: "the ACK/NACK and the returned read bytes decide whether the transfer dispatches, aborts, or is captured"
+      source: dld
     transactions:
       - name: bit_transfer
         fields: [scl, sda, direction]
@@ -32,6 +49,14 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [interrupt_control.WAIT_SW_CLEAR]
+      resumes_on: software_clear
+      outstanding_limit: 1
+      source: dld
+      notes: "the transfer pipeline does not block on the interrupt; the clear must be seen before the next interrupt is asserted"
     transactions:
       - name: i3c_irq
         fields: [irq_vector, irq_level]

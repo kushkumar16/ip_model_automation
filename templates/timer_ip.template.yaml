@@ -16,6 +16,15 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [register_access.READ_RETURN]
+      resumes_on: register_access_complete
+      timeout: indefinite
+      response_used_for: "software consumes counter and status reads before its next access"
+      source: dld
+      notes: "writes land in shadow state, are acknowledged in place, and are then crossed by the configuration synchronizer"
     transactions:
       - name: timer_cfg_access
         fields: [addr, write_data, read_data]
@@ -25,6 +34,13 @@ interfaces:
     type: clock_tick
     direction: input
     clock_domain: timer_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [prescaler.WAIT_RAW_TICK]
+      resumes_on: raw_tick_observed
+      source: dld
+      notes: "a tick carries no result; it is consumed in the cycle it is presented"
     transactions:
       - name: raw_tick
         fields: [tick_valid]
@@ -34,6 +50,14 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: timer_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [interrupt_aggregation.WAIT_SW_CLEAR]
+      resumes_on: software_clear
+      outstanding_limit: 1
+      source: dld
+      notes: "counting continues while the interrupt is pending; the clear gates the next assertion"
     transactions:
       - name: irq
         fields: [channel_id, irq_level]

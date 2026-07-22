@@ -43,6 +43,14 @@ interrupt remains asserted until software clears it.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Register Interface
 
 Type: APB/AHB/AXI-lite style control interface.
@@ -65,6 +73,15 @@ Timing:
 
 - Writes update a shadow configuration before taking effect.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_STATUS`
+- Resumes on: `register_access_complete`
+- Response used for: software consumes `read_data` (status, FIFO occupancy) before its next access
+- Note: writes are acknowledged in place as shadow configuration updates
+
 ### 4.2 Sender Message Interface
 
 Fields:
@@ -77,6 +94,14 @@ Timing:
 
 - A message is accepted only when the target channel FIFO has space.
 - A full channel applies backpressure to the sender.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `message_push.CHECK_SPACE`
+- Resumes on: `fifo_space_available`
+- Note: the sender needs no result, only the accept; a full channel backpressures it in place
 
 ### 4.3 Receiver Message Interface
 
@@ -91,6 +116,15 @@ Timing:
 - The receiver observes messages in FIFO order.
 - A read from an empty channel returns no message.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `message_pop.DELIVER`
+- Resumes on: `message_delivered`
+- Response used for: the receiver consumes the returned message
+- Note: a read from an empty channel returns no message and the pop process waits in `EMPTY_WAIT`
+
 ### 4.4 Interrupt Output Interface
 
 Fields:
@@ -102,6 +136,15 @@ Fields:
 Timing:
 
 - Doorbell interrupt is level and remains asserted until software clears status.
+
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_notify.WAIT_SW_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: the doorbell interrupt does not block the message path; the software clear must be seen before the next interrupt is asserted
 
 ## 5. Message Flow
 

@@ -16,11 +16,16 @@ subsystem:
   connections:
     # ack: see templates/reference_template.yaml — none | completion_event |
     # level_until_serviced. The doorbell path is the level_until_serviced
-    # example: the mailbox holds the level asserted while unserviced messages
+    # example: the controller level stays asserted while unserviced messages
     # remain, so an EOI before the queue drains re-pends the source.
+    # The mailbox doorbell itself is acknowledged earlier, by the bridge: the
+    # Mailbox IP's interrupt_if is wait_for_ack_before_next_request with
+    # outstanding_limit 1, so it raises no further doorbell until this one is
+    # cleared.
     - {from: host_message, to: mailbox_ip.send_message, payload: channel_message, ack: none}
-    - {from: mailbox_ip.interrupts, to: irq_source_bridge, payload: doorbell_irq}
-    - {from: irq_source_bridge, to: interrupt_controller_ip.set_level, payload: level_assert, ack: level_until_serviced, ack_via: software_handler -> mailbox_ip.clear_interrupt + interrupt_controller_ip.eoi}
+    - {from: mailbox_ip.interrupts, to: irq_source_bridge, payload: doorbell_irq, ack: completion_event, ack_via: irq_source_bridge -> mailbox_ip.clear_interrupt}
+    - {from: irq_source_bridge, to: mailbox_ip.clear_interrupt, payload: doorbell_ack, ack: none}
+    - {from: irq_source_bridge, to: interrupt_controller_ip.set_level, payload: level_assert, ack: level_until_serviced, ack_via: software_handler -> interrupt_controller_ip.set_level + interrupt_controller_ip.eoi}
     - {from: interrupt_controller_ip.delivered, to: cpu_service, payload: delivered_irq}
     - {from: cpu_service, to: interrupt_controller_ip.ack, payload: cpu_ack, ack: completion_event, ack_via: interrupt_controller_ip.acknowledged -> software_handler}
     - {from: interrupt_controller_ip.acknowledged, to: software_handler, payload: acked_irq}
@@ -34,6 +39,12 @@ interfaces:
     type: message_queue
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [host_message.ACCEPT_MESSAGE]
+      resumes_on: intake_queue_accept
+      source: dld
     transactions:
       - name: message_send
         fields: [channel_id, message]
@@ -43,6 +54,14 @@ interfaces:
     type: cpu_service
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [cpu_service.ISSUE_ACK, software_handler.ISSUE_EOI]
+      resumes_on: cpu_ack_and_eoi
+      outstanding_limit: 1
+      source: dld
+      notes: "one delivery per source is in flight; the ack/EOI pair must complete before that source is delivered again"
     transactions:
       - name: irq_service
         fields: [target_id, src_id]
@@ -52,6 +71,12 @@ interfaces:
     type: config
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [storm_monitor.APPLY_MASK]
+      resumes_on: mask_applied
+      source: dld
     transactions:
       - name: storm_config
         fields: [src_id, masked, storm_limit, storm_window]
@@ -105,7 +130,7 @@ fsm_processes:
     queues_used: [message_intake_queue, send_timestamp_table]
     resources_used: [mailbox_member]
   - name: irq_source_bridge
-    purpose: Consume mailbox doorbell interrupts and assert the mapped level-triggered controller source.
+    purpose: Consume mailbox doorbell interrupts, assert the mapped level-triggered controller source, and acknowledge the doorbell so the mailbox can raise the next one.
     simpy_process: true
     states: [IDLE, CONSUME_MAILBOX_IRQ, MAP_SOURCE, ASSERT_LEVEL]
     transitions:
@@ -122,9 +147,9 @@ fsm_processes:
       - from: MAP_SOURCE
         to: ASSERT_LEVEL
         condition: source_mapped
-        actions: [assert_controller_level, increment_outstanding]
+        actions: [assert_controller_level, increment_outstanding, ack_mailbox_doorbell]
         latency_cycles: 1
-    functional_responsibilities: [doorbell_consumption, source_mapping, level_assertion]
+    functional_responsibilities: [doorbell_consumption, source_mapping, level_assertion, doorbell_acknowledge]
     interfaces_touched: [host_message_if]
     queues_used: [outstanding_counter_table]
     resources_used: [mailbox_member, irq_controller_member]

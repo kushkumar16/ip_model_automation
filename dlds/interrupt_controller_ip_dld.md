@@ -57,6 +57,14 @@ of acknowledge/end-of-interrupt flows.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Source Interrupt Interface
 
 One logical input per interrupt source.
@@ -74,6 +82,14 @@ Timing:
 
 - Edge sources are latched into pending state on pulse.
 - Level sources remain pending while level is asserted, unless masked.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `source_sampling.QUEUE_EVENT`
+- Resumes on: `event_latched`
+- Note: a source consumes no result: an edge is latched, a level stays asserted until cleared
 
 ### 4.2 CPU Target Interface
 
@@ -94,6 +110,15 @@ Timing:
 - Acknowledge moves selected interrupt from pending to active depending on
   configured mode.
 
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `cpu_delivery.WAIT_ACK`
+- Resumes on: `cpu_acknowledge`
+- Outstanding limit: 1
+- Note: per target one interrupt is in flight: delivery is complete once asserted, but the acknowledge must arrive before the next interrupt is delivered
+
 ### 4.3 CPU Acknowledge/EOI Interface
 
 Fields:
@@ -111,6 +136,15 @@ Timing:
 - End-of-interrupt clears active state and allows lower-priority pending
   interrupts to be delivered.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `acknowledge.RETURN_ACK_ID`
+- Resumes on: `ack_id_returned`
+- Response used for: the CPU consumes the returned IRQ id to run the matching handler
+- Note: EOI carries no result and completes in `end_of_interrupt.EOI_DONE`
+
 ### 4.4 Register Interface
 
 Important registers:
@@ -126,6 +160,14 @@ Important registers:
 - `MASK[target]`
 - `THRESHOLD[target]`
 - `SOFT_INT`
+
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_STATE`
+- Resumes on: `register_access_complete`
+- Response used for: software reads pending/active/priority state before deciding what to write
 
 ## 5. Interrupt Types
 

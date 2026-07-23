@@ -110,6 +110,7 @@ def diff_templates(old: dict, new: dict) -> list[Change]:
     # interfaces / commands: add/remove is structural; a field change inside is surgical
     iface_changes, iface_pairs = diff_named_section(old, new, "interfaces", "name", STRUCTURAL)
     changes += iface_changes
+    changes += _diff_wait_models(iface_pairs)
     cmd_changes, cmd_pairs = diff_named_section(old, new, "commands", "name", STRUCTURAL)
     changes += cmd_changes
     for name, (o, n) in cmd_pairs.items():
@@ -205,6 +206,40 @@ def diff_templates(old: dict, new: dict) -> list[Change]:
                     )
                 )
 
+    return changes
+
+
+def _diff_wait_models(pairs: dict[str, tuple[dict, dict]]) -> list[Change]:
+    """Wait-model deltas per interface.
+
+    A changed `mode` moves where the requester blocks — the model's stall sites
+    move with it — so it is STRUCTURAL. The supporting fields (where it blocks,
+    what releases it, how many requests may be in flight) are localized edits.
+    """
+    changes: list[Change] = []
+    for name in sorted(pairs):
+        o, n = (pairs[name][0].get("wait_model") or {}), (pairs[name][1].get("wait_model") or {})
+        if o.get("mode") != n.get("mode"):
+            changes.append(
+                Change(
+                    "interfaces",
+                    name,
+                    "changed",
+                    f"interface `{name}` wait_model.mode: {o.get('mode')!r} -> {n.get('mode')!r}",
+                    STRUCTURAL,
+                )
+            )
+        for field in ("requester", "wait_points", "resumes_on", "outstanding_limit", "timeout"):
+            if o.get(field) != n.get(field):
+                changes.append(
+                    Change(
+                        "interfaces",
+                        name,
+                        "changed",
+                        f"interface `{name}` wait_model.{field}: {o.get(field)!r} -> {n.get(field)!r}",
+                        SURGICAL,
+                    )
+                )
     return changes
 
 

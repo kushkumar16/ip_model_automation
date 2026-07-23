@@ -14,6 +14,15 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [register_access.READ_STATUS]
+      resumes_on: register_access_complete
+      timeout: indefinite
+      response_used_for: "software consumes `read_data` (status, FIFO occupancy) before its next access"
+      source: dld
+      notes: "writes are acknowledged in place as shadow configuration updates"
     transactions:
       - name: mailbox_cfg_access
         fields: [addr, write_data, read_data]
@@ -23,6 +32,13 @@ interfaces:
     type: message_write
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [message_push.CHECK_SPACE]
+      resumes_on: fifo_space_available
+      source: dld
+      notes: "the sender needs no result, only the accept; a full channel backpressures it in place"
     transactions:
       - name: send_message
         fields: [channel_id, message, valid]
@@ -32,6 +48,15 @@ interfaces:
     type: message_read
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [message_pop.DELIVER]
+      resumes_on: message_delivered
+      timeout: indefinite
+      response_used_for: "the receiver consumes the returned message"
+      source: dld
+      notes: "a read from an empty channel returns no message and the pop process waits in `EMPTY_WAIT`"
     transactions:
       - name: read_message
         fields: [channel_id, message, ready]
@@ -41,6 +66,14 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [interrupt_notify.WAIT_SW_CLEAR]
+      resumes_on: software_clear
+      outstanding_limit: 1
+      source: dld
+      notes: "the doorbell interrupt does not block the message path; the software clear must be seen before the next interrupt is asserted"
     transactions:
       - name: doorbell_irq
         fields: [irq_target, irq_level]

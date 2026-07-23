@@ -53,6 +53,14 @@ and finally writes status for the descriptor.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Register Interface
 
 Type: APB/AHB/AXI-lite style control interface.
@@ -68,6 +76,14 @@ Important registers:
 - `INT_ENABLE`: interrupt mask.
 - `INT_STATUS`: interrupt pending and clear.
 - `CH_CFG`: per-channel priority, outstanding depth, burst size.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `channel_control.IDLE`
+- Resumes on: `shadow_config_applied`
+- Note: control writes are acknowledged as shadow configuration is captured
 
 ### 4.2 Descriptor Memory Read Interface
 
@@ -87,6 +103,14 @@ Timing:
 
 - Descriptor fetch consumes read bandwidth.
 - Fetch latency may be independent from data-movement read latency.
+
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `descriptor_fetch.WAIT_FETCH_RESP`
+- Resumes on: `descriptor_read_response`
+- Response used for: the returned descriptor is validated and enqueued, and its fields drive read issue
 
 ### 4.3 Source Read Interface
 
@@ -108,6 +132,15 @@ Timing:
 - Multiple source reads may be outstanding.
 - Returned data is placed into an internal data buffer.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `read_response.WAIT_READ_RESP`
+- Resumes on: `source_read_response`
+- Response used for: returned data fills the internal buffer that gates write issue
+- Note: reads are split: several tags may be outstanding, so the response is awaited in the response process rather than at the issue site
+
 ### 4.4 Destination Write Interface
 
 Producer: data write process.
@@ -128,6 +161,15 @@ Timing:
 - Writes consume data from the internal buffer.
 - Write response may arrive after write data acceptance.
 
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `write_response.WAIT_WRITE_RESP`, `completion_update.WAIT_DESCRIPTOR_DONE`
+- Resumes on: `write_response_received`
+- Outstanding limit: `CH_CFG.outstanding_depth`
+- Note: write data acceptance does not block the write issue process; every outstanding write response must be collected before the descriptor completes and the next one starts
+
 ### 4.5 Completion/Interrupt Interface
 
 Fields:
@@ -142,6 +184,15 @@ Timing:
 - Completion writeback happens after all descriptor bytes are written and all
   write responses are successful.
 - Interrupt may be coalesced across descriptors.
+
+Wait model:
+
+- Mode: `wait_for_ack_before_next_request`
+- Requester: this IP
+- Waits in: `interrupt_coalescing.WAIT_CLEAR`
+- Resumes on: `software_clear`
+- Outstanding limit: 1
+- Note: the interrupt is asserted without blocking the data path; the next coalescing window starts only after software clears the status
 
 ## 5. Descriptor Format
 

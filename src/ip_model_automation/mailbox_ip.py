@@ -50,6 +50,9 @@ class MailboxIpModel:
         self.delivered: List[Tuple[int, Any]] = []
         self.doorbell_status: set[int] = set()
         self.interrupts: List[Tuple[float, int]] = []
+        # interrupt_if is wait_for_ack_before_next_request with outstanding_limit 1:
+        # the asserted doorbell parks the notify process until software clears it.
+        self.irq_clear_events: Dict[int, simpy.Event] = {}
         self.metrics = defaultdict(int)
         self.receiver_enabled = True
 
@@ -88,7 +91,22 @@ class MailboxIpModel:
         self.doorbell_status.discard(channel_id)
         self.interrupts = [(t, c) for t, c in self.interrupts if c != channel_id]
         self.metrics["clear_latency"] = self.lat["register"]
+        # Releases the notify process parked in WAIT_SW_CLEAR for this channel.
+        clear_event = self.irq_clear_events.pop(channel_id, None)
+        if clear_event is not None and not clear_event.triggered:
+            clear_event.succeed()
         self.logger.info("interrupt cleared channel=%s", channel_id)
+
+    def read_status(self, channel_id: int) -> simpy.Event:
+        """Register read: the caller blocks until the access returns a value.
+
+        register_if is `wait_for_response`, so a read is a request the requester
+        waits on -- `value = yield model.read_status(channel)` -- not a plain
+        Python getter that would hide the access latency.
+        """
+        response = self.env.event()
+        self.register_if.put({"op": "read_status", "channel_id": channel_id, "response": response})
+        return response
 
     def set_receiver_enabled(self, enabled: bool) -> None:
         self.receiver_enabled = enabled
@@ -115,6 +133,18 @@ class MailboxIpModel:
             update = yield self.register_if.get()
             self.fsm_state["register_access"] = "DECODE_ACCESS"
             yield self.env.timeout(self.lat["register"])
+            if update.get("op") == "read_status":
+                self.fsm_state["register_access"] = "READ_STATUS"
+                channel_id = update["channel_id"]
+                update["response"].succeed(
+                    {
+                        "occupancy": len(self.message_fifos[channel_id]),
+                        "doorbell_pending": channel_id in self.doorbell_status,
+                        "masked": self.channels.get(channel_id, {}).get("masked", False),
+                    }
+                )
+                self.metrics["status_reads"] += 1
+                continue
             self.fsm_state["register_access"] = "WRITE_CONFIG"
             self._apply_config(update)
             self.metrics["config_writes"] += 1
@@ -182,3 +212,12 @@ class MailboxIpModel:
             self.interrupts.append((self.env.now, channel_id))
             self.metrics["interrupt_count"] += 1
             self.logger.info("interrupt asserted channel=%s time=%s", channel_id, self.env.now)
+            # The doorbell is level: it stays asserted, and no further doorbell is
+            # notified, until software clears this one (interrupt_if wait model).
+            clear_event = self.env.event()
+            self.irq_clear_events[channel_id] = clear_event
+            self.fsm_state["interrupt_notify"] = "WAIT_SW_CLEAR"
+            self.metrics["irq_clear_waits"] += 1
+            yield clear_event
+            self.fsm_state["interrupt_notify"] = "DEASSERT_IRQ"
+            self.logger.debug("interrupt deasserted channel=%s time=%s", channel_id, self.env.now)

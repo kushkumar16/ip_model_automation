@@ -14,6 +14,15 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [register_access.READ_STATUS]
+      resumes_on: register_access_complete
+      timeout: indefinite
+      response_used_for: "software consumes `RX_DATA` and `STATUS` reads before its next access"
+      source: dld
+      notes: "configuration writes are acknowledged in place as shadow state updates"
     transactions:
       - name: spi_cfg_access
         fields: [addr, write_data, read_data]
@@ -23,6 +32,14 @@ interfaces:
     type: spi_serial
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [transmit_engine.WAIT_SHIFT_DONE]
+      resumes_on: byte_shift_complete
+      timeout: indefinite
+      response_used_for: "the sampled MISO byte is pushed into the receive FIFO, and the next byte loads only after the shift completes"
+      source: dld
     transactions:
       - name: byte_transfer
         fields: [sclk, mosi, miso, cs_n]
@@ -32,6 +49,14 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [interrupt_control.WAIT_SW_CLEAR]
+      resumes_on: software_clear
+      outstanding_limit: 1
+      source: dld
+      notes: "transfers continue while the interrupt is pending; the clear gates the next assertion"
     transactions:
       - name: transfer_irq
         fields: [irq_vector, irq_level]

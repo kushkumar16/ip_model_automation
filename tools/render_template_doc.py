@@ -118,6 +118,7 @@ def render_interfaces(template: dict[str, Any]) -> list[str]:
             f"clock domain `{md_escape(interface.get('clock_domain'))}`.",
             "",
         ]
+        lines += render_wait_model(interface.get("wait_model"))
         lines += md_table(
             ["Transaction", "Fields", "Handshake", "Timing Notes"],
             [
@@ -126,6 +127,42 @@ def render_interfaces(template: dict[str, Any]) -> list[str]:
             ],
         )
         lines.append("")
+    return lines
+
+
+WAIT_MODE_PROSE = {
+    "wait_for_response": "the requester blocks until the response comes back, and uses the returned result",
+    "wait_for_ack_inline": "the requester blocks at the request site for an ack, then continues the same pipeline",
+    "wait_for_ack_before_next_request": (
+        "the requester continues after issuing; the ack is collected before the next request starts"
+    ),
+}
+
+
+def render_wait_model(wait_model: Any) -> list[str]:
+    if not isinstance(wait_model, dict):
+        return []
+    mode = str(wait_model.get("mode"))
+    requester = "this IP" if wait_model.get("requester") == "this_ip" else "the peer"
+    lines = [
+        f"**Wait model:** `{md_escape(mode)}` — requester is {requester}; "
+        f"{WAIT_MODE_PROSE.get(mode, 'see the template')}.",
+        "",
+        f"- **Waits in:** {md_escape(wait_model.get('wait_points'))}",
+        f"- **Resumes on:** {md_escape(wait_model.get('resumes_on'))}",
+    ]
+    for key, label in (
+        ("response_used_for", "Response used for"),
+        ("outstanding_limit", "Outstanding limit"),
+        ("timeout", "Timeout"),
+        ("peer", "Peer"),
+        ("notes", "Notes"),
+    ):
+        if wait_model.get(key) is not None:
+            lines.append(f"- **{label}:** {md_escape(wait_model.get(key))}")
+    if wait_model.get("source") == "assumed_default":
+        lines.append("- **Source:** ⚠️ assumed default — the DLD does not state a wait model for this interface")
+    lines.append("")
     return lines
 
 

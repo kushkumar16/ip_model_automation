@@ -45,6 +45,14 @@ class CompletionIpModel:
         self.completed: List[tuple[float, Command]] = []
         self.metrics = defaultdict(int)
         self.window_metrics: List[Dict[str, float]] = []
+        # Published so the interface wait points are observable: each interface's
+        # wait model names the <fsm>.<STATE> this model must be sitting in while
+        # the requester waits on it.
+        self.fsm_state = {
+            "accept": "READY",
+            "completion_scheduler": "IDLE",
+            "refill": "WAIT_WINDOW",
+        }
 
         self.env.process(self.accept_process())
         self.env.process(self.completion_scheduler())
@@ -89,13 +97,18 @@ class CompletionIpModel:
 
     def accept_process(self):
         while True:
+            self.fsm_state["accept"] = "READY"
             command = yield self.input_q.get()
             yield self.env.timeout(self.service_latency)
             if not self.tenant_alive[command.tenant_id]:
+                self.fsm_state["accept"] = "BACKPRESSURE"
                 self.metrics["tenant_inactive_stalls"] += 1
                 self.pending[command.tenant_id].append(command)
                 self.logger.warning("tenant inactive cmd=%s tenant=%s", command.cmd_id, command.tenant_id)
                 continue
+            # accepted_cmd_if is wait_for_ack_inline: the producer's accept
+            # completes here, as the command lands in the pending queue.
+            self.fsm_state["accept"] = "ENQUEUE"
             self.pending[command.tenant_id].append(command)
             self.metrics["accepted_commands"] += 1
             self.logger.debug("accepted cmd=%s tenant=%s time=%s", command.cmd_id, command.tenant_id, self.env.now)
@@ -147,7 +160,9 @@ class CompletionIpModel:
 
     def completion_scheduler(self):
         while True:
+            self.fsm_state["completion_scheduler"] = "IDLE"
             yield self.env.timeout(self.tenant_select_latency)
+            self.fsm_state["completion_scheduler"] = "SELECT_TENANT"
             tenant_id = self._select_tenant()
             if tenant_id is None:
                 self.metrics["stalls"] += 1
@@ -155,13 +170,18 @@ class CompletionIpModel:
                 continue
 
             command = self.pending[tenant_id][0]
+            self.fsm_state["completion_scheduler"] = "CHECK_TOKENS"
             yield self.env.timeout(self.token_check_latency)
             if not self.tenant_alive[tenant_id]:
+                self.fsm_state["completion_scheduler"] = "WAIT_TOKENS"
                 self.metrics["tenant_inactive_stalls"] += 1
                 self.logger.warning("tenant inactive stall tenant=%s", tenant_id)
                 yield self.env.timeout(self.retry_latency)
                 continue
             if not self.output_ready:
+                # completion_queue_if is wait_for_ack_inline: while cpl_ready is
+                # low the completion is held here rather than emitted.
+                self.fsm_state["completion_scheduler"] = "STALL_OUTPUT"
                 self.metrics["output_stalls"] += 1
                 self.logger.warning("output stall tenant=%s", tenant_id)
                 yield self.env.timeout(self.retry_latency)
@@ -169,6 +189,7 @@ class CompletionIpModel:
 
             costs = self._costs(command)
             if not self._can_pay(tenant_id, costs):
+                self.fsm_state["completion_scheduler"] = "WAIT_TOKENS"
                 self.metrics["token_stalls"] += 1
                 self.logger.warning("token stall tenant=%s cmd=%s costs=%s", tenant_id, command.cmd_id, costs)
                 yield self.env.timeout(self.retry_latency)
@@ -176,6 +197,7 @@ class CompletionIpModel:
 
             self._debit(tenant_id, costs)
             self.pending[tenant_id].popleft()
+            self.fsm_state["completion_scheduler"] = "EMIT"
             yield self.env.timeout(self.emit_latency)
             self.completed.append((self.env.now, command))
             self.metrics[f"completed_{command.kind.lower()}"] += 1
@@ -186,14 +208,20 @@ class CompletionIpModel:
 
     def refill_once(self) -> None:
         snapshot = {"time": float(self.env.now), "completed": float(self.metrics["completed_commands"])}
+        self.fsm_state["refill"] = "ASSESS_USAGE"
+        # qos_config_if is wait_for_ack_inline: the configured budgets take
+        # effect here, at the window boundary.
+        self.fsm_state["refill"] = "REFILL_BASE"
         for tenant_id, base in self.base_tokens.items():
             self.tokens[tenant_id].update(base)
+        self.fsm_state["refill"] = "PUBLISH_METRICS"
         self.window_metrics.append(snapshot)
         self.metrics["refill_windows"] += 1
         self.logger.info("refill window time=%s", self.env.now)
 
     def refill_process(self):
         while True:
+            self.fsm_state["refill"] = "WAIT_WINDOW"
             yield self.env.timeout(self.refill_window)
             yield self.env.timeout(20)
             yield self.env.timeout(10)

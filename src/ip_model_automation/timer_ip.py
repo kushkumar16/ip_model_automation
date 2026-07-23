@@ -51,6 +51,9 @@ class TimerIpModel:
         self.interrupts: List[tuple[float, int]] = []
         self.interrupt_status = set()
         self.interrupt_mask = defaultdict(lambda: True)
+        # interrupt_if is wait_for_ack_before_next_request with outstanding_limit 1:
+        # counting continues, but the next assertion waits for the software clear.
+        self.irq_clear_events: Dict[int, simpy.Event] = {}
         self.metrics = defaultdict(int)
         self.frozen = False
         self.freeze_requested = False
@@ -99,7 +102,21 @@ class TimerIpModel:
     def clear_interrupt(self, channel_id: int) -> None:
         self.interrupt_status.discard(channel_id)
         self.metrics["clear_latency"] = self.lat["register"]
+        # Releases the aggregation process parked in WAIT_SW_CLEAR for this channel.
+        clear_event = self.irq_clear_events.pop(channel_id, None)
+        if clear_event is not None and not clear_event.triggered:
+            clear_event.succeed()
         self.logger.info("interrupt cleared channel=%s", channel_id)
+
+    def read_counter(self, channel_id: int) -> simpy.Event:
+        """Register read: `value = yield model.read_counter(channel)`.
+
+        register_if is `wait_for_response` -- software blocks on the access and
+        consumes what comes back, so the read costs a register access.
+        """
+        response = self.env.event()
+        self.register_if.put({"op": "read", "channel_id": channel_id, "response": response})
+        return response
 
     def configure_watchdog(self, timeout: int, interrupt: bool = True) -> None:
         self.watchdog.update({"enabled": True, "timeout": timeout, "last_kick": self.env.now, "interrupt": interrupt})
@@ -152,6 +169,18 @@ class TimerIpModel:
             update = yield self.register_if.get()
             self.fsm_state["register_access"] = "DECODE_ACCESS"
             yield self.env.timeout(self.lat["register"])
+            if update.get("op") == "read":
+                self.fsm_state["register_access"] = "READ_RETURN"
+                channel_id = update["channel_id"]
+                update["response"].succeed(
+                    {
+                        "count": self.channels.get(channel_id, {}).get("count", 0),
+                        "enabled": self.channels.get(channel_id, {}).get("enabled", False),
+                        "interrupt_pending": channel_id in self.interrupt_status,
+                    }
+                )
+                self.metrics["register_reads"] += 1
+                continue
             self.fsm_state["register_access"] = "WRITE_SHADOW"
             if update.get("op") == "configure":
                 self.register_shadow[update["channel_id"]] = dict(update)
@@ -227,6 +256,15 @@ class TimerIpModel:
             self.interrupts.append((self.env.now, channel_id))
             self.metrics["interrupt_count"] += 1
             self.logger.info("interrupt asserted channel=%s time=%s", channel_id, self.env.now)
+            # Level interrupt: aggregation parks here until software clears the
+            # status, so a second event cannot raise a second IRQ unserviced.
+            clear_event = self.env.event()
+            self.irq_clear_events[channel_id] = clear_event
+            self.fsm_state["interrupt_aggregation"] = "WAIT_SW_CLEAR"
+            self.metrics["irq_clear_waits"] += 1
+            yield clear_event
+            self.fsm_state["interrupt_aggregation"] = "DEASSERT_IRQ"
+            self.logger.debug("interrupt deasserted channel=%s time=%s", channel_id, self.env.now)
 
     def watchdog_process(self):
         while True:

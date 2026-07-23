@@ -77,6 +77,14 @@ from the selected SQ may be sent forward in the current issue opportunity.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Ingress Queue Interface
 
 Logical interface per source or tenant.
@@ -102,6 +110,15 @@ Timing:
 - Queue valid contributes to the SQ pending bitmap.
 - Any SQ pending bit set contributes to the tenant pending bitmap.
 - Any tenant pending bit set contributes to the port pending bitmap.
+
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `arbiter_main.SQ_SCAN`
+- Resumes on: `queue_valid`
+- Response used for: the popped command metadata (tenant, SQ, size) selects the grant and the issue count
+- Note: a peek returns the same metadata without removing the entry
 
 ### 4.2 Pending Bitmap Interface
 
@@ -137,6 +154,14 @@ Bitmap update timing:
 - Worst-case visibility from SQ command arrival to port pending visibility:
   `3 cycles = 6 ns` at 500 MHz.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: this IP
+- Waits in: `arbiter_main.PORT_SCAN`
+- Resumes on: `pending_bitmap_update`
+- Note: bitmap levels update one cycle apart; the scan observes them in place
+
 ### 4.3 Downstream Issue Interface
 
 Fields:
@@ -164,6 +189,14 @@ Timing:
   minimum of selected SQ pending command count, device burst availability,
   tenant burst availability, and SQ burst availability.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: this IP
+- Waits in: `issue_pipeline.ISSUE_REQUEST`
+- Resumes on: `issue_ready`
+- Note: downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue
+
 ### 4.4 Credit/QoS Interface
 
 Fields:
@@ -180,6 +213,14 @@ Timing:
 - Credit checks are sampled during candidate evaluation.
 - Credit consumption may be owned by Completion IP or by a shared QoS service.
   In this starter DLD, Arbitration IP performs eligibility check only.
+
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `arbiter_main.TENANT_SCAN`
+- Resumes on: `credit_status_sampled`
+- Response used for: the eligibility result decides whether the candidate may be granted
 
 ## 5. Commands
 

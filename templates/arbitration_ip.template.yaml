@@ -14,6 +14,15 @@ interfaces:
     type: internal_queue
     direction: input
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [arbiter_main.SQ_SCAN]
+      resumes_on: queue_valid
+      timeout: indefinite
+      response_used_for: "the popped command metadata (tenant, SQ, size) selects the grant and the issue count"
+      source: dld
+      notes: "a peek returns the same metadata without removing the entry"
     transactions:
       - name: command_peek
         fields: [port_id, tenant_id, sq_id, source_id, cmd_id, opcode, size_kb, priority, age]
@@ -27,6 +36,13 @@ interfaces:
     type: command_issue
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: this_ip
+      wait_points: [issue_pipeline.ISSUE_REQUEST]
+      resumes_on: issue_ready
+      source: dld
+      notes: "downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue"
     transactions:
       - name: issue_command
         fields: [cmd_descriptor, selected_port, selected_tenant, selected_sq, pending_cmd_count, device_burst_available, tenant_burst_available, sq_burst_available, issue_count, selection_reason]
@@ -36,6 +52,14 @@ interfaces:
     type: credit_status
     direction: input
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [arbiter_main.TENANT_SCAN]
+      resumes_on: credit_status_sampled
+      timeout: indefinite
+      response_used_for: "the eligibility result decides whether the candidate may be granted"
+      source: dld
     transactions:
       - name: eligibility_check
         fields: [tenant_alive, read_iops_credit, write_iops_credit, read_bw_credit, write_bw_credit]

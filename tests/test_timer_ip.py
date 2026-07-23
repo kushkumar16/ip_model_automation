@@ -20,8 +20,15 @@ class TestTimerIpModel(unittest.TestCase):
         model.configure(0, "PERIODIC", compare=2, reload=0)
         env.run(until=8)
         self.assertGreaterEqual(model.metrics["compare_events"], 3)
-        self.assertGreaterEqual(model.metrics["interrupt_count"], 2)
         self.assertTrue(model.channels[0]["enabled"])
+
+        # interrupt_if is wait_for_ack_before_next_request: counting continues,
+        # but the level IRQ holds at one until software clears it.
+        self.assertEqual(model.metrics["interrupt_count"], 1)
+        self.assertEqual(model.fsm_state["interrupt_aggregation"], "WAIT_SW_CLEAR")
+        model.clear_interrupt(0)
+        env.run(until=16)
+        self.assertGreaterEqual(model.metrics["interrupt_count"], 2)
 
     def test_timer_config_sync_delays_counter_visibility(self):
         env = simpy.Environment()
@@ -40,6 +47,25 @@ class TestTimerIpModel(unittest.TestCase):
         env.run(until=8)
         self.assertGreaterEqual(model.metrics["watchdog_timeouts"], 1)
         self.assertIn(-1, [channel_id for _, channel_id in model.interrupts])
+
+    def test_timer_register_read_returns_a_response(self):
+        """register_if: wait_for_response — the caller blocks until the read returns."""
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, register_latency=2, interrupt_latency=1)
+        model.configure(0, "PERIODIC", compare=4, reload=0)
+        seen = {}
+
+        def reader():
+            yield env.timeout(6)
+            started = env.now
+            seen["state"] = yield model.read_counter(0)
+            seen["elapsed"] = env.now - started
+
+        env.process(reader())
+        env.run(until=20)
+        self.assertTrue(seen["state"]["enabled"])
+        self.assertGreaterEqual(seen["state"]["count"], 0)
+        self.assertGreaterEqual(seen["elapsed"], 2)
 
     def test_timer_clear_interrupt_drops_status_bit(self):
         env = simpy.Environment()

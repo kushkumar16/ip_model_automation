@@ -73,11 +73,61 @@ ip:
 # what the glue FSMs and the subsystem tests must observe.
 
 # interfaces: from DLD "### N.M <Name> Interface" sections.
+#
+# EVERY interface must declare a `wait_model:` — how the requester (IP1) waits
+# on the responder (IP2) across this interface. It is the difference between a
+# model that stalls where the real IP stalls and one that only looks right on
+# average, so the schema requires it. There are exactly three approaches:
+#
+#   wait_for_response
+#     IP1 issues the request and blocks until IP2's *response* comes back,
+#     indefinitely (no timeout). IP1 needs the returned result to decide what
+#     it does next, so the response is on the critical path of IP1's own flow.
+#     Must state `response_used_for:` — what the returned result drives.
+#     Example: gdma descriptor fetch — the fetched descriptor selects the
+#     next transition.
+#
+#   wait_for_ack_inline                             <-- THE DEFAULT
+#     IP1 issues the request and blocks at the request site until IP2
+#     *acknowledges* it, then continues the same pipeline for that same
+#     command. IP2 returns no result IP1 needs — the command simply flows
+#     IP1 -> IP2. Example: an accept handshake that only tells IP1 the
+#     command was taken.
+#
+#   wait_for_ack_before_next_request
+#     IP1 issues the request and keeps going — it does NOT block at the
+#     request site. The outstanding ack is collected later, before IP1 starts
+#     the pipeline for the NEXT command/request/packet. Same "no result
+#     needed" as above; only the barrier moves. Must state
+#     `outstanding_limit:` — how many requests may be in flight before that
+#     barrier (an integer, or the name of the config knob that bounds it).
+#     Example: a level IRQ that must be software-cleared before the next one
+#     is asserted.
+#
+# If a DLD does not state the wait model for an interface, the extractor fills
+# `wait_for_ack_inline` and stamps `source: assumed_default` (the linter
+# enforces that pairing) so the assumption is visible rather than silent. Fix
+# the DLD instead of leaving it that way.
 interfaces:
   - name: example_if                   # interfaces are report-only in coverage:
     type: apb_axi_lite                 # templates may consolidate DLD sections.
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response          # one of the three approaches above
+      requester: peer                  # this_ip | peer — who plays IP1 here
+      wait_points: [example_fsm.EXECUTE]  # <fsm>.<STATE> in THIS template: where
+                                       # this IP stalls (requester: this_ip), or
+                                       # where it releases the peer (requester:
+                                       # peer). Every name is checked against
+                                       # fsm_processes and its states.
+      resumes_on: example_response     # the event that ends the wait
+      timeout: indefinite              # optional; wait_for_response is always indefinite
+      response_used_for: returned read data is consumed by the requester   # mode 1 only
+      # outstanding_limit: 1           # mode 3 only: requests in flight before the barrier
+      peer: example_requester_block    # optional: who is on the other side
+      source: dld                      # dld | assumed_default (see the note above)
+      notes: writes are acknowledged in place; only reads return data.
     transactions:
       - name: example_access
         fields: [addr, write_data, read_data]

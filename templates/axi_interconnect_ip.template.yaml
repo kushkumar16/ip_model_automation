@@ -14,6 +14,14 @@ interfaces:
     type: axi_master_side
     direction: input
     clock_domain: axi_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [write_response_routing.ROUTE_B, read_data_routing.ROUTE_R_BEAT]
+      resumes_on: routed_response
+      timeout: indefinite
+      response_used_for: "the master consumes the B/R response to retire its outstanding transaction"
+      source: dld
     transactions:
       - name: aw_w_ar
         fields: [master_id, axi_id, addr, length, qos]
@@ -23,6 +31,14 @@ interfaces:
     type: axi_slave_side
     direction: output
     clock_domain: axi_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [write_response_routing.WAIT_B, read_data_routing.WAIT_R]
+      resumes_on: slave_response
+      timeout: indefinite
+      response_used_for: "the response is matched in the outstanding table and routed back to the originating master"
+      source: dld
     transactions:
       - name: routed_transaction
         fields: [slave_id, master_id, axi_id, addr, length]

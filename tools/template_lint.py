@@ -12,9 +12,10 @@ The template contract is enforced in two layers, and this tool runs both:
 
 2. **Cross-field semantics** — the checks below that JSON Schema cannot express:
    the declared ``fsm_count`` matching the number of FSMs, every FSM having a
-   timing entry and appearing in a test scenario, and the arbitration-IP
-   sub-contract. Each rule lives in exactly one layer, so the schema and this
-   file cannot drift apart.
+   timing entry and appearing in a test scenario, every interface wait model
+   pointing at an FSM state that exists, and the arbitration-IP sub-contract.
+   Each rule lives in exactly one layer, so the schema and this file cannot
+   drift apart.
 
 Both layers operate on the same parsed mapping (``yaml.safe_load``); nothing
 here parses YAML by hand.
@@ -71,6 +72,52 @@ def fsm_names(template: dict[str, Any]) -> list[str]:
     return [str(fsm.get("name")) for fsm in template.get("fsm_processes", []) if isinstance(fsm, dict)]
 
 
+def fsm_states(template: dict[str, Any]) -> dict[str, set[str]]:
+    """Map each FSM to its state names (a state may be a bare name or a mapping)."""
+    states: dict[str, set[str]] = {}
+    for fsm in template.get("fsm_processes", []):
+        if not isinstance(fsm, dict):
+            continue
+        names = set()
+        for state in fsm.get("states", []):
+            if isinstance(state, dict):
+                names.add(str(state.get("name")))
+            else:
+                names.add(str(state))
+        states[str(fsm.get("name"))] = names
+    return states
+
+
+def wait_model_errors(template: dict[str, Any]) -> list[str]:
+    """Interface wait models must point at FSM states this template actually has.
+
+    The shape of a `wait_model` (its three modes and their per-mode required
+    fields) is the schema's job; what it cannot see is whether
+    `wait_points: [message_push.CHECK_SPACE]` names a real FSM and a real state
+    of that FSM — which is exactly what makes the wait model actionable for
+    model generation rather than prose.
+    """
+    errors: list[str] = []
+    states = fsm_states(template)
+    for interface in template.get("interfaces", []):
+        if not isinstance(interface, dict):
+            continue
+        wait_model = interface.get("wait_model")
+        if not isinstance(wait_model, dict):
+            continue
+        name = interface.get("name")
+        for point in wait_model.get("wait_points", []):
+            point = str(point)
+            if "." not in point:  # TODO_REVIEW and friends: the schema already flags the shape
+                continue
+            fsm, state = point.split(".", 1)
+            if fsm not in states:
+                errors.append(f"interfaces.{name}.wait_model: wait_point `{point}` names unknown FSM `{fsm}`")
+            elif state not in states[fsm]:
+                errors.append(f"interfaces.{name}.wait_model: wait_point `{point}` names unknown state of `{fsm}`")
+    return errors
+
+
 def semantic_errors(template: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     names = fsm_names(template)
@@ -105,6 +152,7 @@ def semantic_errors(template: dict[str, Any]) -> list[str]:
                 break
 
     errors += timing_coherence_errors(template)
+    errors += wait_model_errors(template)
 
     # every FSM must appear in at least one test scenario's fsm_coverage
     covered = " ".join(

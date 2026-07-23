@@ -15,6 +15,11 @@ not been re-amended and re-stamped. That is the signal to run the amend flow:
 
 Same discipline as ``check_overview_sync.py`` (docx provenance), applied to the
 DLD -> template -> model chain.
+
+The stamp records a *claim* — "this model was amended against that template" —
+that the hash alone cannot verify, so stamping is per IP and follows the amend.
+``--stamp-all`` exists only to bootstrap provenance and refuses to run once
+baselines exist (override with ``--force`` for a deliberate bulk re-baseline).
 """
 
 from __future__ import annotations
@@ -79,13 +84,45 @@ def check() -> list[str]:
     return errors
 
 
+def stamp_all_blockers() -> list[str]:
+    """IPs that already have a baseline, i.e. the ones --stamp-all would overwrite.
+
+    Blanket stamping is for bootstrapping provenance, not for silencing the
+    gate: stamping an IP whose template moved on asserts its model was amended
+    against that template, which is a claim only the amend flow can earn. Once
+    baselines exist, stamping is per IP, after the amend.
+    """
+    return [ip for ip in promoted_ips() if ip in load_baselines()]
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stamp", metavar="IP", help="record the current template hash as this IP's model baseline")
     parser.add_argument("--stamp-all", action="store_true", help="stamp every promoted template (initial provenance)")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow --stamp-all to overwrite baselines that already exist (bulk re-baseline)",
+    )
     args = parser.parse_args(argv)
 
     if args.stamp_all:
+        blockers = stamp_all_blockers()
+        if blockers and not args.force:
+            print(
+                "refusing --stamp-all: "
+                f"{len(blockers)} template(s) already have a baseline ({', '.join(blockers[:3])}"
+                f"{', ...' if len(blockers) > 3 else ''}).",
+                file=sys.stderr,
+            )
+            print(
+                "--stamp-all is for bootstrapping provenance. To record a template change, amend the "
+                "model and tests first (tools/diff_template.py --amend-prompt), then stamp that IP:\n"
+                "  python tools/check_model_provenance.py --stamp <ip>\n"
+                "Pass --force only for a deliberate bulk re-baseline.",
+                file=sys.stderr,
+            )
+            return 1
         for ip in promoted_ips():
             stamp(ip)
         print(f"stamped baselines for {len(promoted_ips())} templates")

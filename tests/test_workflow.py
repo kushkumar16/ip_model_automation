@@ -1,5 +1,7 @@
+import contextlib
 import copy
 import importlib.util
+import io
 import logging
 import sys
 import tempfile
@@ -182,6 +184,130 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         errors = linter.lint_template(broken_semantics, importlib.import_module("jsonschema"))
         self.assertTrue(any("fsm_count=99" in e for e in errors), errors)
 
+    def test_interface_wait_models_are_stated_and_placed(self):
+        """Every interface declares one of the three wait models, tied to a real FSM state."""
+        repo_root = Path(__file__).resolve().parents[1]
+        extractor_path = repo_root / "tools" / "dld_to_template.py"
+        spec = importlib.util.spec_from_file_location("dld_to_template", extractor_path)
+        extractor = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(extractor)
+
+        import yaml
+
+        for template_path in (repo_root / "templates").glob("*.template.yaml"):
+            template = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+            states = {
+                fsm["name"]: {s["name"] if isinstance(s, dict) else s for s in fsm["states"]}
+                for fsm in template["fsm_processes"]
+            }
+            for interface in template["interfaces"]:
+                wait_model = interface.get("wait_model")
+                self.assertIsNotNone(wait_model, f"{template_path.name}: {interface['name']} has no wait_model")
+                self.assertIn(wait_model["mode"], extractor.WAIT_MODES)
+                # A promoted template must not be carrying the assumed fallback.
+                self.assertEqual(
+                    wait_model["source"],
+                    "dld",
+                    f"{template_path.name}: {interface['name']} wait model is not stated in the DLD",
+                )
+                for point in wait_model["wait_points"]:
+                    fsm, state = point.split(".")
+                    self.assertIn(state, states.get(fsm, set()), f"{template_path.name}: bad wait point {point}")
+
+        # A DLD interface section without a `Wait model:` block falls back to
+        # approach 2, and says so rather than passing the assumption off as stated.
+        silent = ["Fields:", "", "- `addr`", ""]
+        assumed = extractor.extract_wait_model(silent, "input")
+        self.assertEqual(assumed["mode"], "wait_for_ack_inline")
+        self.assertEqual(assumed["source"], "assumed_default")
+        self.assertEqual(assumed["requester"], "peer")
+        self.assertEqual(assumed["wait_points"], [extractor.TODO])
+
+        stated = extractor.extract_wait_model(
+            [
+                "Wait model:",
+                "",
+                "- Mode: `wait_for_ack_before_next_request`",
+                "- Requester: this IP",
+                "- Waits in: `example_fsm.WAIT_CLEAR`",
+                "- Resumes on: `software_clear`",
+                "- Outstanding limit: 2",
+                "",
+            ],
+            "output",
+        )
+        self.assertEqual(
+            stated,
+            {
+                "mode": "wait_for_ack_before_next_request",
+                "requester": "this_ip",
+                "wait_points": ["example_fsm.WAIT_CLEAR"],
+                "resumes_on": "software_clear",
+                "source": "dld",
+                "outstanding_limit": 2,
+            },
+        )
+
+    def test_models_enter_every_declared_wait_point(self):
+        """The other half of the wait-model contract: the model must implement it."""
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "check_wait_model_coverage.py"
+        spec = importlib.util.spec_from_file_location("check_wait_model_coverage", tool_path)
+        tool = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(tool)
+
+        self.assertEqual(tool.check_all(), [], "a model does not enter a wait point its template declares")
+
+        # A model that asserts and moves on, where the template says it waits
+        # for the software clear, is exactly what this gate exists to catch.
+        source = 'self.fsm_state["interrupt_notify"] = "ASSERT_IRQ"\n'
+        self.assertTrue(tool.enters_state(source, "interrupt_notify", "ASSERT_IRQ"))
+        self.assertFalse(tool.enters_state(source, "interrupt_notify", "WAIT_SW_CLEAR"))
+        self.assertTrue(tool.enters_state('self._set_fsm_state("arbiter_main", "SQ_SCAN")', "arbiter_main", "SQ_SCAN"))
+
+    def test_wait_model_violations_fail_the_gates(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        linter_path = repo_root / "tools" / "template_lint.py"
+        spec = importlib.util.spec_from_file_location("template_lint", linter_path)
+        linter = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(linter)
+
+        import yaml
+
+        jsonschema = importlib.import_module("jsonschema")
+        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+
+        # Layer 1 (schema): a missing wait model, a mode-3 interface with no
+        # outstanding limit, and an assumed default that is not approach 2.
+        missing = copy.deepcopy(base)
+        missing["interfaces"][0].pop("wait_model")
+        self.assertTrue(
+            any("wait_model" in e and "required" in e for e in linter.lint_template(missing, jsonschema)),
+        )
+
+        unbounded = copy.deepcopy(base)
+        deferred = next(i for i in unbounded["interfaces"] if i["wait_model"]["mode"].endswith("next_request"))
+        deferred["wait_model"].pop("outstanding_limit")
+        self.assertTrue(
+            any("outstanding_limit" in e for e in linter.lint_template(unbounded, jsonschema)),
+        )
+
+        mislabelled = copy.deepcopy(base)
+        mislabelled["interfaces"][0]["wait_model"]["source"] = "assumed_default"
+        self.assertTrue(
+            any("wait_for_ack_inline" in e for e in linter.lint_template(mislabelled, jsonschema)),
+        )
+
+        # Layer 2 (semantics): a wait point that names a state the FSM does not have.
+        misplaced = copy.deepcopy(base)
+        misplaced["interfaces"][0]["wait_model"]["wait_points"] = ["message_push.NOT_A_STATE"]
+        self.assertTrue(
+            any("unknown state" in e for e in linter.lint_template(misplaced, jsonschema)),
+        )
+
     def test_target_profile_defaults_match_repo_and_override(self):
         repo_root = Path(__file__).resolve().parents[1]
         tool_path = repo_root / "tools" / "target_profile.py"
@@ -302,6 +428,17 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         # Every promoted template is stamped and in sync with its model baseline.
         self.assertEqual(tool.check(), [], "a model template has drifted from its recorded baseline")
+
+        # --stamp-all would assert "every model was amended against its current
+        # template" — a claim only the amend flow earns — so once baselines
+        # exist it must refuse rather than silence the gate in bulk.
+        self.assertEqual(sorted(tool.stamp_all_blockers()), sorted(tool.promoted_ips()))
+        before = tool.BASELINES_PATH.read_text(encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(tool.main(["--stamp-all"]), 1)
+        self.assertIn("refusing --stamp-all", stderr.getvalue())
+        self.assertEqual(tool.BASELINES_PATH.read_text(encoding="utf-8"), before)
 
     def test_overview_docx_tracks_markdown(self):
         repo_root = Path(__file__).resolve().parents[1]

@@ -16,6 +16,13 @@ interfaces:
     type: interrupt_source
     direction: input
     clock_domain: irq_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [source_sampling.QUEUE_EVENT]
+      resumes_on: event_latched
+      source: dld
+      notes: "a source consumes no result: an edge is latched, a level stays asserted until cleared"
     transactions:
       - name: source_event
         fields: [src_id, trigger_type, level_value, edge_pulse]
@@ -25,6 +32,14 @@ interfaces:
     type: cpu_interrupt
     direction: output
     clock_domain: irq_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [cpu_delivery.WAIT_ACK]
+      resumes_on: cpu_acknowledge
+      outstanding_limit: 1
+      source: dld
+      notes: "per target one interrupt is in flight: delivery is complete once asserted, but the acknowledge must arrive before the next interrupt is delivered"
     transactions:
       - name: irq_delivery
         fields: [target_id, irq_id, priority]
@@ -34,6 +49,14 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_response
+      requester: peer
+      wait_points: [register_access.READ_STATE]
+      resumes_on: register_access_complete
+      timeout: indefinite
+      response_used_for: "software reads pending/active/priority state before deciding what to write"
+      source: dld
     transactions:
       - name: irq_cfg_access
         fields: [addr, write_data, read_data]

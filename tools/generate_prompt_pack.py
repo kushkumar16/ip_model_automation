@@ -92,6 +92,16 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
 
     for interface in template.get("interfaces", []):
         lines.append(f"- `{interface.get('name')}` ({interface.get('direction')}, {interface.get('type')})")
+        wait_model = interface.get("wait_model") or {}
+        if wait_model:
+            # The wait model tells the generator where the model must actually block.
+            lines.append(
+                f"  - wait model `{wait_model.get('mode')}` (requester: {wait_model.get('requester')}); "
+                f"waits in {wait_model.get('wait_points', [])}, resumes on {wait_model.get('resumes_on')}"
+            )
+            for key in ("response_used_for", "outstanding_limit"):
+                if wait_model.get(key) is not None:
+                    lines.append(f"    - {key}: {wait_model.get(key)}")
         for transaction in interface.get("transactions", []):
             lines.append(f"  - transaction `{transaction.get('name')}` fields: {transaction.get('fields', [])}")
 

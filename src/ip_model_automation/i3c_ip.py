@@ -72,6 +72,9 @@ class I3cIpModel:
         self.interrupt_masked = False
         self.bus_busy = False
         self.interrupts: List[Tuple[float, str]] = []
+        # interrupt_if is wait_for_ack_before_next_request with outstanding_limit 1:
+        # transfers continue, but the next assertion waits for the software clear.
+        self.irq_clear_event: simpy.Event | None = None
         self.metrics = defaultdict(int)
         self._ibi_payload_counter = 0
 
@@ -172,6 +175,9 @@ class I3cIpModel:
             elif op == "clear_int":
                 self.fsm_state["register_access"] = "READ_STATUS"
                 self.interrupts.clear()
+                if self.irq_clear_event is not None and not self.irq_clear_event.triggered:
+                    self.irq_clear_event.succeed()
+                    self.irq_clear_event = None
                 self.metrics["clear_latency"] = self.lat["register"]
                 self.logger.info("interrupt cleared")
 
@@ -265,3 +271,11 @@ class I3cIpModel:
             self.interrupts.append((self.env.now, event))
             self.metrics["interrupt_count"] += 1
             self.logger.info("interrupt asserted event=%s time=%s", event, self.env.now)
+            # Level interrupt: the next event cannot raise an IRQ until
+            # software clears this one through the register interface.
+            self.irq_clear_event = self.env.event()
+            self.fsm_state["interrupt_control"] = "WAIT_SW_CLEAR"
+            self.metrics["irq_clear_waits"] += 1
+            yield self.irq_clear_event
+            self.fsm_state["interrupt_control"] = "DEASSERT_IRQ"
+            self.logger.debug("interrupt deasserted event=%s time=%s", event, self.env.now)

@@ -32,6 +32,14 @@ The subsystem treats the four member IP models as internal resources. Its own pr
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Host Descriptor Interface
 
 Fields:
@@ -46,6 +54,13 @@ Timing:
 
 - A descriptor is accepted immediately into the intake queue; downstream stalls surface as increased end-to-end latency, not intake rejection.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `host_command.ACCEPT_DESCRIPTOR`
+- Resumes on: `intake_queue_accept`
+
 ### 4.2 Subsystem Interrupt Interface
 
 Fields:
@@ -57,6 +72,14 @@ Timing:
 
 - The completion interrupt for a descriptor fires only after both the engine leg and the fabric leg of that descriptor have completed.
 
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: this IP
+- Waits in: `completion_collector.ASSERT_IRQ`
+- Resumes on: `both_legs_complete`
+- Note: no CPU acknowledge is modeled; the assertion completes in place once the engine leg and the fabric leg have both completed
+
 ### 4.3 QoS Configuration Interface
 
 Fields:
@@ -67,6 +90,13 @@ Fields:
 Timing:
 
 - QoS token configuration takes effect before subsequent completion scheduling decisions.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `fabric_bridge.MAP_TENANT`
+- Resumes on: `token_budget_applied`
 
 ## 5. Descriptor Flow
 

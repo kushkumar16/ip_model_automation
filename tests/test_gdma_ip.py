@@ -150,6 +150,34 @@ class TestGdmaIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["irq_count"], 1)
         self.assertEqual(model.irqs, [0])
 
+    def test_gdma_next_coalescing_window_waits_for_irq_clear(self):
+        """interrupt_if: wait_for_ack_before_next_request, outstanding_limit 1."""
+        env = simpy.Environment()
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=1,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            irq_latency=1,
+            coalesce_threshold=1,
+        )
+        model.enable_channel(0)
+        for index in range(3):
+            model.submit(Descriptor(f"d{index}", channel_id=0))
+        env.run(until=40)
+
+        # The data path drains all three descriptors, but only the first IRQ is
+        # asserted: coalescing is parked until software clears it.
+        self.assertEqual(model.metrics["completed_descriptors"], 3)
+        self.assertEqual(model.metrics["irq_count"], 1)
+        self.assertEqual(model.fsm_state["interrupt_coalescing"], "WAIT_CLEAR")
+
+        model.clear_interrupt()
+        env.run(until=60)
+        self.assertEqual(model.metrics["irq_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

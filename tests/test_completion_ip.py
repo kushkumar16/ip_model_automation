@@ -173,6 +173,9 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertEqual(model.completed, [])
         self.assertEqual(len(model.pending["T0"]), 1)
         self.assertGreater(model.metrics["output_stalls"], 0)
+        # completion_queue_if is wait_for_ack_inline: the scheduler holds the
+        # completion at its wait point instead of emitting it.
+        self.assertEqual(model.fsm_state["completion_scheduler"], "STALL_OUTPUT")
         model.set_completion_ready(True)
         env.run(until=14)
         self.assertEqual(model.completed[0][1].cmd_id, "r0")

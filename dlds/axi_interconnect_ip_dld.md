@@ -56,6 +56,14 @@ target slave, priority/QoS, and response status.
 
 ## 4. Interfaces
 
+Every interface below states a `Wait model:` block — how the requester (IP1) waits
+on the responder (IP2) across that interface: `wait_for_response` (blocks until the
+response returns and uses the result), `wait_for_ack_inline` (blocks at the request
+site for an ack, then continues the same pipeline), or
+`wait_for_ack_before_next_request` (continues after issuing; the ack is collected
+before the next command starts). An interface that does not state one is read as
+`wait_for_ack_inline`.
+
 ### 4.1 Master-Side AXI Interfaces
 
 One logical interface exists per master port.
@@ -87,6 +95,14 @@ Timing:
 - `AR` is independent from write channels.
 - Backpressure may occur independently per channel.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `write_response_routing.ROUTE_B`, `read_data_routing.ROUTE_R_BEAT`
+- Resumes on: `routed_response`
+- Response used for: the master consumes the B/R response to retire its outstanding transaction
+
 ### 4.2 Slave-Side AXI Interfaces
 
 One logical interface exists per target slave port.
@@ -104,6 +120,14 @@ Timing:
 - Slave readiness controls downstream issue.
 - Slave responses are routed back using outstanding transaction metadata.
 
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: this IP
+- Waits in: `write_response_routing.WAIT_B`, `read_data_routing.WAIT_R`
+- Resumes on: `slave_response`
+- Response used for: the response is matched in the outstanding table and routed back to the originating master
+
 ### 4.3 Configuration Interface
 
 Configuration fields:
@@ -115,6 +139,14 @@ Configuration fields:
 - Outstanding transaction limit.
 - Per-port buffer depth.
 - Error response policy for unmapped access.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Requester: peer
+- Waits in: `write_address_ingress.DECODE_ADDR`
+- Resumes on: `config_applied`
+- Note: the address map and policy take effect before the next decode
 
 ## 5. Transactions
 

@@ -14,6 +14,13 @@ interfaces:
     type: apb_axi_lite
     direction: input
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [channel_control.IDLE]
+      resumes_on: shadow_config_applied
+      source: dld
+      notes: "control writes are acknowledged as shadow configuration is captured"
     transactions:
       - name: cfg_write
         fields: [addr, data, channel_id]
@@ -23,6 +30,14 @@ interfaces:
     type: memory_read
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [descriptor_fetch.WAIT_FETCH_RESP]
+      resumes_on: descriptor_read_response
+      timeout: indefinite
+      response_used_for: "the returned descriptor is validated and enqueued, and its fields drive read issue"
+      source: dld
     transactions:
       - name: descriptor_fetch
         fields: [desc_addr, channel_id]
@@ -32,6 +47,15 @@ interfaces:
     type: memory_read
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_response
+      requester: this_ip
+      wait_points: [read_response.WAIT_READ_RESP]
+      resumes_on: source_read_response
+      timeout: indefinite
+      response_used_for: "returned data fills the internal buffer that gates write issue"
+      source: dld
+      notes: "reads are split: several tags may be outstanding, so the response is awaited in the response process rather than at the issue site"
     transactions:
       - name: source_read
         fields: [src_addr, length_bytes, tag, channel_id]
@@ -41,6 +65,14 @@ interfaces:
     type: memory_write
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [write_response.WAIT_WRITE_RESP, completion_update.WAIT_DESCRIPTOR_DONE]
+      resumes_on: write_response_received
+      outstanding_limit: CH_CFG.outstanding_depth
+      source: dld
+      notes: "write data acceptance does not block the write issue process; every outstanding write response must be collected before the descriptor completes and the next one starts"
     transactions:
       - name: destination_write
         fields: [dst_addr, length_bytes, tag, channel_id]
@@ -50,6 +82,14 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_before_next_request
+      requester: this_ip
+      wait_points: [interrupt_coalescing.WAIT_CLEAR]
+      resumes_on: software_clear
+      outstanding_limit: 1
+      source: dld
+      notes: "the interrupt is asserted without blocking the data path; the next coalescing window starts only after software clears the status"
     transactions:
       - name: irq
         fields: [channel_id, vector]

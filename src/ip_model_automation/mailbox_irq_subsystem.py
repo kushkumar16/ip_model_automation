@@ -15,9 +15,11 @@ class MailboxIrqSubsystemModel:
 
     Composes the Mailbox IP (doorbell interrupt source) and the Interrupt
     Controller IP (delivery fabric) with glue processes that close the full
-    message-to-EOI round trip: host message intake, doorbell-to-level bridging,
-    CPU acknowledge, and a software handler that reads the message, clears the
-    doorbell once the channel drains, and issues EOI. Level semantics are real:
+    message-to-EOI round trip: host message intake, doorbell-to-level bridging
+    (which also acknowledges the mailbox doorbell, since the mailbox allows one
+    outstanding interrupt), CPU acknowledge, and a software handler that reads
+    the message, deasserts the level once the channel drains, and issues EOI.
+    Level semantics are real:
     the level stays asserted while unserviced messages remain, so the
     controller's EOI reassert re-pends the source. A storm monitor masks a
     flooding source at the controller until its outstanding count drains.
@@ -132,6 +134,15 @@ class MailboxIrqSubsystemModel:
                 self.fsm_state["irq_source_bridge"] = "ASSERT_LEVEL"
                 self.outstanding[channel_id] += 1
                 yield self.controller.set_level(src_id, True)
+                # The mailbox doorbell is wait_for_ack_before_next_request with
+                # outstanding_limit 1: it stays asserted until cleared, and the
+                # mailbox raises no further doorbell until then. Once the level
+                # is latched at the controller the doorbell has done its job, so
+                # the bridge acknowledges it here; from this point the *level*
+                # (managed by the software handler until the channel drains) is
+                # what keeps the source pending.
+                self.mailbox.clear_interrupt(channel_id)
+                self.metrics["doorbells_acked"] += 1
                 self.metrics["irqs_bridged"] += 1
                 self.logger.debug(
                     "bridged channel=%s source=%s outstanding=%s", channel_id, src_id, self.outstanding[channel_id]

@@ -39,6 +39,12 @@ interfaces:
     type: descriptor_queue
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [host_command.ACCEPT_DESCRIPTOR]
+      resumes_on: intake_queue_accept
+      source: dld
     transactions:
       - name: descriptor_submit
         fields: [desc_id, channel_id, src_addr, dst_addr, length_bytes]
@@ -48,6 +54,13 @@ interfaces:
     type: interrupt
     direction: output
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: this_ip
+      wait_points: [completion_collector.ASSERT_IRQ]
+      resumes_on: both_legs_complete
+      source: dld
+      notes: "no CPU acknowledge is modeled; the assertion completes in place once the engine leg and the fabric leg have both completed"
     transactions:
       - name: descriptor_complete_irq
         fields: [irq_valid, channel_id]
@@ -57,6 +70,12 @@ interfaces:
     type: config
     direction: input
     clock_domain: bus_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [fabric_bridge.MAP_TENANT]
+      resumes_on: token_budget_applied
+      source: dld
     transactions:
       - name: qos_tenant_config
         fields: [tenant_id, token_budget]

@@ -58,8 +58,15 @@ output to the same conventions.
 4. Preserve flat model layout.
 5. Use SimPy process methods for template FSMs.
 6. Use template timing for hard-coded delays.
-7. Add assertions for functionality and performance effects from `test_scenarios`.
-8. Run `python tools/validate_dld_flow.py` (front-end gate + model/test flow).
+7. Implement each interface's `wait_model` at the `<fsm>.<STATE>` its
+   `wait_points` name, and publish that state through `fsm_state` while the
+   process is parked there. A `wait_for_response` interface blocks until the
+   response returns; `wait_for_ack_inline` blocks at the request site;
+   `wait_for_ack_before_next_request` continues and collects the ack before the
+   next request, with at most `outstanding_limit` in flight.
+   `tools/check_wait_model_coverage.py` fails the build otherwise.
+8. Add assertions for functionality and performance effects from `test_scenarios`.
+9. Run `python tools/validate_dld_flow.py` (front-end gate + model/test flow).
 
 ### Stage 2: amending an existing model (brownfield)
 
@@ -81,7 +88,9 @@ pack. The task is different: **edit in place, do not regenerate.**
    covered.
 4. Run `python tools/validate_dld_flow.py`. The pipeline stamps the new
    provenance baseline (`tools/check_model_provenance.py --stamp <ip>`) once the
-   gates pass.
+   gates pass — per IP, after the amend. The stamp asserts that this model was
+   amended against this template revision, so never stamp to quiet the gate
+   (`--stamp-all` refuses once baselines exist).
 
 If the template change is trivial enough that the existing tests still pass, the
 stage is skipped entirely — you will not be invoked.

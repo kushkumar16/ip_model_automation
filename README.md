@@ -15,16 +15,17 @@ behavior from the DLD.
 
 | Directory | Contents |
 | --- | --- |
-| `dlds/` | **Input DLDs** — the authoring source (`*_dld.md`; `*_dld.docx` also accepted by the automated pipeline). |
+| `dlds/` | **Input DLDs** — the authoring source (`*_dld.md`; `*_dld.docx` also accepted by the automated pipeline). An optional `*_dld.src.md` alongside one is the author's unnormalized original (see [DLD Normalization](#dld-normalization)). |
 | `templates/` | Reviewed template YAMLs (source of truth for generation); extractor drafts land here too (gitignored). |
 | `src/ip_model_automation/` | Flat SimPy model implementations. |
 | `tests/` | Per-IP unit tests and workflow tests. |
 | `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. |
 | `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
+| `docs/proposals/` | Design proposals for stages not yet wired in, or wired in only partly. Each states what it costs as plainly as what it buys. |
 | `docs/` | Project documentation: `project_overview.md` (single consolidated doc, **canonical source**), `project_overview.docx` (hand-maintained Word rendering of the md, kept in sync by `tools/check_overview_sync.py`), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
 | `tools/` | Pipeline tools: extraction, gates, generators, validation, automation. |
 | `schemas/`, `examples/` | Template contract schema and authoring examples. |
-| `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contract. |
+| `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contracts (model generation, DLD normalization). |
 
 ## IPs
 
@@ -134,12 +135,78 @@ referenced by `connections:` are real, the model instantiates the members):
 python tools\check_subsystem_wiring.py
 ```
 
+## DLD Normalization
+
+The extractor above is deterministic and best-effort: it reads a specific set of
+markdown conventions and degrades to `TODO_REVIEW` when they are absent. That
+determinism is what makes extractor calibration a regression test — and it is
+also why a DLD written in some other shape extracts badly.
+
+`normalize_dld` is the stage that closes that gap. It rewrites an author's
+document into the shape the extractor reads, **changing structure only**, and it
+is upstream of every existing gate and replaces none of them: if a normalization
+is bad, extraction degrades to `TODO_REVIEW` and the strict coverage gate refuses
+promotion, exactly as a badly-written DLD does today.
+
+Two files per IP, so the engineer's original is never edited in place:
+
+| File | Role |
+| --- | --- |
+| `dlds/<ip>_dld.src.md` | The author's original, in whatever shape it was written. The stage reads it and never writes it. |
+| `dlds/<ip>_dld.md` | The normalized, extractor-shaped document — still the pipeline's input, so every downstream stage is untouched. |
+
+**An IP with no `.src.md` skips the stage and its gate entirely**, which is why
+today's DLDs are unaffected by it.
+
+A **`.docx` DLD always has one**: Word offers no way to write the extractor's
+markdown conventions, so the pipeline's conversion output lands on
+`<ip>_dld.src.md` and normalization is what produces `<ip>_dld.md` from it.
+Re-converting an unchanged document does not rewrite the file, so the review
+stamp survives.
+
+```powershell
+python tools\check_dld_normalization.py <ip>              # fidelity gate for one IP
+python tools\check_dld_normalization.py --calibrate       # every DLD against itself
+python tools\check_dld_normalization.py --stamp <ip>      # record human review
+```
+
+The gate is entirely mechanical: measurement and identifier conservation **in
+both directions** (a value that appears from nowhere is as suspect as one that
+vanishes), FSM name/count/state-set parity read through the real extractor,
+wait-model provenance, and accounting for source content that reached neither the
+normalized body nor its `## Unplaced Source Content` section.
+
+What it cannot prove is that the *meaning* survived — a normalization could
+preserve every number while attaching it to the wrong FSM. That claim is earned
+per IP by a human, the way `check_model_provenance.py` earns its baseline: the
+stamp records a `(src, normalized)` hash pair in `dlds/normalization_baselines.json`,
+and editing either file breaks it.
+
+The stamp is enforced in two places, and **never applied by the pipeline** —
+unlike `stamp_provenance`, which records a fact the run itself establishes:
+
+- `check_normalization_stamp`, a required stage that reports the IP as
+  *awaiting* review rather than failed, so the run pauses instead of looking
+  broken. The agent loop ahead of it is gated on `--no-stamp-check`, the half an
+  agent can actually satisfy; gating the agent on a human's signature would make
+  its loop unwinnable.
+- `check_template_coverage.py --strict`, the promotion gate — so an unstamped
+  normalization cannot promote a template even if someone runs the steps by
+  hand, outside the pipeline.
+
+The contract for whoever does the rewriting — human or agent — is
+[agents/dld_normalization_agent.md](agents/dld_normalization_agent.md); the
+design and its costs are in
+[docs/proposals/normalize_dld_stage.md](docs/proposals/normalize_dld_stage.md).
+
 ## Automated Pipeline
 
 `tools/auto_ip_pipeline.py` watches `dlds/*_dld.md` (and `*_dld.docx`) for new
 or modified DLDs and executes the stage sequence declared in
 `harness/ip_generation_loop.yaml` for each changed IP: docx -> markdown
-conversion (python-docx), draft extraction, template gates, then either the
+conversion to the author source (python-docx), normalization and its fidelity
+gate (for any IP with a `.src.md`, which every `.docx` DLD has), draft
+extraction, template gates, then either the
 **greenfield** path (scaffold + prompt pack + model/test generation, for an IP
 with no model yet) or the **brownfield** path (`amend_implementation` — a
 structured template diff drives an in-place edit of the existing model and
@@ -148,7 +215,9 @@ tests), followed by unit tests, the provenance stamp, and the repo-wide gates
 pipeline — adding, removing, or reordering a stage is a YAML edit, not a
 runner change (the stage schema is documented at the top of that file).
 Change detection hashes DLD content into `reports/.dld_pipeline_state.json`;
-an IP is only marked processed after its full chain passes.
+an IP is only marked processed after its full chain passes. The hash covers the
+IP's `.src.md` too, where one exists, so editing the author's document
+re-triggers normalization.
 
 ```powershell
 python tools\auto_ip_pipeline.py                      # process every changed DLD
@@ -156,12 +225,14 @@ python tools\auto_ip_pipeline.py dlds\my_ip_dld.docx  # process one DLD explicit
 python tools\auto_ip_pipeline.py --force              # reprocess everything
 ```
 
-The two harness agent stages (`review_template`, `agent_implementation`) need
-an LLM or a human. The pipeline is **agent-agnostic** — models and unit tests
-may be written by any vendor's coding agent that can run headless, read the
-prompt from stdin, and edit files (requirements and named profiles are in
-`harness/ip_generation_loop.yaml` under `agent_profiles`; the contract is
-`agents/ip_model_generation_agent.md`). By default the runner writes a
+The harness agent stages (`normalize_dld`, `review_template`, and one of
+`agent_implementation` / `amend_implementation`) need an LLM or a human. The
+pipeline is **agent-agnostic** — models and unit tests may be written by any
+vendor's coding agent that can run headless, read the prompt from stdin, and
+edit files (requirements and named profiles are in
+`harness/ip_generation_loop.yaml` under `agent_profiles`; the contracts are
+`agents/ip_model_generation_agent.md` and, for normalization,
+`agents/dld_normalization_agent.md`). By default the runner writes a
 ready-to-send prompt to `reports\agent_requests\<ip>.<stage>.prompt.md` and
 reports the IP as *awaiting* that stage. To run unattended, pick a profile or
 pass a raw command — the prompt is piped to the agent's stdin, and failed
@@ -385,7 +456,7 @@ resolves to the same default, so nothing breaks in the meantime).
 - `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
-- `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs).
+- `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs); with `--strict` it is the promotion gate, so it also rejects TODO_REVIEW markers, assumed-default wait models, and an unstamped normalization.
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
 - `tools/template_lint.py`: template contract checker — validates *structure* against the JSON Schema and enforces the cross-field *semantics* (fsm_count parity, per-FSM timing, scenario coverage, interface wait points naming real FSM states) the schema cannot express.
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
@@ -395,6 +466,7 @@ resolves to the same default, so nothing breaks in the meantime).
 - `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).
 - `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).
 - `tools/check_model_provenance.py`: records/checks which template revision each model was last built against (`templates/model_baselines.json`).
+- `tools/check_dld_normalization.py`: fidelity gate for the normalization stage — conservation of measurements and identifiers in both directions, FSM/state parity, wait-model provenance, unplaced accounting, plus the human review stamp (`dlds/normalization_baselines.json`).
 - `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
@@ -406,6 +478,8 @@ resolves to the same default, so nothing breaks in the meantime).
 - `examples/model_generation_skill.md`: LLM generation instructions.
 - `skills/ip-model-generation`: reusable, agent-portable skill (SKILL.md format) for template-driven IP model generation.
 - `harness/ip_generation_loop.yaml`: generation-loop stages and pass criteria.
+- `agents/ip_model_generation_agent.md`, `agents/dld_normalization_agent.md`: the two agent contracts — implementing a model from a template, and reshaping an off-shape DLD without changing what it claims.
+- `docs/proposals/normalize_dld_stage.md`: the normalization stage's design, its build order, and what it costs.
 - `agents/ip_model_generation_agent.md`: contract for human/LLM/model-generation agents.
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.
 - `tests/test_workflow.py`: registry, scaffold, and validation helper checks.

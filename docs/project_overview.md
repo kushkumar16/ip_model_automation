@@ -89,11 +89,12 @@ copy my_ip_dld.md dlds\
 python tools\auto_ip_pipeline.py
 ```
 
-The pipeline detects the new document and drives everything: extraction,
-review prompts, gate checks, model scaffolding, implementation prompts, unit
-tests, and a final repo-wide validation. Two steps in the middle need
-judgment (reviewing the extracted spec, and implementing model behavior) —
-for those the pipeline either:
+The pipeline detects the new document and drives everything: normalization (if
+your DLD is not already in the shape the extractor reads), extraction, review
+prompts, gate checks, model scaffolding, implementation prompts, unit tests,
+and a final repo-wide validation. Three steps in the middle need judgment
+(reshaping an off-shape document, reviewing the extracted spec, and
+implementing model behavior) — for those the pipeline either:
 
 - **writes a ready-to-send prompt** to `reports/agent_requests/` and pauses,
   telling you which IP is *awaiting* which step (you or an LLM complete it,
@@ -111,10 +112,17 @@ for those the pipeline either:
 When the pipeline reports green, you have a validated model in
 `src/ip_model_automation/` and passing tests in `tests/`.
 
+One of those pauses is a person, not an agent: a normalized DLD needs a human
+to confirm that its meaning survived the reshaping (see
+[Normalizing a DLD](#normalizing-a-dld-written-in-another-shape) below). It is
+one command per IP, and it is the only judgment in the system that is
+deliberately not automatable.
+
 ## The step-by-step version (manual, so you see each stage)
 
 ```mermaid
 flowchart TD
+    A0["0. (only if off-shape) Normalize<br/>dlds/&lt;ip&gt;_dld.src.md → dlds/&lt;ip&gt;_dld.md"] --> A
     A["1. Write dlds/&lt;ip&gt;_dld.md"] --> B["2. Extract draft spec + gaps report<br/><code>dld_to_template.py</code>"]
     B --> C["3. Review: resolve every TODO_REVIEW<br/>(using only what the DLD states)"]
     C --> D{"4. Gates:<br/>lint + DLD-coverage check"}
@@ -182,6 +190,52 @@ The extractor understands common DLD conventions. It reliably picks up:
 It deliberately leaves for human review: command encodings, test scenarios,
 invariants, and transition details — these are where DLDs are most often
 ambiguous, so they get flagged instead of guessed.
+
+## Normalizing a DLD written in another shape
+
+The extractor is deterministic: it reads the conventions above and degrades to
+`TODO_REVIEW` when they are absent. That is what makes it trustworthy — and it
+also means a DLD written in some other shape extracts badly, and somebody has to
+reshape it by hand before the pipeline is useful.
+
+The `normalize_dld` stage does that reshaping. It rewrites the author's document
+into the shape the extractor reads, **changing structure only** — never adding,
+removing, altering, or even rewording an engineering claim. Two files per IP, so
+your original is never edited in place:
+
+| File | Role |
+| --- | --- |
+| `dlds/<ip>_dld.src.md` | Your original, in whatever shape you wrote it. A `.docx` DLD's conversion output lands here. |
+| `dlds/<ip>_dld.md` | The normalized, extractor-shaped document — still the pipeline's input, so nothing downstream changes. |
+
+**A DLD already in shape has no `.src.md` and skips the stage entirely.**
+
+Three properties make this safe to put in front of everything else:
+
+1. **It replaces no existing gate.** If a normalization is bad, extraction
+   degrades to `TODO_REVIEW` and the strict coverage gate refuses promotion —
+   the same failure path a badly-written DLD takes today.
+2. **Nothing is lost silently.** Content that maps to no convention is copied
+   verbatim into an `## Unplaced Source Content` section the extractor ignores.
+   The gate counts it, so "I could not place this" is always visible.
+3. **A deterministic gate judges it.** `check_dld_normalization.py` checks
+   measurement and identifier conservation *in both directions* (a value that
+   appears from nowhere is as suspect as one that vanishes), FSM name, count and
+   per-FSM state parity, wait-model provenance, and unplaced accounting.
+
+What that gate cannot prove is that the **meaning** survived — a rewrite could
+preserve every number while attaching it to the wrong FSM. So that one claim is
+signed by a person, per IP, exactly the way the model provenance baseline is:
+
+```powershell
+python tools\check_dld_normalization.py <ip>            # the mechanical half
+python tools\check_dld_normalization.py --stamp <ip>    # "I read the diff; the meaning survived"
+```
+
+The stamp records a `(source, normalized)` hash pair; editing either file breaks
+it and re-requires review. Until it is current, the pipeline reports the IP as
+*awaiting review* and `check_template_coverage.py --strict` refuses to promote
+its template — so an unreviewed normalization cannot reach a model.
 
 ---
 
@@ -452,19 +506,20 @@ re-reading everything:
 
 ```mermaid
 flowchart TD
+    G0["check_dld_normalization.py<br/>(only if the DLD has a .src.md)<br/>conservation both ways + human stamp"]
     G1["template_lint.py<br/>JSON Schema structure + cross-field semantics"]
-    G2["check_template_coverage.py --strict<br/>template captures every DLD FSM + count,<br/>zero TODO_REVIEW left"]
+    G2["check_template_coverage.py --strict<br/>template captures every DLD FSM + count,<br/>zero TODO_REVIEW left, normalization stamped"]
     G3["report_model_coverage.py<br/>every FSM has a test scenario"]
     G4["check_wait_model_coverage.py<br/>the model enters every interface wait point"]
     G5["generate_model_scaffold.py<br/>model shape: class + one process per FSM"]
     G6["unit tests<br/>functional + timing assertions pass"]
 
-    G1 --> G2 --> G3 --> G4 --> G5 --> G6
+    G0 --> G1 --> G2 --> G3 --> G4 --> G5 --> G6
     G6 --> OK["validate_dld_flow.py: OK"]
     OK -.-> R["+ repo-wide hard gates in the automated pipeline:<br/>check_code_style.py (ruff lint + format)<br/>run_code_coverage.py (95%+ total and per file)"]
 
     classDef gate fill:#fff4e5,stroke:#f5a623;
-    class G1,G2,G3,G4,G5,G6,R gate;
+    class G0,G1,G2,G3,G4,G5,G6,R gate;
 ```
 
 The wait-model gate is the one that keeps interface semantics honest in both
@@ -497,7 +552,8 @@ the pipeline. Changing the pipeline is a YAML edit, not a runner change:
 ```mermaid
 flowchart LR
     WATCH["watch dlds/<br/>(content-hash change detection)"]
-    CONV["docx → markdown<br/>(if needed)"]
+    CONV["docx → markdown<br/>(lands as the .src.md)"]
+    NORM["off-shape? agent: normalize<br/>+ fidelity gate + human stamp"]
     EXT["extract draft<br/>+ gaps report"]
     GATES["template gates"]
     REVIEW["agent: review template"]
@@ -508,14 +564,19 @@ flowchart LR
     STAMP["stamp provenance<br/>baseline"]
     REPO["repo-wide gates:<br/>style · coverage · full validation"]
 
-    WATCH --> CONV --> EXT --> GATES --> REVIEW --> FORK
+    WATCH --> CONV --> NORM --> EXT --> GATES --> REVIEW --> FORK
     FORK -->|greenfield| GEN --> TESTS
     FORK -->|brownfield| AMEND --> TESTS
     TESTS --> STAMP --> REPO
     TESTS -->|fail: re-invoke agent<br/>with the failure log| FORK
     classDef gate fill:#fff4e5,stroke:#f5a623;
-    class GATES,REPO gate;
+    class GATES,NORM,REPO gate;
 ```
+
+`normalize_dld` runs only for an IP that has a `dlds/<ip>_dld.src.md`; an
+in-shape DLD skips it and its gate entirely, so today's IPs are unaffected by
+it. A `.docx` DLD always has one — Word gives no way to write the extractor's
+markdown conventions, so its conversion output *is* the author source.
 
 Details worth knowing:
 
@@ -523,8 +584,8 @@ Details worth knowing:
   `reports/.dld_pipeline_state.json`. An IP is only marked *processed* after
   its full chain passes — so a half-finished IP is automatically picked up
   again next run.
-- **The two agent steps** (template review, model implementation) are the
-  only places judgment is needed. Each declares `gates:` in the harness YAML
+- **The three agent steps** (DLD normalization, template review, model
+  implementation) are where judgment is needed. Each declares `gates:` in the harness YAML
   — tool stages whose pass/fail decides everything: if the gates already
   pass, the agent is skipped entirely. Without an agent, the runner writes
   the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and reports
@@ -538,6 +599,12 @@ Details worth knowing:
   description, and the same gates (template coverage, lint, unit tests,
   coding style, coverage thresholds) judge the output no matter which vendor's
   agent — or which human — wrote the model and its tests.
+- **One pause is a human, by design**: the normalization review stamp is a gate
+  no machine can satisfy, so it is deliberately kept out of any agent's retry
+  loop — the agent iterates against the mechanical half
+  (`--no-stamp-check`), and the stamp is a separate stage that reports the IP as
+  *awaiting* rather than failed. A gate a machine cannot satisfy must not sit
+  inside a machine's loop.
 - **Greenfield vs. brownfield is automatic**: the runner snapshots whether the
   model file already exists before any stage runs. A new IP takes the generate
   path (`scaffold` + `agent_implementation`); an existing IP whose DLD changed
@@ -655,6 +722,7 @@ level-until-serviced example.
 ```mermaid
 flowchart TB
     subgraph inputs["Inputs / sources"]
+        SRC["dlds/*_dld.src.md<br/>(author's original, optional)"]
         DLDS["dlds/*_dld.md"]
         SCHEMA["schemas/ip_model_template.schema.json"]
     end
@@ -669,11 +737,13 @@ flowchart TB
         T8["validate_dld_flow.py"]
         T9["run_code_coverage.py"]
         T10["check_code_style.py"]
+        T11["check_dld_normalization.py"]
     end
     subgraph guidance["Guidance for humans/LLMs"]
         SK["skills/ip-model-generation/"]
         HR["harness/ip_generation_loop.yaml"]
         AG["agents/ip_model_generation_agent.md"]
+        AGN["agents/dld_normalization_agent.md"]
     end
     subgraph outputs["Generated artifacts"]
         TPL["templates/*.template.yaml"]
@@ -681,6 +751,7 @@ flowchart TB
         TST["tests/test_*.py"]
     end
 
+    SRC --> T11 --> DLDS
     DLDS --> T1 --> TPL
     SCHEMA --- T2
     TPL --> T2 & T3 & T4 & T5 & T6
@@ -691,6 +762,7 @@ flowchart TB
     SK -.guides.-> T1
     HR -.orchestrates.-> tools
     AG -.contract.-> MOD
+    AGN -.contract.-> DLDS
 ```
 
 | Area | Role |

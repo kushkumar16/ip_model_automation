@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import logging
+import re
 import sys
 import tempfile
 import unittest
@@ -520,6 +521,152 @@ class TestIpRegistryAndLayout(unittest.TestCase):
     def test_ip_logging_rejects_unknown_level(self):
         with self.assertRaises(ValueError):
             get_ip_logger("bad_ip", "LOUD")
+
+
+class TestDldNormalizationGate(unittest.TestCase):
+    """Fidelity gate for the proposed `normalize_dld` stage.
+
+    See docs/proposals/normalize_dld_stage.md. The stage itself is not wired into
+    the pipeline; this gate is built and calibrated first, deliberately, so the
+    tokenizer is proved against real DLDs before any LLM output exists.
+    """
+
+    @staticmethod
+    def _gate():
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "check_dld_normalization.py"
+        spec = importlib.util.spec_from_file_location("check_dld_normalization", tool_path)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        return gate
+
+    @staticmethod
+    def _mailbox_dld():
+        return (Path(__file__).resolve().parents[1] / "dlds" / "mailbox_ip_dld.md").read_text(encoding="utf-8")
+
+    def test_every_dld_passes_identity_normalization(self):
+        """Calibration: rewriting a DLD to itself must never trip a check."""
+        gate = self._gate()
+        for ip in gate.all_ips():
+            text = gate.normalized_path(ip).read_text(encoding="utf-8")
+            self.assertEqual(
+                gate.check_ip(ip, text, text, require_stamp=False),
+                [],
+                f"{ip}: identity normalization is not clean — the tokenizer false-positives",
+            )
+
+    def test_tokenizers_read_real_dld_content(self):
+        """A gate that parses nothing would also pass calibration trivially."""
+        gate = self._gate()
+        text = self._mailbox_dld()
+
+        self.assertIn("2 ns", gate.measurements(text))
+        self.assertIn("500 mhz", gate.measurements(text))
+
+        found = gate.identifiers(text)
+        for state in ("REJECT_FULL", "WAIT_SW_CLEAR", "CHECK_SPACE"):
+            self.assertIn(state, found)
+        # Prose acronyms are not identifiers, or restructuring prose would fail.
+        self.assertNotIn("FIFO", found)
+        self.assertNotIn("IPC", found)
+
+        # "one cycle" and "1 cycle" must compare equal across a prose->table rewrite.
+        self.assertEqual(gate.measurements("takes one cycle"), gate.measurements("takes 1 cycle"))
+
+    def test_gate_catches_altered_number_not_merely_missing_one(self):
+        """The most dangerous edit: a retyped timing in a doc stating it elsewhere.
+
+        `2 ns` appears many times in the DLD, so retyping one as `3 ns` leaves
+        the value present and a lost-value check sees nothing. Only checking the
+        other direction — a value that appears from nowhere — catches it.
+        """
+        gate = self._gate()
+        source = self._mailbox_dld()
+        mutated = source.replace("Accept message: 1 cycle = 2 ns.", "Accept message: 1 cycle = 3 ns.", 1)
+
+        self.assertNotEqual(source, mutated)
+        self.assertIn("2 ns", gate.measurements(mutated))  # still present, hence invisible to a lost-check
+        errors = gate.check_measurements(source, mutated)
+        self.assertTrue(any("invented" in e and "3 ns" in e for e in errors), errors)
+
+    def test_gate_catches_dropped_and_invented_identifiers(self):
+        gate = self._gate()
+        source = self._mailbox_dld()
+
+        dropped = source.replace("- `REJECT_FULL`\n", "", 1)
+        self.assertTrue(any("dropped" in e and "REJECT_FULL" in e for e in gate.check_identifiers(source, dropped)))
+
+        invented = source.replace("- `REJECT_FULL`\n", "- `REJECT_FULL`\n- `COALESCE_PENDING`\n", 1)
+        self.assertTrue(
+            any("invented" in e and "COALESCE_PENDING" in e for e in gate.check_identifiers(source, invented)),
+        )
+
+    def test_gate_catches_fsm_topology_and_count_drift(self):
+        gate = self._gate()
+        source = self._mailbox_dld()
+
+        recounted = source.replace("Total FSM/processes: 5.", "Total FSM/processes: 6.", 1)
+        self.assertTrue(any("count" in e for e in gate.check_fsm_parity(source, recounted)))
+
+        start, end = source.index("### 6.4 Doorbell FSM"), source.index("### 6.5 Interrupt Notify FSM")
+        deleted = source[:start] + source[end:]
+        self.assertTrue(any("doorbell" in e for e in gate.check_fsm_parity(source, deleted)))
+
+    def test_gate_refuses_a_wait_model_conjured_for_a_silent_interface(self):
+        """A wait model invented where the source states no blocking behavior."""
+        gate = self._gate()
+        silent = """### 4.5 Debug Observation Interface
+
+Fields:
+
+- `probe_id`
+"""
+        conjured = (
+            silent
+            + """
+Wait model:
+
+- Mode: `wait_for_response`
+- Requester: peer
+- Waits in: `register_access.READ_STATUS`
+- Resumes on: `register_access_complete`
+"""
+        )
+        errors = gate.check_wait_model_provenance(silent, conjured)
+        self.assertTrue(any("wait model" in e for e in errors), errors)
+
+        # Where the source *does* state blocking behavior, the same block is fine.
+        stated = silent + "\nThe requester blocks until the probe response returns.\n"
+        self.assertEqual(gate.check_wait_model_provenance(stated, conjured), [])
+
+    def test_gate_catches_silently_dropped_prose(self):
+        gate = self._gate()
+        source = self._mailbox_dld()
+        start, end = source.index("Some mailbox processes are naturally parallel"), source.index("## 4. Interfaces")
+        truncated = source[:start] + source[end:]
+
+        self.assertTrue(any("neither" in e for e in gate.check_unplaced_accounting(source, truncated)))
+
+        # Preserved verbatim under the Unplaced heading, the same content is accounted for.
+        rescued = truncated + f"\n{gate.UNPLACED_HEADING}\n\n" + source[start:end]
+        self.assertEqual(gate.check_unplaced_accounting(source, rescued), [])
+
+    def test_gate_allows_a_structure_only_reshape(self):
+        """The gate must not simply fail everything: renumbering is legal."""
+        gate = self._gate()
+        source = self._mailbox_dld()
+        reshaped = re.sub(r"^### 6\.(\d) ", lambda m: f"### 7.{m.group(1)} ", source, flags=re.MULTILINE)
+        reshaped = re.sub(r"^- `([A-Z_]+)`$", r"* `\1`", reshaped, flags=re.MULTILINE)
+
+        self.assertNotEqual(source, reshaped)
+        self.assertEqual(gate.check_ip("mailbox_ip", source, reshaped, require_stamp=False), [])
+
+    def test_unstamped_normalization_is_not_trusted(self):
+        """Mechanical checks cannot prove meaning survived; a human signs that."""
+        gate = self._gate()
+        text = self._mailbox_dld()
+        errors = gate.check_ip("no_such_ip", text, text, require_stamp=True)
+        self.assertTrue(any("stamp" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

@@ -23,11 +23,19 @@ description: Template-driven loop for generating and validating SimPy IP models.
 #         file existed at the START of this run (snapshot, not live): model_new
 #         is the greenfield generate path, model_exists is the brownfield amend
 #         path. They are mutually exclusive.
+#         src_dld_exists — gate a stage on whether the IP has an unnormalized
+#         author document (dlds/<ip>_dld.src.md). Independent of the two above.
+#   awaiting_human: true — a required tool stage whose failure means "a human
+#         step is pending", not "something is broken". The IP stops with an
+#         *awaiting* status instead of a failure, the way an agent stage with no
+#         profile does. Use it only where the pipeline cannot, in principle,
+#         satisfy the gate itself.
 #   scope: repo — run once after all changed IPs complete, not per IP
 #         (skipped by --skip-final-gate).
 
 inputs:
   dld_glob: dlds/*_dld.md
+  src_dld_glob: dlds/*_dld.src.md
   template_glob: templates/*.template.yaml
   draft_glob: templates/*.template.draft.yaml
   model_dir: src/ip_model_automation
@@ -36,6 +44,7 @@ inputs:
   reports_dir: reports
 
 agent_contract: agents/ip_model_generation_agent.md
+normalization_contract: agents/dld_normalization_agent.md
 
 # Named agent commands for the two `kind: agent` stages. Select one with
 # `python tools/auto_ip_pipeline.py --agent <name>` (or pass a raw command
@@ -53,6 +62,42 @@ agent_profiles:
   gemini: gemini --yolo
 
 stages:
+  - name: normalize_dld
+    kind: agent
+    command: external_agent_or_manual_edit
+    required: false
+    when: src_dld_exists
+    gates: [check_normalization]
+    max_attempts: 2
+    notes: >
+      Rewrite {src_dld} into the extractor-shaped {dld}, changing structure only —
+      never adding, removing, altering, or rewording an engineering claim. Content
+      that maps to no convention goes verbatim under "## Unplaced Source Content".
+      Contract in agents/dld_normalization_agent.md. Runs only for an IP whose
+      author document is not already in shape, and is skipped when the normalized
+      DLD already passes the fidelity gate.
+  - name: check_normalization
+    command: python tools/check_dld_normalization.py {ip} --no-stamp-check
+    required: true
+    when: src_dld_exists
+    notes: >
+      Deterministic fidelity gate — measurement/identifier conservation in both
+      directions, FSM name/count/state-set parity, wait-model provenance, and
+      unplaced accounting. This is the half an agent can satisfy, so it is what
+      drives the normalize_dld loop; the human stamp is checked by the next stage
+      instead. Gating the agent on the stamp would make its loop unwinnable.
+  - name: check_normalization_stamp
+    command: python tools/check_dld_normalization.py {ip}
+    required: true
+    when: src_dld_exists
+    awaiting_human: true
+    notes: >
+      The claim conservation cannot make: that the meaning survived. Earned per IP
+      by a human reading the diff and running
+      `python tools/check_dld_normalization.py --stamp <ip>`. Deliberately NOT
+      stamped by the pipeline — unlike stamp_provenance, which records a fact the
+      run itself establishes. An IP stops here as *awaiting* review, so nothing
+      downstream promotes on an unreviewed normalization.
   - name: parse_dld
     command: python tools/dld_to_template.py {dld}
     required: true
@@ -139,6 +184,7 @@ loop_policy:
   fail_on_unit_test_failure: true
 
 pass_criteria:
+  - normalized DLD faithful to its author source, and human-stamped (IPs with a .src.md only)
   - draft template and gaps report generated from DLD
   - promoted template has no TODO_REVIEW markers
   - template covers every DLD FSM and matching fsm_count

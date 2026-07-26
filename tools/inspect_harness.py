@@ -33,6 +33,7 @@ def inspect(repo_root: Path, harness_path: Path) -> list[str]:
         f"harness: {config.get('name')}",
         f"description: {config.get('description')}",
         f"agent_contract: {config.get('agent_contract')}",
+        f"normalization_contract: {config.get('normalization_contract')}",
         "stages:",
     ]
     for stage in config.get("stages", []):

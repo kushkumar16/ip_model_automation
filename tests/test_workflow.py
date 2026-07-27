@@ -409,12 +409,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("normalize_dld", pipeline.AGENT_PROMPT_BUILDERS)
         self.assertTrue((repo_root / harness["normalization_contract"]).is_file())
 
-        # Today's DLDs have no .src.md, so their context skips both stages —
-        # the pipeline they run is exactly the one they ran before the stage existed.
+        # An in-shape DLD has no .src.md, so its context skips both stages — the
+        # pipeline it runs is exactly the one it ran before the stage existed.
         ctx = pipeline.stage_context(harness, "mailbox_ip", repo_root / "dlds" / "mailbox_ip_dld.md")
         self.assertEqual(ctx["src_dld_exists"], "")
         self.assertTrue(ctx["src_dld"].endswith("mailbox_ip_dld.src.md"))
-        self.assertFalse(any(p.name.endswith(".src.md") for p in pipeline.discover_dld_sources()))
+
+        # Discovery may return an author source — that is how an off-shape IP
+        # enters at all — but it is never routed as the DLD itself.
+        for source in pipeline.discover_dld_sources():
+            self.assertFalse(pipeline.ensure_markdown_dld(source).name.endswith(".src.md"), source)
 
         # An agent is told to normalize, and told not to sign its own work.
         prompt = pipeline.normalize_prompt("mailbox_ip")
@@ -518,6 +522,64 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # Nothing else may quietly claim that exemption.
         awaiting = [n for n, s in stages.items() if s.get("awaiting_human")]
         self.assertEqual(awaiting, ["check_normalization_stamp"])
+
+    def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
+        """An IP whose only file is a .src.md must still be discovered and routed.
+
+        This is the case the stage exists for — a DLD arriving in some other
+        shape, for an IP that has nothing else yet — and it was invisible:
+        discovery globbed only `*_dld.md` and `*_dld.docx`, so the pipeline could
+        not see the document it was built to reshape.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        src = repo_root / "dlds" / "probe_only_ip_dld.src.md"
+        self.assertFalse(src.exists())
+        try:
+            src.write_text("# Probe\n\nProse an engineer wrote.\n", encoding="utf-8")
+
+            discovered = pipeline.discover_dld_sources()
+            self.assertIn(src, discovered)
+
+            # ...and it is routed as an input, never as the DLD itself: returning
+            # the source here would point every later stage at the author's file.
+            self.assertEqual(pipeline.ensure_markdown_dld(src).name, "probe_only_ip_dld.md")
+            self.assertEqual(pipeline.ip_stem(src), "probe_only_ip_dld")
+            self.assertEqual(pipeline.src_dld_path(src), src)
+
+            # Naming the normalized DLD is the natural thing to type; it does not
+            # exist yet, and refusing the argument would hide the real answer.
+            requested = pipeline.resolve_requested_dld(repo_root / "dlds" / "probe_only_ip_dld.md")
+            self.assertEqual(requested, src)
+        finally:
+            src.unlink(missing_ok=True)
+
+    def test_each_ip_is_processed_once_however_many_files_it_has(self):
+        """.docx, .src.md and .md are one IP, not three runs of it."""
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        src = repo_root / "dlds" / "mailbox_ip_dld.src.md"
+        self.assertFalse(src.exists())
+        try:
+            src.write_text("# Mailbox\n\nAuthor's original.\n", encoding="utf-8")
+            discovered = pipeline.discover_dld_sources()
+            stems = [pipeline.ip_stem(p) for p in discovered]
+            self.assertEqual(len(stems), len(set(stems)), "an IP was queued more than once")
+            # The author source outranks the file derived from it.
+            self.assertIn(src, discovered)
+            self.assertNotIn(repo_root / "dlds" / "mailbox_ip_dld.md", discovered)
+        finally:
+            src.unlink(missing_ok=True)
 
     def test_change_detection_covers_the_author_source(self):
         """Editing the .src.md must re-trigger its IP, or a corrected source is ignored."""

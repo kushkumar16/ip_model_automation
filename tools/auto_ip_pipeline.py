@@ -138,6 +138,24 @@ def docx_to_markdown(docx_path: Path) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+SRC_SUFFIX = "_dld.src.md"
+
+
+def ip_stem(source: Path) -> str:
+    """The ``<ip>_dld`` stem shared by an IP's .md, .src.md and .docx files.
+
+    ``Path.stem`` is wrong for an author source: ``mailbox_ip_dld.src.md`` stems
+    to ``mailbox_ip_dld.src``, which then grows a second suffix everywhere it is
+    used. One function so the three file kinds cannot disagree about which IP
+    they belong to.
+    """
+    name = source.name
+    if name.endswith(SRC_SUFFIX):
+        return name[: -len(".src.md")]
+    stem = source.stem
+    return stem if stem.endswith("_dld") else f"{stem}_dld"
+
+
 def ensure_markdown_dld(source: Path) -> Path:
     """Return the normalized markdown DLD path for a source, converting .docx first.
 
@@ -148,12 +166,19 @@ def ensure_markdown_dld(source: Path) -> Path:
     returned path is the normalized one either way, so every downstream stage
     reads the same file it always did, whether or not it exists yet: when it does
     not, the normalization gate is the stage that says so.
+
+    The same holds for a ``.src.md`` handed in directly: it is an *input* to
+    normalization, never the pipeline's DLD. Returning it here would point every
+    downstream stage at the author's original — the one file the contract says
+    must not be written.
     """
+    if source.name.endswith(SRC_SUFFIX):
+        return DLDS_DIR / f"{ip_stem(source)}.md"
     if source.suffix.lower() == ".md":
         return source
     if source.suffix.lower() != ".docx":
         raise SystemExit(f"unsupported DLD format: {source} (expected .md or .docx)")
-    stem = source.stem if source.stem.endswith("_dld") else f"{source.stem}_dld"
+    stem = ip_stem(source)
     src_path = DLDS_DIR / f"{stem}.src.md"
     converted = docx_to_markdown(source)
     # Conversion is deterministic, so an unchanged document must not rewrite the
@@ -188,33 +213,73 @@ def save_state(state: dict[str, str]) -> None:
 
 
 def discover_dld_sources() -> list[Path]:
-    """The DLDs the pipeline processes.
+    """One source file per IP, in the order a run should read them.
 
-    ``<ip>_dld.src.md`` files are deliberately *not* returned: an author's
-    unnormalized source is an input to the ``normalize_dld`` stage, not an IP of
-    its own. It does not match ``*_dld.md``, and it is picked up through
-    :func:`source_fingerprint` instead, so editing it re-triggers its IP.
+    An IP can be present as up to three files — the author's ``.docx``, the
+    author's ``.src.md``, and the normalized ``.md`` — and they are one IP, not
+    three. Returning each file separately would process the IP once per file: the
+    normal state of a normalized IP is *two* files, so that is not a corner case.
+
+    Preference order is most-authoritative-first: the ``.docx`` an author edits
+    beats the ``.src.md`` derived from it, which beats the ``.md`` derived from
+    that. A lone ``.src.md`` must be returned too, or a brand-new IP that arrives
+    in some other shape is invisible to the pipeline that exists to reshape it.
     """
-    return sorted(list(DLDS_DIR.glob("*_dld.md")) + list(DLDS_DIR.glob("*_dld.docx")))
+    by_ip: dict[str, Path] = {}
+    for pattern in ("*_dld.md", f"*{SRC_SUFFIX}", "*_dld.docx"):
+        for path in DLDS_DIR.glob(pattern):
+            if path.name.endswith(SRC_SUFFIX) and pattern == "*_dld.md":
+                continue  # `*_dld.md` must not swallow the author source
+            current = by_ip.get(ip_stem(path))
+            if current is None or _source_rank(path) < _source_rank(current):
+                by_ip[ip_stem(path)] = path
+    return [by_ip[key] for key in sorted(by_ip)]
+
+
+def resolve_requested_dld(path: Path) -> Path:
+    """Resolve an explicitly requested DLD to a file that exists.
+
+    Naming the normalized DLD is the natural thing to type, and for an IP that
+    has not been normalized yet that file does not exist. Fall back to its author
+    source rather than refusing: the pipeline's answer for that IP is "normalize
+    it first", which it can only say if it accepts the argument.
+    """
+    resolved = path.resolve()
+    if resolved.is_file():
+        return resolved
+    fallback = DLDS_DIR / f"{ip_stem(resolved)}.src.md"
+    return fallback if fallback.is_file() else resolved
+
+
+def _source_rank(path: Path) -> int:
+    if path.suffix.lower() == ".docx":
+        return 0
+    return 1 if path.name.endswith(SRC_SUFFIX) else 2
 
 
 def src_dld_path(source: Path) -> Path:
     """The author's unnormalized DLD for this source, whether or not it exists."""
-    stem = source.stem if source.stem.endswith("_dld") else f"{source.stem}_dld"
-    return DLDS_DIR / f"{stem}.src.md"
+    return DLDS_DIR / f"{ip_stem(source)}.src.md"
 
 
 def source_fingerprint(source: Path) -> str:
-    """Change-detection hash for a DLD: its own content plus its `.src.md`.
+    """Change-detection hash covering every file that feeds one IP's run.
 
-    Normalization has two inputs, so a run must be re-triggered by an edit to
-    either. Hashing only the normalized DLD would leave a corrected source
-    document silently unprocessed — the failure mode most likely to go unnoticed,
-    since the source is the file the engineer actually edits.
+    An IP can have up to three: the author's ``.docx``, the ``.src.md``, and the
+    normalized ``.md``. A run must be re-triggered by an edit to any of them —
+    hashing only one leaves a corrected source document silently unprocessed,
+    which is the failure most likely to go unnoticed, since the source is the
+    file the engineer actually edits. Files that do not exist contribute nothing,
+    so an IP with no author source hashes exactly as it did before the
+    normalization stage existed.
     """
-    digest = sha256(source)
-    src = src_dld_path(source)
-    return f"{digest}+{sha256(src)}" if src.is_file() else digest
+    stem = ip_stem(source)
+    candidates = [source, DLDS_DIR / f"{stem}.src.md", DLDS_DIR / f"{stem}.md"]
+    seen: list[Path] = []
+    for path in candidates:
+        if path.is_file() and path not in seen:
+            seen.append(path)
+    return "+".join(sha256(path) for path in seen)
 
 
 def state_key(path: Path) -> str:
@@ -620,7 +685,7 @@ def main(argv: list[str]) -> int:
     harness = load_harness()
     agent_cmd = resolve_agent_command(args.agent, args.agent_cmd, harness)
     state = load_state()
-    sources = [p.resolve() for p in args.dlds] if args.dlds else discover_dld_sources()
+    sources = [resolve_requested_dld(p) for p in args.dlds] if args.dlds else discover_dld_sources()
     for src in sources:
         if not src.is_file():
             raise SystemExit(f"DLD not found: {src}")

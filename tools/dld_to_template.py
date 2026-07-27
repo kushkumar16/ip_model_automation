@@ -327,12 +327,24 @@ def guess_direction(raw_name: str, block: list[str]) -> str:
     return TODO
 
 
-def extract_clock(text: str) -> tuple[int, int, list[str]]:
+def number(text: str) -> int | float:
+    """Parse a numeric literal, keeping it an int when it is a whole number.
+
+    Timing values are not always whole nanoseconds: an 800 MHz clock is 1.25
+    ns/cycle, and truncating that to 1 silently stores a wrong number — the
+    failure this repo's gates exist to prevent. Whole values stay ``int`` so
+    existing templates are byte-identical rather than churned to ``2.0``.
+    """
+    value = float(text)
+    return int(value) if value.is_integer() else value
+
+
+def extract_clock(text: str) -> tuple[int | float, int | float, list[str]]:
     gaps: list[str] = []
     mhz_match = re.search(r"([\d.]+)\s*MHz", text)
     ns_match = re.search(r"[Cc]ycle time:\s*([\d.]+)\s*ns", text)
-    clock_mhz = int(float(mhz_match.group(1))) if mhz_match else 0
-    cycle_ns = int(float(ns_match.group(1))) if ns_match else 0
+    clock_mhz = number(mhz_match.group(1)) if mhz_match else 0
+    cycle_ns = number(ns_match.group(1)) if ns_match else 0
     if not clock_mhz:
         clock_mhz = 500
         gaps.append("timing_model.clock_mhz not stated in DLD; defaulted to 500")
@@ -342,7 +354,11 @@ def extract_clock(text: str) -> tuple[int, int, list[str]]:
     return clock_mhz, cycle_ns, gaps
 
 
-OP_RE = re.compile(r"([A-Za-z][A-Za-z0-9/ \-]*?):\s*(\d+)\s*cycles?\s*=\s*(\d+)\s*ns")
+# The nanosecond side may be fractional: a whole number of cycles at a clock
+# that is not a whole number of nanoseconds (800 MHz -> 1.25 ns) produces
+# "2 cycles = 2.5 ns". Requiring an integer there silently dropped the operation
+# — the timing vanished from the template with nothing flagged.
+OP_RE = re.compile(r"([A-Za-z][A-Za-z0-9/ \-]*?):\s*(\d+)\s*cycles?\s*=\s*(\d+(?:\.\d+)?)\s*ns")
 
 
 def extract_timing_table(lines: list[str], fsm_names: list[str]) -> dict[str, list[dict[str, Any]]]:
@@ -365,7 +381,7 @@ def extract_timing_table(lines: list[str], fsm_names: list[str]) -> dict[str, li
                 continue
             fsm_name = snake(re.sub(r"\bFSMs?\b|\bprocess\b", "", cells[0], flags=re.IGNORECASE))
             ops = [
-                {"name": snake(m.group(1)), "cycles": int(m.group(2)), "ns": int(m.group(3))}
+                {"name": snake(m.group(1)), "cycles": int(m.group(2)), "ns": number(m.group(3))}
                 for m in OP_RE.finditer(cells[-1])
             ]
             if fsm_name and ops:

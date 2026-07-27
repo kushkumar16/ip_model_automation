@@ -56,8 +56,16 @@ normalization_contract: agents/dld_normalization_agent.md
 #   - exits when done (exit code is logged; the gates decide pass/fail).
 # The commands below are starting points — check the flags against the
 # CLI version you have installed.
+# "Auto-approve" has to cover running the repo's gates, not just editing files.
+# Every agent contract here ends with a self-check the agent is told to run
+# (check_dld_normalization.py, validate_dld_flow.py, ...). A profile that permits
+# edits but not commands leaves the agent asking for approval into a pipe nobody
+# is reading: it then reports done having verified nothing, which looks identical
+# to success until a gate fails later. Observed with `--permission-mode
+# acceptEdits` alone, which auto-approves only commands already allow-listed in
+# .claude/settings.json.
 agent_profiles:
-  claude: claude -p --permission-mode acceptEdits
+  claude: claude -p --permission-mode acceptEdits --allowedTools "Bash(python:*)"
   codex: codex exec --full-auto -
   gemini: gemini --yolo
 

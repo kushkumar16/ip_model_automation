@@ -11,7 +11,10 @@ agent, ...) or by a human — the gates judge the output, not the author.
 prompt to a shell command's stdin. To plug in, an agent command must:
 
 - run **non-interactively** (headless / auto-approve mode — no prompts for
-  permission or input),
+  permission or input). This must cover *running the repo's gate commands*, not
+  only editing files: every contract here ends with a self-check the agent is
+  told to run, and an agent that can edit but not execute reports done having
+  verified nothing,
 - **read the prompt from stdin** (the prompt is also saved to
   `reports/agent_requests/<ip>.<stage>.prompt.md` for manual replay),
 - be able to **create and edit files** under the repo root (model, tests,

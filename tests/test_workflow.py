@@ -17,7 +17,7 @@ from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, li
 
 class TestIpRegistryAndLayout(unittest.TestCase):
     def test_registry_has_all_ips_and_artifacts(self):
-        self.assertEqual(len(tuple(list_ips())), 11)
+        self.assertEqual(len(tuple(list_ips())), 12)
         repo_root = Path(__file__).resolve().parents[1]
         for ip_name in IP_ARTIFACTS:
             paths = resolve_artifacts(repo_root, ip_name)
@@ -41,6 +41,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             "mailbox_ip.py",
             "mailbox_irq_subsystem.py",
             "spi_master_ip.py",
+            "sram_ctrl_ip.py",
             "timer_ip.py",
         }
         self.assertEqual({path.name for path in package_dir.glob("*.py")}, expected)
@@ -76,7 +77,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
 
         templates = validator.discover_templates(repo_root)
-        self.assertEqual(len(templates), 11)
+        self.assertEqual(len(templates), 12)
         validator.validate_scaffolds(repo_root, templates)
 
     def test_prompt_pack_generator_emits_model_request(self):
@@ -111,7 +112,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
-        self.assertIn("templates: 11", text)
+        self.assertIn("templates: 12", text)
 
     def test_agent_profile_resolution_supports_any_vendor(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -409,12 +410,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("normalize_dld", pipeline.AGENT_PROMPT_BUILDERS)
         self.assertTrue((repo_root / harness["normalization_contract"]).is_file())
 
-        # Today's DLDs have no .src.md, so their context skips both stages —
-        # the pipeline they run is exactly the one they ran before the stage existed.
+        # An in-shape DLD has no .src.md, so its context skips both stages — the
+        # pipeline it runs is exactly the one it ran before the stage existed.
         ctx = pipeline.stage_context(harness, "mailbox_ip", repo_root / "dlds" / "mailbox_ip_dld.md")
         self.assertEqual(ctx["src_dld_exists"], "")
         self.assertTrue(ctx["src_dld"].endswith("mailbox_ip_dld.src.md"))
-        self.assertFalse(any(p.name.endswith(".src.md") for p in pipeline.discover_dld_sources()))
+
+        # Discovery may return an author source — that is how an off-shape IP
+        # enters at all — but it is never routed as the DLD itself.
+        for source in pipeline.discover_dld_sources():
+            self.assertFalse(pipeline.ensure_markdown_dld(source).name.endswith(".src.md"), source)
 
         # An agent is told to normalize, and told not to sign its own work.
         prompt = pipeline.normalize_prompt("mailbox_ip")
@@ -518,6 +523,64 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # Nothing else may quietly claim that exemption.
         awaiting = [n for n, s in stages.items() if s.get("awaiting_human")]
         self.assertEqual(awaiting, ["check_normalization_stamp"])
+
+    def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
+        """An IP whose only file is a .src.md must still be discovered and routed.
+
+        This is the case the stage exists for — a DLD arriving in some other
+        shape, for an IP that has nothing else yet — and it was invisible:
+        discovery globbed only `*_dld.md` and `*_dld.docx`, so the pipeline could
+        not see the document it was built to reshape.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        src = repo_root / "dlds" / "probe_only_ip_dld.src.md"
+        self.assertFalse(src.exists())
+        try:
+            src.write_text("# Probe\n\nProse an engineer wrote.\n", encoding="utf-8")
+
+            discovered = pipeline.discover_dld_sources()
+            self.assertIn(src, discovered)
+
+            # ...and it is routed as an input, never as the DLD itself: returning
+            # the source here would point every later stage at the author's file.
+            self.assertEqual(pipeline.ensure_markdown_dld(src).name, "probe_only_ip_dld.md")
+            self.assertEqual(pipeline.ip_stem(src), "probe_only_ip_dld")
+            self.assertEqual(pipeline.src_dld_path(src), src)
+
+            # Naming the normalized DLD is the natural thing to type; it does not
+            # exist yet, and refusing the argument would hide the real answer.
+            requested = pipeline.resolve_requested_dld(repo_root / "dlds" / "probe_only_ip_dld.md")
+            self.assertEqual(requested, src)
+        finally:
+            src.unlink(missing_ok=True)
+
+    def test_each_ip_is_processed_once_however_many_files_it_has(self):
+        """.docx, .src.md and .md are one IP, not three runs of it."""
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        src = repo_root / "dlds" / "mailbox_ip_dld.src.md"
+        self.assertFalse(src.exists())
+        try:
+            src.write_text("# Mailbox\n\nAuthor's original.\n", encoding="utf-8")
+            discovered = pipeline.discover_dld_sources()
+            stems = [pipeline.ip_stem(p) for p in discovered]
+            self.assertEqual(len(stems), len(set(stems)), "an IP was queued more than once")
+            # The author source outranks the file derived from it.
+            self.assertIn(src, discovered)
+            self.assertNotIn(repo_root / "dlds" / "mailbox_ip_dld.md", discovered)
+        finally:
+            src.unlink(missing_ok=True)
 
     def test_change_detection_covers_the_author_source(self):
         """Editing the .src.md must re-trigger its IP, or a corrected source is ignored."""
@@ -834,6 +897,61 @@ Wait model:
         self.assertNotEqual(source, reshaped)
         self.assertEqual(gate.check_ip("mailbox_ip", source, reshaped, require_stamp=False), [])
 
+    def test_fractional_cycle_times_survive_extraction(self):
+        """A clock that is not a whole number of nanoseconds must not lose timings.
+
+        Every DLD in the repo runs at 500 MHz — exactly 2 ns/cycle — so nothing
+        ever exercised a fractional cycle time. At 800 MHz (1.25 ns) the
+        extractor stored `cycle_time_ns: 1` and silently dropped every operation
+        whose nanosecond figure was fractional: six of eight timings vanished
+        from the template with nothing flagged.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("dld_to_template", repo_root / "tools" / "dld_to_template.py")
+        extractor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extractor)
+
+        clock_mhz, cycle_ns, _gaps = extractor.extract_clock("Core clock: 800 MHz.\nCycle time: 1.25 ns.\n")
+        self.assertEqual(clock_mhz, 800)
+        self.assertEqual(cycle_ns, 1.25)
+
+        row = [
+            "| FSM/process | Runs as | Delay model |",
+            "| --- | --- | --- |",
+            "| Bank Scheduler FSM | Parallel process | Pick the next bank: 3 cycles = 3.75 ns. "
+            "SRAM read access: 4 cycles = 5 ns. |",
+        ]
+        ops = extractor.extract_timing_table(row, ["bank_scheduler"])["bank_scheduler"]
+        self.assertEqual(
+            [(op["name"], op["cycles"], op["ns"]) for op in ops],
+            [("pick_the_next_bank", 3, 3.75), ("sram_read_access", 4, 5)],
+        )
+        # A whole number stays an int, so existing templates are not churned to 5.0.
+        self.assertIsInstance(ops[1]["ns"], int)
+
+    def test_timing_coherence_accepts_fractional_but_still_catches_slips(self):
+        """The gate demanded an integer ns/cycle, so it rejected correct values."""
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("template_lint", repo_root / "tools" / "template_lint.py")
+        lint = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lint)
+
+        def timing(cycle_ns, ns):
+            return {
+                "timing_model": {
+                    "clock_mhz": 800,
+                    "cycle_time_ns": cycle_ns,
+                    "fsm_process_delays": [{"fsm": "x", "operations": [{"name": "op", "cycles": 2, "ns": ns}]}],
+                    "end_to_end_paths": [],
+                }
+            }
+
+        self.assertEqual(lint.timing_coherence_errors(timing(1.25, 2.5)), [])
+        # The truncation the old extractor produced is now itself a lint failure.
+        self.assertTrue(any("1.25" in e for e in lint.timing_coherence_errors(timing(1, 2))))
+        # And a genuine transcription slip still fails.
+        self.assertTrue(any("op" in e for e in lint.timing_coherence_errors(timing(1.25, 3.0))))
+
     def test_hand_normalized_off_shape_document_passes_every_check(self):
         """The gate must accept a real reshape, or the stage it guards is unusable."""
         gate = self._gate()
@@ -895,6 +1013,84 @@ Wait model:
         stated = "### 4.1 Doorbell Interface\n\nThe requester blocks until the doorbell is acknowledged.\n"
         shaped = stated + "\nWait model:\n\n- Mode: `wait_for_ack_inline`\n"
         self.assertEqual(gate.check_identifiers(stated, shaped), [])
+
+    def test_wait_model_provenance_finds_its_section_by_content(self):
+        """Heading matching failed on exactly the documents the stage is for.
+
+        An off-shape source is one that does not use the extractor's headings, so
+        a section called "3.1 Request port" matched no normalized "Request
+        Interface" and the search fell back to the whole document — where some
+        form of "wait" appears in nearly any DLD. The check passed on evidence
+        from an unrelated section, which is no check at all.
+        """
+        gate = self._gate()
+        source = """## 3.1 Request port
+
+The producer presents a request. If the queue is full the controller drops
+req_ready and the requester must hold its request until space appears.
+
+## 3.2 Debug port
+
+Counters are readable at any time.
+"""
+        # Wording is preserved, as the contract requires — that is the signal
+        # content matching relies on. Only the heading differs.
+        normalized = """### 3.1 Request Interface
+
+The producer presents a request.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Note: if the queue is full the controller drops req_ready and the requester
+  must hold its request until space appears.
+"""
+        title, body = gate.match_source_section("3.1 Request Interface", normalized, source)
+        self.assertIn("Request port", title, "content matching failed across differing headings")
+        self.assertIn("until space appears", body)
+        self.assertEqual(gate.check_wait_model_provenance(source, normalized), [])
+
+        # A silent interface must still be caught, and not rescued by prose
+        # elsewhere in the document.
+        silent = source.replace(
+            "If the queue is full the controller drops\nreq_ready and the requester must hold its "
+            "request until space appears.",
+            "Requests are presented on this port.",
+        )
+        quiet_normalized = normalized.replace(
+            "- Note: if the queue is full the controller drops req_ready and the requester\n"
+            "  must hold its request until space appears.\n",
+            "",
+        )
+        self.assertTrue(
+            gate.check_wait_model_provenance(silent, quiet_normalized),
+            "a wait model conjured for a silent interface must fail",
+        )
+
+    def test_blocking_language_is_matched_as_whole_words(self):
+        """`req_ready` is a signal name, and "this block" is a noun."""
+        gate = self._gate()
+        self.assertEqual(gate.blocking_hits("| req_ready | out | controller can accept |"), 0)
+        self.assertEqual(gate.blocking_hits("It is the block that decides bandwidth."), 1)  # still a word
+        self.assertGreaterEqual(gate.blocking_hits("The requester blocks until the response returns."), 2)
+
+        evidence = gate.blocking_evidence(
+            "| req_ready | out | accept |\nThe requester stalls until an entry frees up.\n"
+        )
+        self.assertIn("stalls until", evidence)
+
+    def test_review_report_gives_the_stamper_something_to_read(self):
+        """The stamp asks for a judgement; the report is the material for it."""
+        gate = self._gate()
+        source, normalized = self._fixture_pair()
+        report = gate.build_report("completion_ip", source, normalized, [])
+
+        self.assertIn("Where each source section landed", report)
+        self.assertIn("Unplaced source content", report)
+        # The map must actually pair sections, not list them.
+        self.assertIn("| 1 Why This Block Exists |", report)
+        # And it must say plainly what it cannot establish.
+        self.assertIn("cannot tell you", report)
 
     def test_gate_catches_a_state_attached_to_the_wrong_fsm(self):
         """Conservation cannot see this; the extractor can.

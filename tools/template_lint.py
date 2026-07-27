@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -179,11 +180,15 @@ def timing_coherence_errors(template: dict[str, Any]) -> list[str]:
     clock = timing.get("clock_mhz")
     cycle_ns = timing.get("cycle_time_ns")
     if isinstance(clock, (int, float)) and clock > 0 and isinstance(cycle_ns, (int, float)):
-        # one cycle at C MHz is 1000/C ns
-        if round(1000 / clock) != cycle_ns:
+        # One cycle at C MHz is 1000/C ns, which is often not a whole number:
+        # 800 MHz is 1.25 ns. Rounding the expectation to an integer made this
+        # check demand a wrong value from any clock that is not a whole number
+        # of nanoseconds, so it compares the real quotient within tolerance.
+        expected = 1000 / clock
+        if not math.isclose(expected, cycle_ns, rel_tol=1e-9, abs_tol=1e-9):
             errors.append(
                 f"timing_model: cycle_time_ns={cycle_ns} disagrees with clock_mhz={clock} "
-                f"(expected {round(1000 / clock)} ns/cycle)"
+                f"(expected {expected:g} ns/cycle)"
             )
     if not isinstance(cycle_ns, (int, float)):
         return errors
@@ -195,19 +200,27 @@ def timing_coherence_errors(template: dict[str, Any]) -> list[str]:
             if not isinstance(op, dict):
                 continue
             cycles, ns = op.get("cycles"), op.get("ns")
-            if isinstance(cycles, (int, float)) and isinstance(ns, (int, float)) and ns != cycles * cycle_ns:
+            if (
+                isinstance(cycles, (int, float))
+                and isinstance(ns, (int, float))
+                and not math.isclose(ns, cycles * cycle_ns, rel_tol=1e-9, abs_tol=1e-9)
+            ):
                 errors.append(
                     f"timing_model.{entry.get('fsm')}.{op.get('name')}: "
-                    f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns}"
+                    f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns:g}"
                 )
     for path in timing.get("end_to_end_paths", []):
         if not isinstance(path, dict):
             continue
         cycles, ns = path.get("cycles"), path.get("ns")
-        if isinstance(cycles, (int, float)) and isinstance(ns, (int, float)) and ns != cycles * cycle_ns:
+        if (
+            isinstance(cycles, (int, float))
+            and isinstance(ns, (int, float))
+            and not math.isclose(ns, cycles * cycle_ns, rel_tol=1e-9, abs_tol=1e-9)
+        ):
             errors.append(
                 f"timing_model.end_to_end_paths.{path.get('name')}: "
-                f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns}"
+                f"ns={ns} but cycles={cycles} x cycle_time_ns={cycle_ns} = {cycles * cycle_ns:g}"
             )
     return errors
 

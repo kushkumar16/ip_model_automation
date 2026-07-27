@@ -12,13 +12,20 @@ authoritative reference):
 
   - ``kind: tool`` stages run their ``command`` from the repo root with
     ``{placeholder}`` substitution ({ip}, {dld}, {template}, {model_dir}, ...).
-  - ``kind: agent`` stages (``review_template``, ``agent_implementation``)
-    need an LLM or a human. Their ``gates`` — other tool stages — decide the
-    outcome: if the gates already pass the agent is skipped; otherwise the
-    agent runs and the gates re-run, up to ``max_attempts`` (default
-    ``loop_policy.max_iterations``).
+  - ``kind: agent`` stages (``normalize_dld``, ``review_template``,
+    ``agent_implementation``) need an LLM or a human. Their ``gates`` — other
+    tool stages — decide the outcome: if the gates already pass the agent is
+    skipped; otherwise the agent runs and the gates re-run, up to
+    ``max_attempts`` (default ``loop_policy.max_iterations``).
   - ``when: model_missing`` stages are skipped once the IP has a model file
     (scaffolds never overwrite an implemented model).
+  - ``when: src_dld_exists`` stages run only for an IP that has an
+    unnormalized ``dlds/<ip>_dld.src.md``; an in-shape DLD skips them. A
+    ``.docx`` DLD always has one — its conversion output *is* the author
+    source.
+  - ``awaiting_human: true`` marks a required stage whose failure means a human
+    step is pending (the normalization review stamp), so the IP is reported as
+    *awaiting* rather than failed.
   - ``scope: repo`` stages run once after every changed IP completes.
 
 Agent stages: by default the runner writes a ready-to-send prompt to
@@ -34,7 +41,9 @@ The prompt is piped to the command's stdin; while the gates fail, the agent
 is re-invoked with the failure log.
 
 Change detection hashes DLD sources into ``reports/.dld_pipeline_state.json``
-(gitignored); an IP is only marked processed after its full chain passes.
+(gitignored); an IP is only marked processed after its full chain passes. The
+hash covers the IP's ``.src.md`` too, where one exists, so editing the author's
+document re-triggers normalization.
 """
 
 from __future__ import annotations
@@ -59,6 +68,7 @@ AGENT_REQUEST_DIR = REPORTS_DIR / "agent_requests"
 HARNESS_PATH = REPO_ROOT / "harness" / "ip_generation_loop.yaml"
 SKILL_PATH = REPO_ROOT / "skills" / "ip-model-generation" / "SKILL.md"
 AGENT_CONTRACT_PATH = REPO_ROOT / "agents" / "ip_model_generation_agent.md"
+NORMALIZATION_CONTRACT_PATH = REPO_ROOT / "agents" / "dld_normalization_agent.md"
 
 
 def _load_tool(module_name: str):
@@ -129,16 +139,29 @@ def docx_to_markdown(docx_path: Path) -> str:
 
 
 def ensure_markdown_dld(source: Path) -> Path:
-    """Return a markdown DLD path for the given source, converting .docx if needed."""
+    """Return the normalized markdown DLD path for a source, converting .docx first.
+
+    A ``.docx`` DLD is by definition written in whatever shape its author chose —
+    Word offers no way to write the extractor's conventions and no reason to
+    guess them — so its conversion lands in ``<ip>_dld.src.md``, the author
+    source, and ``normalize_dld`` is what produces ``<ip>_dld.md`` from it. The
+    returned path is the normalized one either way, so every downstream stage
+    reads the same file it always did, whether or not it exists yet: when it does
+    not, the normalization gate is the stage that says so.
+    """
     if source.suffix.lower() == ".md":
         return source
     if source.suffix.lower() != ".docx":
         raise SystemExit(f"unsupported DLD format: {source} (expected .md or .docx)")
     stem = source.stem if source.stem.endswith("_dld") else f"{source.stem}_dld"
-    md_path = DLDS_DIR / f"{stem}.md"
-    md_path.write_text(docx_to_markdown(source), encoding="utf-8")
-    print(f"  converted {source.name} -> {md_path.relative_to(REPO_ROOT)}")
-    return md_path
+    src_path = DLDS_DIR / f"{stem}.src.md"
+    converted = docx_to_markdown(source)
+    # Conversion is deterministic, so an unchanged document must not rewrite the
+    # file — that would break the normalization stamp for no reason.
+    if not src_path.is_file() or src_path.read_text(encoding="utf-8") != converted:
+        src_path.write_text(converted, encoding="utf-8")
+        print(f"  converted {source.name} -> {src_path.relative_to(REPO_ROOT)} (author source)")
+    return DLDS_DIR / f"{stem}.md"
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +188,33 @@ def save_state(state: dict[str, str]) -> None:
 
 
 def discover_dld_sources() -> list[Path]:
+    """The DLDs the pipeline processes.
+
+    ``<ip>_dld.src.md`` files are deliberately *not* returned: an author's
+    unnormalized source is an input to the ``normalize_dld`` stage, not an IP of
+    its own. It does not match ``*_dld.md``, and it is picked up through
+    :func:`source_fingerprint` instead, so editing it re-triggers its IP.
+    """
     return sorted(list(DLDS_DIR.glob("*_dld.md")) + list(DLDS_DIR.glob("*_dld.docx")))
+
+
+def src_dld_path(source: Path) -> Path:
+    """The author's unnormalized DLD for this source, whether or not it exists."""
+    stem = source.stem if source.stem.endswith("_dld") else f"{source.stem}_dld"
+    return DLDS_DIR / f"{stem}.src.md"
+
+
+def source_fingerprint(source: Path) -> str:
+    """Change-detection hash for a DLD: its own content plus its `.src.md`.
+
+    Normalization has two inputs, so a run must be re-triggered by an edit to
+    either. Hashing only the normalized DLD would leave a corrected source
+    document silently unprocessed — the failure mode most likely to go unnoticed,
+    since the source is the file the engineer actually edits.
+    """
+    digest = sha256(source)
+    src = src_dld_path(source)
+    return f"{digest}+{sha256(src)}" if src.is_file() else digest
 
 
 def state_key(path: Path) -> str:
@@ -222,6 +271,40 @@ def review_prompt(ip_name: str, extra_context: str = "") -> str:
             f" dlds/{ip_name}_dld.md",
             f"5. When both pass with no TODO_REVIEW left, copy the draft to templates/{ip_name}.template.yaml",
             "   and re-run the coverage check with --strict on the promoted file.",
+            extra_context,
+        ]
+    )
+
+
+def normalize_prompt(ip_name: str, extra_context: str = "") -> str:
+    """Prompt for the normalize_dld stage: reshape the author's DLD, change nothing.
+
+    The whole task description is the contract plus the extraction rules, so the
+    prompt stays short on purpose — restating the permitted and forbidden edits
+    here would create a second place for them to drift.
+    """
+    return "\n".join(
+        [
+            f"Work in the repository at {REPO_ROOT}.",
+            f"Follow the agent contract in {NORMALIZATION_CONTRACT_PATH.relative_to(REPO_ROOT).as_posix()}",
+            "and the target shape defined in",
+            "skills/ip-model-generation/references/dld_extraction_rules.md.",
+            "",
+            f"Task: rewrite dlds/{ip_name}_dld.src.md into dlds/{ip_name}_dld.md in the shape the",
+            "extractor reads, changing structure only — never adding, removing, or altering an",
+            "engineering claim, and never rewording one.",
+            "",
+            f"1. Read dlds/{ip_name}_dld.src.md. Do not edit it; it is the author's original.",
+            f"2. Write dlds/{ip_name}_dld.md. Move statements to the sections the extractor looks in;",
+            "   preserve their wording. Anything mapping to no convention goes verbatim under",
+            '   "## Unplaced Source Content" — never dropped.',
+            "3. Leave out any wait model the source does not state, and record ambiguities as Open",
+            "   Items rather than resolving them.",
+            f"4. Run: python tools/check_dld_normalization.py {ip_name} --no-stamp-check",
+            f"5. Run: python tools/dld_to_template.py dlds/{ip_name}_dld.md",
+            "",
+            "Do not run --stamp. The stamp is a human confirming the meaning survived; stamping",
+            "your own normalization would void the only judgment gate this stage has.",
             extra_context,
         ]
     )
@@ -335,19 +418,27 @@ AGENT_STAGE_MARKER = "external_agent_or_manual_edit"
 
 # Prompt builders for agent stages, keyed by harness stage name.
 AGENT_PROMPT_BUILDERS = {
+    "normalize_dld": normalize_prompt,
     "review_template": review_prompt,
     "agent_implementation": implementation_prompt,
     "amend_implementation": amend_prompt,
 }
 
 # Conditions usable as a stage's `when:` field, keyed by condition name.
-# Both read a snapshot (`model_preexisted`) taken when the per-IP context is
-# built, BEFORE any stage runs — so `generate_scaffold` creating the model file
-# does not flip `model_exists` mid-run. This is what separates the greenfield
-# (generate) path from the brownfield (amend) path.
+# `model_new`/`model_exists` read a snapshot (`model_preexisted`) taken when the
+# per-IP context is built, BEFORE any stage runs — so `generate_scaffold`
+# creating the model file does not flip `model_exists` mid-run. This is what
+# separates the greenfield (generate) path from the brownfield (amend) path, and
+# those two are mutually exclusive.
+#
+# `src_dld_exists` is independent of both: it asks whether this IP has an
+# unnormalized source document at all. An in-shape DLD has no `.src.md`, so the
+# normalization stage and its gate skip entirely and that IP's pipeline is
+# exactly what it was before the stage existed.
 STAGE_CONDITIONS = {
     "model_new": lambda ctx: not ctx.get("model_preexisted"),
     "model_exists": lambda ctx: bool(ctx.get("model_preexisted")),
+    "src_dld_exists": lambda ctx: bool(ctx.get("src_dld_exists")),
 }
 
 
@@ -380,9 +471,12 @@ def stage_context(harness: dict, ip_name: str | None = None, dld_md: Path | None
     }
     if ip_name is not None and dld_md is not None:
         model_file = Path(ctx["model_dir"]) / f"{ip_name}.py"
+        src_dld = src_dld_path(dld_md)
         ctx.update(
             ip=ip_name,
             dld=str(dld_md),
+            src_dld=str(src_dld),
+            src_dld_exists="1" if src_dld.is_file() else "",
             template=str(TEMPLATES_DIR / f"{ip_name}.template.yaml"),
             draft=str(TEMPLATES_DIR / f"{ip_name}.template.draft.yaml"),
             model_file=str(model_file),
@@ -485,6 +579,10 @@ def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
             ok, out = run_stage_command(stage, ctx)
             gate_results[name] = ok
             if not ok:
+                if stage.get("awaiting_human"):
+                    # Not a defect — a human step the pipeline cannot do for itself.
+                    print(out[-1000:])
+                    return f"awaiting {name}"
                 if stage.get("required", True):
                     print(out[-2000:])
                     return f"failed: {name}"
@@ -527,7 +625,9 @@ def main(argv: list[str]) -> int:
         if not src.is_file():
             raise SystemExit(f"DLD not found: {src}")
 
-    changed = [src for src in sources if args.force or args.dlds or state.get(state_key(src)) != sha256(src)]
+    changed = [
+        src for src in sources if args.force or args.dlds or state.get(state_key(src)) != source_fingerprint(src)
+    ]
     if not changed:
         print("no new or modified DLDs; nothing to do")
         return 0
@@ -538,7 +638,7 @@ def main(argv: list[str]) -> int:
         status = process_dld(src, harness, agent_cmd)
         statuses[src.name] = status
         if status == "complete":
-            state[state_key(src)] = sha256(src)
+            state[state_key(src)] = source_fingerprint(src)
             save_state(state)
 
     completed = [name for name, status in statuses.items() if status == "complete"]

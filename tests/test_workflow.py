@@ -386,6 +386,163 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         prompt = pipeline.amend_prompt("mailbox_ip")
         self.assertIn("mailbox_ip", prompt)
 
+    def test_normalize_stage_is_wired_and_skips_in_shape_dlds(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        # The stage runs only for an IP whose author document is not in shape.
+        self.assertTrue(pipeline.STAGE_CONDITIONS["src_dld_exists"]({"src_dld_exists": "1"}))
+        self.assertFalse(pipeline.STAGE_CONDITIONS["src_dld_exists"]({"src_dld_exists": ""}))
+
+        harness = pipeline.load_harness()
+        stages = [s["name"] for s in harness["stages"]]
+        stages_by_name = {s["name"]: s for s in harness["stages"]}
+        self.assertLess(stages.index("normalize_dld"), stages.index("parse_dld"))
+        self.assertLess(stages.index("check_normalization"), stages.index("parse_dld"))
+        for name in ("normalize_dld", "check_normalization"):
+            self.assertEqual(stages_by_name[name]["when"], "src_dld_exists")
+        self.assertIn("check_normalization", stages_by_name["normalize_dld"]["gates"])
+        self.assertIn("normalize_dld", pipeline.AGENT_PROMPT_BUILDERS)
+        self.assertTrue((repo_root / harness["normalization_contract"]).is_file())
+
+        # Today's DLDs have no .src.md, so their context skips both stages —
+        # the pipeline they run is exactly the one they ran before the stage existed.
+        ctx = pipeline.stage_context(harness, "mailbox_ip", repo_root / "dlds" / "mailbox_ip_dld.md")
+        self.assertEqual(ctx["src_dld_exists"], "")
+        self.assertTrue(ctx["src_dld"].endswith("mailbox_ip_dld.src.md"))
+        self.assertFalse(any(p.name.endswith(".src.md") for p in pipeline.discover_dld_sources()))
+
+        # An agent is told to normalize, and told not to sign its own work.
+        prompt = pipeline.normalize_prompt("mailbox_ip")
+        self.assertIn("dlds/mailbox_ip_dld.src.md", prompt)
+        self.assertIn("agents/dld_normalization_agent.md", prompt)
+        self.assertIn("Do not run --stamp", prompt)
+
+    def test_docx_conversion_becomes_the_author_source(self):
+        """A Word DLD is off-shape by construction, so its conversion is the source.
+
+        Word offers no way to write the extractor's markdown conventions, so
+        landing the conversion straight on `<ip>_dld.md` and parsing it was always
+        optimistic. It now lands on `<ip>_dld.src.md` and normalization produces
+        the file the pipeline reads.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        # The .docx itself is never read here — only the routing is under test.
+        converted = "# Probe IP\n\nSome prose an engineer wrote in Word.\n"
+        original = pipeline.docx_to_markdown
+        src = repo_root / "dlds" / "probe_ip_dld.src.md"
+        try:
+            pipeline.docx_to_markdown = lambda _path: converted
+            returned = pipeline.ensure_markdown_dld(repo_root / "dlds" / "probe_ip_dld.docx")
+
+            self.assertEqual(returned.name, "probe_ip_dld.md", "downstream stages must still read the normalized DLD")
+            self.assertFalse(returned.exists(), "conversion must not fabricate a normalized DLD")
+            self.assertTrue(src.is_file())
+            self.assertEqual(src.read_text(encoding="utf-8"), converted)
+
+            # Re-converting an unchanged document must not rewrite the file: that
+            # would break the normalization stamp for no reason.
+            before = src.stat().st_mtime_ns
+            pipeline.ensure_markdown_dld(repo_root / "dlds" / "probe_ip_dld.docx")
+            self.assertEqual(src.stat().st_mtime_ns, before)
+        finally:
+            pipeline.docx_to_markdown = original
+            src.unlink(missing_ok=True)
+
+    def test_promotion_requires_a_stamped_normalization(self):
+        """--strict is the promotion gate, so it is where the stamp is required."""
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "check_template_coverage", repo_root / "tools" / "check_template_coverage.py"
+        )
+        coverage_tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(coverage_tool)
+
+        dld = repo_root / "dlds" / "completion_ip_dld.md"
+        template = repo_root / "templates" / "completion_ip.template.yaml"
+        src = repo_root / "dlds" / "completion_ip_dld.src.md"
+        fixture = Path(__file__).resolve().parent / "fixtures" / "normalization" / "completion_ip_dld.src.md"
+
+        # With no author source there is nothing to be faithful to: unchanged.
+        self.assertFalse(src.exists())
+        _report, errors = coverage_tool.coverage(template, dld, strict=True)
+        self.assertEqual(errors, [])
+
+        try:
+            src.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            _report, errors = coverage_tool.coverage(template, dld, strict=True)
+            self.assertTrue(any("stamp" in e for e in errors), errors)
+
+            # Reporting mode must stay a report — only promotion is gated.
+            _report, lenient = coverage_tool.coverage(template, dld, strict=False)
+            self.assertEqual(lenient, [])
+        finally:
+            src.unlink(missing_ok=True)
+
+    def test_normalization_review_is_a_pause_not_a_failure(self):
+        """The agent loop must be winnable, and the human step must read as pending."""
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        stages = {s["name"]: s for s in pipeline.load_harness()["stages"]}
+
+        # The agent is gated on the half it can satisfy; gating it on the stamp
+        # would make it retry until max_attempts and fail on a human's absence.
+        self.assertIn("--no-stamp-check", stages["check_normalization"]["command"])
+        self.assertEqual(stages["normalize_dld"]["gates"], ["check_normalization"])
+
+        # The stamp is a separate, required stage that pauses rather than fails.
+        stamp_stage = stages["check_normalization_stamp"]
+        self.assertNotIn("--no-stamp-check", stamp_stage["command"])
+        self.assertTrue(stamp_stage["required"])
+        self.assertTrue(stamp_stage["awaiting_human"])
+        self.assertEqual(stamp_stage["when"], "src_dld_exists")
+        names = [s["name"] for s in pipeline.load_harness()["stages"]]
+        self.assertLess(names.index("check_normalization"), names.index("check_normalization_stamp"))
+        self.assertLess(names.index("check_normalization_stamp"), names.index("parse_dld"))
+
+        # Nothing else may quietly claim that exemption.
+        awaiting = [n for n, s in stages.items() if s.get("awaiting_human")]
+        self.assertEqual(awaiting, ["check_normalization_stamp"])
+
+    def test_change_detection_covers_the_author_source(self):
+        """Editing the .src.md must re-trigger its IP, or a corrected source is ignored."""
+        repo_root = Path(__file__).resolve().parents[1]
+        tool_path = repo_root / "tools" / "auto_ip_pipeline.py"
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", tool_path)
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        dld = repo_root / "dlds" / "mailbox_ip_dld.md"
+        src = pipeline.src_dld_path(dld)
+        self.assertFalse(src.exists(), f"{src.name} is not expected in the repo")
+
+        without_source = pipeline.source_fingerprint(dld)
+        self.assertEqual(without_source, pipeline.sha256(dld))
+        try:
+            src.write_text("draft one\n", encoding="utf-8")
+            with_source = pipeline.source_fingerprint(dld)
+            self.assertNotEqual(with_source, without_source)
+            src.write_text("draft two\n", encoding="utf-8")
+            self.assertNotEqual(pipeline.source_fingerprint(dld), with_source)
+        finally:
+            src.unlink(missing_ok=True)
+
     def test_template_diff_classifies_changes(self):
         repo_root = Path(__file__).resolve().parents[1]
         tool_path = repo_root / "tools" / "diff_template.py"
@@ -544,6 +701,22 @@ class TestDldNormalizationGate(unittest.TestCase):
     def _mailbox_dld():
         return (Path(__file__).resolve().parents[1] / "dlds" / "mailbox_ip_dld.md").read_text(encoding="utf-8")
 
+    @staticmethod
+    def _fixture_pair():
+        """A whole document reshaped by hand: off-shape source, extractor-shaped result.
+
+        Calibration proves the tokenizer does not false-positive on an identity
+        rewrite, which is a weaker claim than it sounds — every check passes
+        trivially when nothing moved. This pair is the real exercise: different
+        headings, states in a table, timing and blocking behavior in prose, no
+        code formatting anywhere, and front matter that belongs in no section.
+        """
+        fixtures = Path(__file__).resolve().parent / "fixtures" / "normalization"
+        return (
+            (fixtures / "completion_ip_dld.src.md").read_text(encoding="utf-8"),
+            (fixtures / "completion_ip_dld.md").read_text(encoding="utf-8"),
+        )
+
     def test_every_dld_passes_identity_normalization(self):
         """Calibration: rewriting a DLD to itself must never trip a check."""
         gate = self._gate()
@@ -660,6 +833,99 @@ Wait model:
 
         self.assertNotEqual(source, reshaped)
         self.assertEqual(gate.check_ip("mailbox_ip", source, reshaped, require_stamp=False), [])
+
+    def test_hand_normalized_off_shape_document_passes_every_check(self):
+        """The gate must accept a real reshape, or the stage it guards is unusable."""
+        gate = self._gate()
+        source, normalized = self._fixture_pair()
+
+        self.assertNotIn("States:", source)  # the source really is off-shape
+        self.assertIn("States:", normalized)
+        self.assertIn(gate.UNPLACED_HEADING, normalized)
+        # ...and marks up none of its signal names, unlike the normalized file.
+        self.assertNotIn("cpl_ready", gate.identifiers(source))
+        self.assertIn("cpl_ready", gate.identifiers(normalized))
+
+        self.assertEqual(gate.check_ip("completion_ip", source, normalized, require_stamp=False), [])
+
+    def test_normalized_fixture_is_what_the_extractor_actually_reads(self):
+        """Pin the fixture to reality: it must extract like the production DLD.
+
+        Without this, the fixture could drift into a document that satisfies the
+        fidelity gate while being useless to the parser downstream — which would
+        make the test above prove nothing worth proving.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("dld_to_template", repo_root / "tools" / "dld_to_template.py")
+        extractor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extractor)
+
+        _source, normalized = self._fixture_pair()
+        production = (repo_root / "dlds" / "completion_ip_dld.md").read_text(encoding="utf-8")
+
+        def shape(text):
+            lines = text.splitlines()
+            return (
+                [f["name"] for f in extractor.extract_fsms(lines)],
+                [f["states"] for f in extractor.extract_fsms(lines)],
+                [i["name"] for i in extractor.extract_interfaces(lines)],
+            )
+
+        self.assertEqual(shape(normalized), shape(production))
+
+    def test_conservation_ignores_markup_but_not_invention(self):
+        """Backticks are shape. Adding or removing them is not a content change.
+
+        Comparing *marked* identifier sets made an author who writes plain prose
+        fail with dozens of invented-name errors — for a document in which every
+        name was present. The invention check now asks whether the name appears in
+        the source at all, which is what "hallucinated" actually means.
+        """
+        gate = self._gate()
+        dld = self._mailbox_dld()
+
+        self.assertEqual(gate.check_identifiers(dld.replace("`", ""), dld), [])
+        self.assertEqual(gate.check_identifiers(dld, dld.replace("`", "")), [])
+
+        conjured = dld.replace("- `REJECT_FULL`", "- `REJECT_FULL`\n- `COALESCE_PENDING`", 1)
+        self.assertTrue(any("COALESCE_PENDING" in e for e in gate.check_identifiers(dld, conjured)))
+
+        # A wait mode is the extractor's vocabulary, not a name: writing the
+        # `Mode:` line for prose-stated blocking must not read as invention.
+        stated = "### 4.1 Doorbell Interface\n\nThe requester blocks until the doorbell is acknowledged.\n"
+        shaped = stated + "\nWait model:\n\n- Mode: `wait_for_ack_inline`\n"
+        self.assertEqual(gate.check_identifiers(stated, shaped), [])
+
+    def test_gate_catches_a_state_attached_to_the_wrong_fsm(self):
+        """Conservation cannot see this; the extractor can.
+
+        Moving a state between FSMs preserves every number and every name, so the
+        proposal lists it as the gate's honest limit. For states specifically it
+        is now caught, because the state sets are compared per FSM.
+        """
+        gate = self._gate()
+        dld = self._mailbox_dld()
+        # REJECT_FULL belongs to message_push; hang it on register_access instead.
+        moved = dld.replace("- `REJECT_FULL`\n", "", 1).replace(
+            "- `ACCESS_ERROR`", "- `ACCESS_ERROR`\n- `REJECT_FULL`", 1
+        )
+
+        self.assertNotEqual(dld, moved)
+        self.assertEqual(gate.check_measurements(dld, moved), [])
+        self.assertEqual(gate.check_identifiers(dld, moved), [])
+        errors = gate.check_state_parity(dld, moved)
+        self.assertTrue(any("REJECT_FULL" in e for e in errors), errors)
+
+    def test_retitling_a_heading_is_not_content_loss(self):
+        """Renumbering and retitling headings is the first permitted operation."""
+        gate = self._gate()
+        dld = self._mailbox_dld()
+        retitled = dld.replace("## 4. Interfaces", "## 5 Signal Interfaces", 1)
+
+        self.assertEqual(gate.check_unplaced_accounting(dld, retitled), [])
+        # Deleting the section's content is still loss, heading or no heading.
+        start, end = dld.index("## 4. Interfaces"), dld.index("## 5. Message Flow")
+        self.assertTrue(gate.check_unplaced_accounting(dld, dld[:start] + dld[end:]))
 
     def test_unstamped_normalization_is_not_trusted(self):
         """Mechanical checks cannot prove meaning survived; a human signs that."""

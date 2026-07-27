@@ -1,7 +1,11 @@
 # Proposal: a `normalize_dld` stage ahead of `parse_dld`
 
-**Status:** sketch for discussion — nothing in this document is wired into the
-pipeline yet.
+**Status:** built. Steps 1–4 of the build order in §7 are done: the fidelity
+gate, the agent contract, the stage (drivable by `--agent <profile>` or left in
+manual mode), the docx path, and the stamp on the promotion path. Only step 5 —
+the adjacent opportunities that reuse this stage's shape — is untouched. The
+sections below describe the design as built, with the places reality diverged
+from the sketch marked **[revised]**.
 
 **Problem it addresses:** the extractor (`tools/dld_to_template.py`) is
 deterministic and best-effort. It reads a specific set of markdown conventions
@@ -148,12 +152,49 @@ It compares `<ip>_dld.src.md` against `<ip>_dld.md` and fails on:
 Failures re-invoke the agent with the failure log, exactly like `unit_tests`
 drives `agent_implementation` today.
 
+### [revised] What normalizing a real document changed
+
+The table above is what the gate checks. *How* it checks three of those rows had
+to change once a whole document was reshaped by hand against it, rather than
+mutated one line at a time. Each rule below was rejecting a transformation this
+proposal explicitly permits:
+
+- **Identifier conservation is markup-blind.** Comparing *marked* identifier sets
+  meant an author who writes signal names in plain prose — the common case —
+  failed with forty invented-name errors for a document in which every name was
+  present. Invention now means the name appears in the source in no form at all.
+- **Structural claims moved to where they can be checked properly.** Relaxing the
+  above alone would have been a net weakening, so FSM state sets are now compared
+  per FSM through the extractor. This closes part of the honest limit below: a
+  state attached to the *wrong FSM* preserves every number and every name, and is
+  now caught.
+- **Headings are not content.** Retitling is the first permitted operation, so
+  heading text cannot be held to conservation.
+- **Unplaced accounting allows redistribution.** Requiring each source block to
+  resemble a single normalized block rejected every prose-to-structure rewrite —
+  which is the transformation the stage exists to perform. A redistributed block
+  is now accepted when nearly all of its distinctive vocabulary survives
+  somewhere; a deleted one still fails, because its words leave with it.
+- **The wait-mode names are vocabulary, not claims.** `wait_for_ack_inline` is
+  not in a source that states blocking behavior in prose, so writing the `Mode:`
+  line looked like invention. The three names are exempt from that check and
+  governed by wait-model provenance instead.
+
+The lesson is the one the build order was designed around: calibration against
+identity rewrites proves the tokenizer does not false-positive, which is a weaker
+claim than it sounds. The pair in `tests/fixtures/normalization/` is the document
+that found all five, and it is now a regression test.
+
 ### The honest limit of this gate
 
 Token conservation proves *nothing was dropped or invented*. It does **not**
 prove the meaning survived — an agent could faithfully preserve every number
 while attaching it to the wrong FSM. That is a real residual risk and the
 proposal should not pretend otherwise.
+
+**[revised]** For states specifically, this is no longer entirely true — see
+the state-set parity check above. The limit still stands for everything else, a
+timing number attached to the wrong FSM being the obvious remaining case.
 
 The repo already has the right pattern for exactly this class of claim: the
 **provenance stamp**. `check_model_provenance.py --stamp <ip>` exists because
@@ -179,9 +220,10 @@ prove, and a human explicitly signs the one claim it cannot.
 
 ## 5. Harness YAML
 
-Two stages, following the existing conventions (`kind: agent` + `gates:`,
-`when:`, `{placeholder}` substitution). The runner would need one new
-placeholder, `{src_dld}`, and one new `when:` condition, `src_dld_exists`:
+**[revised]** *Three* stages, not two — see step 4 in §7 for why the gate had to
+split. The sketch below is kept as written; `harness/ip_generation_loop.yaml` is
+the built version. The runner gained one new placeholder, `{src_dld}`, one new
+`when:` condition, `src_dld_exists`, and one new stage flag, `awaiting_human`:
 
 ```yaml
   - name: normalize_dld
@@ -213,7 +255,10 @@ agent stages use (`if the gates already pass, the agent is skipped`).
 
 Change detection also needs `.src.md` in its hash set so editing the source
 re-triggers normalization; `state_key`/`sha256` in `auto_ip_pipeline.py` already
-generalize to this.
+generalize to this. **[revised]** Built as `source_fingerprint()`, which hashes
+the DLD and its `.src.md` together — the `.src.md` is deliberately *not* added to
+DLD discovery, since an author's source is an input to the stage, not an IP of
+its own.
 
 ---
 
@@ -240,17 +285,44 @@ documents, not generating models.
 
 ## 7. Suggested build order
 
-1. **`check_dld_normalization.py` first, with no agent at all.** Run it against
-   the existing 11 DLDs using each file as its own source; it must pass
-   trivially. That calibrates the tokenizer against real documents before any
-   LLM output exists — the same discipline as extractor calibration.
-2. **Write `agents/dld_normalization_agent.md`** (the §3 contract).
-3. **Manual-mode stage**: wire `normalize_dld` as an agent stage with no
-   profile, so it writes a prompt to `reports/agent_requests/` and pauses.
-   Normalize one deliberately off-shape DLD by hand against the gate.
-4. **Then let an agent drive it**, with `--agent <profile>`, and add the
-   normalization stamp to the promotion path.
-5. Only after that, consider the adjacent opportunities (gap-resolution
-   proposer, gate-failure triage) — they reuse this stage's shape.
+1. ~~**`check_dld_normalization.py` first, with no agent at all.**~~ **Done.**
+   Calibrated against the existing 11 DLDs, each file as its own source.
+2. ~~**Write `agents/dld_normalization_agent.md`**~~ **Done.** The §3 contract,
+   plus the gate's tokenizer rules an author has to work with — that
+   `5,000,000` keeps its commas, that `1 cycle` and `1 cycles` are different
+   values, and that paraphrasing is what unplaced accounting measures.
+3. ~~**Manual-mode stage**~~ **Done.** `normalize_dld` and `check_normalization`
+   are wired ahead of `parse_dld`, both `when: src_dld_exists`, so an in-shape
+   DLD skips them entirely. With no `--agent` profile the runner writes the
+   prompt to `reports/agent_requests/` and reports the IP as *awaiting*.
+   `tests/fixtures/normalization/` holds the off-shape DLD normalized by hand
+   against the gate, and the five rule changes that exercise produced are
+   recorded above.
+4. ~~**Then let an agent drive it**, with `--agent <profile>`, and add the
+   normalization stamp to the promotion path.~~ **Done**, and both open questions
+   were answered yes:
+   - **The docx conversion output becomes the `.src.md`.** Word offers no way to
+     write the extractor's conventions, so treating a converted document as
+     already-in-shape was always optimistic. Conversion is deterministic and
+     skips the write when the content is unchanged, so the stamp survives a
+     re-run.
+   - **`--strict` hard-requires the stamp.** Promotion is where the template
+     becomes the source of truth for generation, so it is the right place to
+     require the one claim the machine cannot make — and it holds even when
+     someone runs the steps by hand, outside the pipeline.
 
-Step 1 is the one that de-risks everything else, and it's useful on its own.
+   Wiring the agent surfaced a third question the sketch never asked: **what
+   gates the agent?** The stage's gate was the full fidelity check, stamp
+   included — so an agent would have normalized correctly, failed on a human's
+   absence, retried, and failed again, reporting a defect where there was none.
+   The gate is now split: the agent iterates against `--no-stamp-check`, and
+   `check_normalization_stamp` is a separate required stage carrying a new
+   `awaiting_human: true` flag, which reports the IP as *awaiting* rather than
+   failed. A gate a machine cannot satisfy must not be in a machine's retry loop.
+5. Only after that, consider the adjacent opportunities (gap-resolution
+   proposer, gate-failure triage) — they reuse this stage's shape. **Not
+   started.**
+
+Step 1 is the one that de-risked everything else, and it was useful on its own.
+Step 3 is what proved the gate: no LLM was involved in finding those five rule
+defects, only a document reshaped by hand.

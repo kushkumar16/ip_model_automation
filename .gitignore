@@ -12,3 +12,6 @@ prompt_packs/
 # Office lock files
 ~$*
 **/~$*
+# Local-only presenter's reference, kept out of the repo by request
+docs/team_briefing.md
+docs/team_briefing.docx

@@ -10,7 +10,9 @@ Hard failures (exit 1):
     ``fsm_relationships.fsm_count``, or
   * (with ``--strict``) the template still contains ``TODO_REVIEW`` markers, or
   * (with ``--strict``) an interface carries an assumed-default wait model —
-    every interface's wait model must be stated in the DLD.
+    every interface's wait model must be stated in the DLD, or
+  * (with ``--strict``) the DLD was normalized from an author source whose
+    fidelity gate fails or whose human review stamp is missing or stale.
 
 Interfaces are reported but not hard-failed: golden templates legitimately
 consolidate DLD interface sections (e.g. a watchdog-heartbeat section folded into
@@ -90,6 +92,40 @@ def wait_model_coverage(template: dict[str, Any], dld_text: str, strict: bool) -
     return report, errors
 
 
+def normalization_coverage(dld_path: Path, strict: bool) -> tuple[list[str], list[str]]:
+    """Check that a normalized DLD is faithful to its author source, and reviewed.
+
+    Promotion is the moment a template becomes the source of truth for model
+    generation, so it is the right place to require the one claim the machine
+    cannot make. A DLD carrying an unreviewed normalization is a document whose
+    relationship to what the engineer actually wrote is unverified, and every
+    number downstream inherits that.
+
+    Only IPs with a ``<ip>_dld.src.md`` are affected; a DLD written in shape has
+    no author source, nothing to be faithful to, and nothing to stamp.
+    """
+    src_path = dld_path.with_name(dld_path.name.replace("_dld.md", "_dld.src.md"))
+    if not src_path.is_file():
+        return [], []
+
+    report = [f"normalization: {src_path.name} -> {dld_path.name}"]
+    if not strict:
+        report.append("  (checked only under --strict)")
+        return report, []
+
+    gate = _load_sibling("check_dld_normalization")
+    ip_name = dld.ip_name_from_path(dld_path)
+    errors = gate.check_ip(
+        ip_name,
+        src_path.read_text(encoding="utf-8"),
+        dld_path.read_text(encoding="utf-8"),
+        require_stamp=True,
+    )
+    if not errors:
+        report.append("  OK: faithful to source and human-stamped")
+    return report, errors
+
+
 def coverage(template_path: Path, dld_path: Path, strict: bool) -> tuple[list[str], list[str]]:
     template = load_template(template_path)
     dld_text = dld_path.read_text(encoding="utf-8")
@@ -125,6 +161,10 @@ def coverage(template_path: Path, dld_path: Path, strict: bool) -> tuple[list[st
     report += wait_report
     errors += wait_errors
 
+    norm_report, norm_errors = normalization_coverage(dld_path, strict)
+    report += norm_report
+    errors += norm_errors
+
     todo_count = template_path.read_text(encoding="utf-8").count(dld.TODO)
     if todo_count:
         message = f"{todo_count} unresolved {dld.TODO} marker(s)"
@@ -140,7 +180,11 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("template", type=Path, help="templates/<ip>.template.yaml (or .draft.yaml)")
     parser.add_argument("dld", type=Path, help="dlds/<ip>_dld.md")
-    parser.add_argument("--strict", action="store_true", help="also fail on TODO_REVIEW markers")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="also fail on TODO_REVIEW markers, assumed-default wait models, and an unstamped normalization",
+    )
     args = parser.parse_args(argv)
 
     for path in (args.template, args.dld):

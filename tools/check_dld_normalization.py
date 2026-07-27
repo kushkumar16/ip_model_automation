@@ -9,11 +9,11 @@ contract — no LLM, no judgment:
   * **measurement conservation** — every ``2 ns`` / ``500 MHz`` / ``depth 8`` in
     the source survives, with its value and unit intact,
   * **identifier conservation** — every state name and backticked identifier
-    survives,
+    survives, in whatever markup carries it,
   * **no net-new identifiers** — an identifier in the normalized file that
     appears nowhere in the source is invention (the hallucinated-state check),
-  * **FSM parity** — same FSM name set and same declared count, read with the
-    real extractor rather than a second parser,
+  * **FSM parity** — same FSM name set, same declared count, and the same state
+    set per FSM, read with the real extractor rather than a second parser,
   * **wait-model provenance** — a ``Wait model:`` block must trace to blocking
     language in the source; one conjured for a silent interface is invention,
   * **unplaced accounting** — source content that reaches neither the normalized
@@ -198,6 +198,32 @@ def identifiers(text: str) -> set[str]:
     return found
 
 
+def bare_tokens(text: str) -> set[str]:
+    """Every identifier-shaped token in the text, ignoring how it was marked up.
+
+    Conservation must be blind to markup. An author who writes ``cpl_ready`` in
+    plain prose and a normalizer that writes ```cpl_ready``` have stated the same
+    thing; comparing *marked* identifier sets would call the backtick an
+    invention and the un-backticking a deletion. Both are shape changes, which
+    is exactly what normalization is permitted to make.
+    """
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", text))
+
+
+def is_grounded(identifier: str, tokens: set[str]) -> bool:
+    """Whether an identifier is present in a token set, allowing for dotting.
+
+    ``accept.ENQUEUE`` is the shape the extractor reads for a wait point, but a
+    source that states "the accept FSM stalls in ENQUEUE" has named the same
+    state. Joining two source-stated names with a dot is a shape change, so a
+    dotted identifier is grounded when each of its parts is.
+    """
+    if identifier in tokens:
+        return True
+    parts = identifier.split(".")
+    return len(parts) > 1 and all(part in tokens for part in parts)
+
+
 def content_blocks(text: str) -> list[str]:
     """Split into content blocks, keeping fenced code as single units."""
     blocks: list[str] = []
@@ -307,12 +333,37 @@ def measurement_count_notes(source: str, normalized: str) -> list[str]:
 
 
 def check_identifiers(source: str, normalized: str) -> list[str]:
+    """Names must survive and none may be conjured, whatever markup carries them.
+
+    The comparison runs *marked identifiers on one side against every token on
+    the other*, because the two files legitimately differ in markup: the whole
+    point of normalization is that the source was written in some other shape.
+    Requiring backtick-for-backtick agreement failed every real reshape — an
+    author who writes signal names in plain prose tripped forty invented-name
+    errors — while catching nothing a presence test misses. A hallucinated state
+    appears in *no* form in the source, which is what this now checks.
+
+    Structural claims about states are not weakened by this; they moved to
+    :func:`check_state_parity`, which reads the extractor and is stricter about
+    where a state lives than an identifier set can be.
+
+    The three wait-mode names are exempt from the invention check, and only that
+    check. They are the extractor's closed vocabulary (``dld.WAIT_MODES``), not
+    free-form names: a source states blocking behavior in prose, and writing the
+    corresponding ``Mode:`` line is the shape change the stage exists to make.
+    Whether that mode was earned is not a spelling question, so it is decided by
+    :func:`check_wait_model_provenance` instead of here.
+    """
     source_ids, normalized_ids = identifiers(source), identifiers(normalized)
+    source_tokens, normalized_tokens = bare_tokens(source), bare_tokens(normalized)
+
     errors: list[str] = []
-    lost = sorted(source_ids - normalized_ids)
+    lost = sorted(name for name in source_ids if not is_grounded(name, normalized_tokens))
     if lost:
         errors.append(f"identifier(s) dropped: {', '.join(lost)}")
-    invented = sorted(normalized_ids - source_ids)
+    invented = sorted(
+        name for name in normalized_ids if name not in dld.WAIT_MODES and not is_grounded(name, source_tokens)
+    )
     if invented:
         errors.append(f"identifier(s) invented (absent from source): {', '.join(invented)}")
     return errors
@@ -345,6 +396,42 @@ def check_fsm_parity(source: str, normalized: str) -> list[str]:
     return errors
 
 
+def check_state_parity(source: str, normalized: str) -> list[str]:
+    """For every FSM both files describe, the state set must be identical.
+
+    This is the sharper half of state conservation, and it catches something no
+    token comparison can: a state moved to the *wrong FSM*. Every name is still
+    present, so conservation is satisfied, but the model generated from the
+    normalized document would enter that state in the wrong process. The
+    proposal names this class of failure as the gate's honest limit; for states,
+    specifically, the extractor closes it.
+
+    Only FSMs whose states the extractor can read on *both* sides are compared.
+    An unstructured source is the case normalization exists to fix, so it must
+    not fail here — the same conditioning :func:`check_fsm_parity` applies to FSM
+    names. Naming an FSM in a heading while listing its states in a table is
+    common, and it leaves the source's state set empty rather than wrong; that is
+    a shape gap for the normalizer to close, not a conservation failure.
+    """
+    source_states = {f["name"]: set(f["states"]) for f in dld.extract_fsms(source.splitlines())}
+    normalized_states = {f["name"]: set(f["states"]) for f in dld.extract_fsms(normalized.splitlines())}
+
+    errors: list[str] = []
+    for name in sorted(set(source_states) & set(normalized_states)):
+        before, after = source_states[name], normalized_states[name]
+        if before == after or not before or not after:
+            continue
+        moved_in = sorted(after - before)
+        moved_out = sorted(before - after)
+        detail = []
+        if moved_out:
+            detail.append(f"lost {', '.join(moved_out)}")
+        if moved_in:
+            detail.append(f"gained {', '.join(moved_in)}")
+        errors.append(f"FSM `{name}` state set changed: {'; '.join(detail)}")
+    return errors
+
+
 def check_wait_model_provenance(source: str, normalized: str) -> list[str]:
     """A wait model must trace to blocking language in the matching source section."""
     source_sections = interface_sections(source)
@@ -371,17 +458,51 @@ def check_wait_model_provenance(source: str, normalized: str) -> list[str]:
     return errors
 
 
-def check_unplaced_accounting(source: str, normalized: str, threshold: float = 0.6) -> list[str]:
-    """Every source block must reach the normalized body or the Unplaced section."""
+def is_heading_block(block: str) -> bool:
+    """Whether a block is nothing but markdown headings.
+
+    Retitling and renumbering headings is the first thing normalization is
+    permitted to do, so heading text cannot be held to conservation — `## 1 Why
+    This Block Exists` becoming `## 1. Purpose` is the stage working, not content
+    vanishing. The names inside headings are still conserved, by the identifier,
+    FSM, and interface checks that read them structurally.
+    """
+    return all(line.strip().startswith("#") for line in block.splitlines() if line.strip())
+
+
+def check_unplaced_accounting(
+    source: str,
+    normalized: str,
+    threshold: float = 0.6,
+    redistribution_threshold: float = 0.9,
+) -> list[str]:
+    """Every source block must reach the normalized body or the Unplaced section.
+
+    Two ways to be accounted for, because normalization moves content in two
+    ways. A block that survives largely intact is matched against a single
+    normalized block (``threshold``). A block that is *redistributed* — prose
+    describing blocking behavior becoming a labelled ``Wait model:`` block,
+    scattered timing sentences becoming one table row — no longer resembles any
+    single block, so it is instead required to have nearly all of its
+    distinctive vocabulary still present *somewhere* in the normalized document
+    (``redistribution_threshold``, deliberately high).
+
+    Single-block matching alone rejected every real prose-to-structure rewrite,
+    which is precisely the transformation the stage exists to perform. Deletion
+    still fails: a paragraph that is dropped takes its distinctive words with
+    it, and words shared with the rest of the document are not distinctive
+    enough to reach 0.9.
+    """
     normalized_blocks = [content_tokens(block) for block in content_blocks(normalized)]
+    everything = set().union(*normalized_blocks) if normalized_blocks else set()
     lost: list[str] = []
 
     for block in content_blocks(source):
         tokens = content_tokens(block)
-        if not tokens:
+        if not tokens or is_heading_block(block):
             continue
         best = max((len(tokens & other) / len(tokens) for other in normalized_blocks), default=0.0)
-        if best < threshold:
+        if best < threshold and len(tokens & everything) / len(tokens) < redistribution_threshold:
             summary = " ".join(block.split())[:70]
             lost.append(summary)
 
@@ -417,12 +538,12 @@ def check_stamp(ip: str, source: str, normalized: str) -> list[str]:
     baseline = load_baselines().get(ip)
     if baseline is None:
         return [
-            f"{ip}: no normalization stamp — a human must confirm the meaning survived, then run "
+            "no normalization stamp - a human must confirm the meaning survived, then run "
             f"`python tools/check_dld_normalization.py --stamp {ip}`"
         ]
     if baseline.get("src") != sha256_text(source) or baseline.get("normalized") != sha256_text(normalized):
         return [
-            f"{ip}: normalization stamp is stale (a DLD changed since review) — re-review the diff, "
+            "normalization stamp is stale (a DLD changed since review) - re-review the diff, "
             f"then re-stamp with `--stamp {ip}`"
         ]
     return []
@@ -454,6 +575,7 @@ def check_ip(ip: str, source: str, normalized: str, *, require_stamp: bool) -> l
     errors += check_measurements(source, normalized)
     errors += check_identifiers(source, normalized)
     errors += check_fsm_parity(source, normalized)
+    errors += check_state_parity(source, normalized)
     errors += check_wait_model_provenance(source, normalized)
     errors += check_unplaced_accounting(source, normalized)
     if require_stamp:

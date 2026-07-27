@@ -249,6 +249,38 @@ python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any other age
 Whichever agent writes the code, the same gates judge it: template coverage,
 lint, unit tests, the coding style check, and the coverage thresholds.
 
+## Continuous Integration (local)
+
+There is no hosted CI. Every gate in this repo runs because someone ran it, which
+means a branch can be pushed and merged with a failing coverage threshold, a
+stale Word overview, or an unstamped normalization, and nothing says so. One
+command runs all of them:
+
+```powershell
+python tools\run_ci.py            # every repo-wide gate, full report
+python tools\run_ci.py --list     # what it would run, and why
+python tools\run_ci.py --fail-fast
+```
+
+It takes about a minute. The repo-wide stages are **read from
+`harness/ip_generation_loop.yaml`** (`scope: repo`) rather than listed again, so
+adding a gate to the pipeline adds it to CI automatically — a test asserts the
+two cannot drift apart. Three further guards protect artifacts rather than
+pipeline steps (model provenance, DLD normalization, overview sync) and are
+listed in `EXTRA_CHECKS` with the reason.
+
+To run it automatically before every push, enable the tracked hook — once per
+clone:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+`SKIP_CI=1 git push` bypasses it for a work-in-progress branch, and says plainly
+that nothing was verified. The escape hatch is deliberate: a hook that cannot be
+bypassed gets disabled outright the first time it is inconvenient, and then it
+protects nothing.
+
 ## Daily Validation
 
 Run the full flow:
@@ -462,6 +494,7 @@ resolves to the same default, so nothing breaks in the meantime).
 - `tools/report_model_coverage.py`: FSM coverage/maturity report from templates.
 - `tools/check_wait_model_coverage.py`: gate that each model enters every interface wait point its template declares (the model-side half of the interface wait-model contract).
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
+- `tools/run_ci.py` / `.githooks/pre-push`: local CI — every repo-wide gate in one command, read from the harness, and the tracked hook that runs it before a push (`git config core.hooksPath .githooks`).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
 - `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).
 - `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).

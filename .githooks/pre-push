@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# Run every repo-wide gate before anything leaves this machine.
+#
+# This repo has no hosted CI, so a push is the last moment anyone can catch a
+# failing gate. Enabled per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# To push without running the gates — a work-in-progress branch, a doc-only
+# typo fix, a machine where the toolchain is not installed:
+#
+#     SKIP_CI=1 git push
+#
+# The escape hatch is deliberate. A hook that cannot be bypassed gets disabled
+# outright the first time it is inconvenient, and then it protects nothing.
+
+if [ -n "$SKIP_CI" ]; then
+    echo "pre-push: SKIP_CI set - gates skipped, nothing was verified"
+    exit 0
+fi
+
+echo "pre-push: running repo-wide gates (SKIP_CI=1 to bypass)"
+
+if ! command -v python >/dev/null 2>&1; then
+    echo "pre-push: python not found on PATH - cannot run the gates" >&2
+    echo "pre-push: install the toolchain, or push with SKIP_CI=1 knowing nothing is checked" >&2
+    exit 1
+fi
+
+python tools/run_ci.py || {
+    echo "" >&2
+    echo "pre-push: refusing to push - fix the gate above, or SKIP_CI=1 git push" >&2
+    exit 1
+}

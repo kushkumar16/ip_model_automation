@@ -13,6 +13,7 @@ from .interrupt_controller_ip import InterruptControllerIpModel
 from .mailbox_ip import MailboxIpModel
 from .mailbox_irq_subsystem import MailboxIrqSubsystemModel
 from .spi_master_ip import SpiMasterIpModel
+from .sram_ctrl_ip import SramCtrlIpModel
 from .timer_ip import TimerIpModel
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "MailboxIpModel",
     "MailboxIrqSubsystemModel",
     "SpiMasterIpModel",
+    "SramCtrlIpModel",
     "TimerIpModel",
     "list_ips",
     "resolve_artifacts",

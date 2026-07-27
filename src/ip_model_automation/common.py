@@ -38,6 +38,7 @@ IP_ARTIFACTS: Dict[str, IpArtifact] = {
         "dlds/mailbox_irq_subsystem_dld.md",
         "templates/mailbox_irq_subsystem.template.yaml",
     ),
+    "sram_ctrl_ip": IpArtifact("sram_ctrl_ip", "dlds/sram_ctrl_ip_dld.md", "templates/sram_ctrl_ip.template.yaml"),
 }
 
 

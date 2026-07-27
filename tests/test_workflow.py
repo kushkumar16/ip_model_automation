@@ -896,6 +896,61 @@ Wait model:
         self.assertNotEqual(source, reshaped)
         self.assertEqual(gate.check_ip("mailbox_ip", source, reshaped, require_stamp=False), [])
 
+    def test_fractional_cycle_times_survive_extraction(self):
+        """A clock that is not a whole number of nanoseconds must not lose timings.
+
+        Every DLD in the repo runs at 500 MHz — exactly 2 ns/cycle — so nothing
+        ever exercised a fractional cycle time. At 800 MHz (1.25 ns) the
+        extractor stored `cycle_time_ns: 1` and silently dropped every operation
+        whose nanosecond figure was fractional: six of eight timings vanished
+        from the template with nothing flagged.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("dld_to_template", repo_root / "tools" / "dld_to_template.py")
+        extractor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extractor)
+
+        clock_mhz, cycle_ns, _gaps = extractor.extract_clock("Core clock: 800 MHz.\nCycle time: 1.25 ns.\n")
+        self.assertEqual(clock_mhz, 800)
+        self.assertEqual(cycle_ns, 1.25)
+
+        row = [
+            "| FSM/process | Runs as | Delay model |",
+            "| --- | --- | --- |",
+            "| Bank Scheduler FSM | Parallel process | Pick the next bank: 3 cycles = 3.75 ns. "
+            "SRAM read access: 4 cycles = 5 ns. |",
+        ]
+        ops = extractor.extract_timing_table(row, ["bank_scheduler"])["bank_scheduler"]
+        self.assertEqual(
+            [(op["name"], op["cycles"], op["ns"]) for op in ops],
+            [("pick_the_next_bank", 3, 3.75), ("sram_read_access", 4, 5)],
+        )
+        # A whole number stays an int, so existing templates are not churned to 5.0.
+        self.assertIsInstance(ops[1]["ns"], int)
+
+    def test_timing_coherence_accepts_fractional_but_still_catches_slips(self):
+        """The gate demanded an integer ns/cycle, so it rejected correct values."""
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("template_lint", repo_root / "tools" / "template_lint.py")
+        lint = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lint)
+
+        def timing(cycle_ns, ns):
+            return {
+                "timing_model": {
+                    "clock_mhz": 800,
+                    "cycle_time_ns": cycle_ns,
+                    "fsm_process_delays": [{"fsm": "x", "operations": [{"name": "op", "cycles": 2, "ns": ns}]}],
+                    "end_to_end_paths": [],
+                }
+            }
+
+        self.assertEqual(lint.timing_coherence_errors(timing(1.25, 2.5)), [])
+        # The truncation the old extractor produced is now itself a lint failure.
+        self.assertTrue(any("1.25" in e for e in lint.timing_coherence_errors(timing(1, 2))))
+        # And a genuine transcription slip still fails.
+        self.assertTrue(any("op" in e for e in lint.timing_coherence_errors(timing(1.25, 3.0))))
+
     def test_hand_normalized_off_shape_document_passes_every_check(self):
         """The gate must accept a real reshape, or the stage it guards is unusable."""
         gate = self._gate()

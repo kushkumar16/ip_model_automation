@@ -387,6 +387,50 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         prompt = pipeline.amend_prompt("mailbox_ip")
         self.assertIn("mailbox_ip", prompt)
 
+    def test_ci_runs_every_repo_wide_gate_the_harness_declares(self):
+        """CI reads the harness, so a new repo-wide gate cannot escape it.
+
+        Listing the gates a second time in the CI runner would let the two drift:
+        someone adds a `scope: repo` stage, the pipeline runs it, and CI silently
+        does not. The harness stays the single source of truth.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_ci", repo_root / "tools" / "run_ci.py")
+        ci = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ci)
+
+        import yaml  # noqa: PLC0415 — the harness is the fixture here
+
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        declared = [s["name"] for s in harness["stages"] if s.get("scope") == "repo"]
+        self.assertTrue(declared, "the harness declares no repo-wide stages")
+        self.assertEqual([name for name, _cmd, _why in ci.harness_repo_gates()], declared)
+
+        # The extra guards are real tools, not stale names.
+        for name, command, why in ci.EXTRA_CHECKS:
+            tool = command.split()[1]
+            self.assertTrue((repo_root / tool).is_file(), f"{name} points at a missing tool: {tool}")
+            self.assertTrue(why.strip(), f"{name} must say what it guards")
+
+        # A failing gate must actually fail the run, not be reported and ignored.
+        ok, _output, _seconds = ci.run_gate("probe", f'"{sys.executable}" -c "raise SystemExit(3)"')
+        self.assertFalse(ok)
+
+    def test_pre_push_hook_runs_ci_and_can_be_bypassed(self):
+        """The hook is tracked, so every clone gets it with one config line."""
+        repo_root = Path(__file__).resolve().parents[1]
+        hook = repo_root / ".githooks" / "pre-push"
+        self.assertTrue(hook.is_file(), "the pre-push hook is not tracked in the repo")
+
+        text = hook.read_text(encoding="utf-8")
+        self.assertIn("tools/run_ci.py", text)
+        self.assertIn("core.hooksPath .githooks", text, "the hook must document how to enable it")
+        # An unbypassable hook gets disabled outright the first time it is in the
+        # way, so the escape hatch is part of the design — and it must say loudly
+        # that nothing was checked.
+        self.assertIn("SKIP_CI", text)
+        self.assertIn("nothing was verified", text)
+
     def test_normalize_stage_is_wired_and_skips_in_shape_dlds(self):
         repo_root = Path(__file__).resolve().parents[1]
         tool_path = repo_root / "tools" / "auto_ip_pipeline.py"

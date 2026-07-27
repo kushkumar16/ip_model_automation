@@ -1013,6 +1013,84 @@ Wait model:
         shaped = stated + "\nWait model:\n\n- Mode: `wait_for_ack_inline`\n"
         self.assertEqual(gate.check_identifiers(stated, shaped), [])
 
+    def test_wait_model_provenance_finds_its_section_by_content(self):
+        """Heading matching failed on exactly the documents the stage is for.
+
+        An off-shape source is one that does not use the extractor's headings, so
+        a section called "3.1 Request port" matched no normalized "Request
+        Interface" and the search fell back to the whole document — where some
+        form of "wait" appears in nearly any DLD. The check passed on evidence
+        from an unrelated section, which is no check at all.
+        """
+        gate = self._gate()
+        source = """## 3.1 Request port
+
+The producer presents a request. If the queue is full the controller drops
+req_ready and the requester must hold its request until space appears.
+
+## 3.2 Debug port
+
+Counters are readable at any time.
+"""
+        # Wording is preserved, as the contract requires — that is the signal
+        # content matching relies on. Only the heading differs.
+        normalized = """### 3.1 Request Interface
+
+The producer presents a request.
+
+Wait model:
+
+- Mode: `wait_for_ack_inline`
+- Note: if the queue is full the controller drops req_ready and the requester
+  must hold its request until space appears.
+"""
+        title, body = gate.match_source_section("3.1 Request Interface", normalized, source)
+        self.assertIn("Request port", title, "content matching failed across differing headings")
+        self.assertIn("until space appears", body)
+        self.assertEqual(gate.check_wait_model_provenance(source, normalized), [])
+
+        # A silent interface must still be caught, and not rescued by prose
+        # elsewhere in the document.
+        silent = source.replace(
+            "If the queue is full the controller drops\nreq_ready and the requester must hold its "
+            "request until space appears.",
+            "Requests are presented on this port.",
+        )
+        quiet_normalized = normalized.replace(
+            "- Note: if the queue is full the controller drops req_ready and the requester\n"
+            "  must hold its request until space appears.\n",
+            "",
+        )
+        self.assertTrue(
+            gate.check_wait_model_provenance(silent, quiet_normalized),
+            "a wait model conjured for a silent interface must fail",
+        )
+
+    def test_blocking_language_is_matched_as_whole_words(self):
+        """`req_ready` is a signal name, and "this block" is a noun."""
+        gate = self._gate()
+        self.assertEqual(gate.blocking_hits("| req_ready | out | controller can accept |"), 0)
+        self.assertEqual(gate.blocking_hits("It is the block that decides bandwidth."), 1)  # still a word
+        self.assertGreaterEqual(gate.blocking_hits("The requester blocks until the response returns."), 2)
+
+        evidence = gate.blocking_evidence(
+            "| req_ready | out | accept |\nThe requester stalls until an entry frees up.\n"
+        )
+        self.assertIn("stalls until", evidence)
+
+    def test_review_report_gives_the_stamper_something_to_read(self):
+        """The stamp asks for a judgement; the report is the material for it."""
+        gate = self._gate()
+        source, normalized = self._fixture_pair()
+        report = gate.build_report("completion_ip", source, normalized, [])
+
+        self.assertIn("Where each source section landed", report)
+        self.assertIn("Unplaced source content", report)
+        # The map must actually pair sections, not list them.
+        self.assertIn("| 1 Why This Block Exists |", report)
+        # And it must say plainly what it cannot establish.
+        self.assertIn("cannot tell you", report)
+
     def test_gate_catches_a_state_attached_to_the_wrong_fsm(self):
         """Conservation cannot see this; the extractor can.
 

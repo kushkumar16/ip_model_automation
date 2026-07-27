@@ -51,6 +51,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DLDS_DIR = REPO_ROOT / "dlds"
+REPORTS_DIR = REPO_ROOT / "reports"
 BASELINES_PATH = DLDS_DIR / "normalization_baselines.json"
 UNPLACED_HEADING = "## Unplaced Source Content"
 
@@ -432,25 +433,74 @@ def check_state_parity(source: str, normalized: str) -> list[str]:
     return errors
 
 
+BLOCKING_RE = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s") for w in BLOCKING_LANGUAGE) + r")\b", re.I)
+
+
+def blocking_hits(text: str) -> int:
+    """How many distinct blocking terms a passage states, matched as whole words.
+
+    Substring matching counted a signal named ``req_ready`` as evidence that a
+    requester waits, and the noun "block" (as in "this block") as evidence of
+    blocking. Both are the wrong kind of hit for a check whose whole job is to
+    tell a stated wait from an invented one.
+    """
+    return len({match.group(1).lower() for match in BLOCKING_RE.finditer(text)})
+
+
+def blocking_evidence(text: str) -> str:
+    """The sentence in a passage that best states blocking behavior."""
+    prose = [line for line in text.splitlines() if not line.strip().startswith("|")]
+    best, best_score = "", 0
+    for sentence in re.split(r"(?<=[.;:])\s+", "\n".join(prose)):
+        score = blocking_hits(sentence)
+        if score > best_score:
+            best, best_score = " ".join(sentence.split()), score
+    return best
+
+
+def match_source_section(title: str, body: str, source: str) -> tuple[str, str]:
+    """Find the source section a normalized section was built from.
+
+    Matching on heading text alone was close to useless here: an off-shape source
+    is precisely one that does not use the extractor's headings, so a document
+    calling them "3.1 Request port" instead of "Request Interface" matched
+    nothing and the search fell back to the whole document — where some form of
+    "wait" appears in almost any DLD. That made the provenance check vacuous for
+    exactly the documents this stage exists to handle.
+
+    Content is the reliable signal, since normalization preserves wording. The
+    heading is still used as a tie-breaker. Returns (section title, body).
+    """
+    wanted_words, wanted_heading = content_tokens(body), heading_key(title)
+    if not wanted_words:
+        return "", ""
+    best_title, best_body, best_score = "", "", 0.0
+    for source_title, source_body in sections(source):
+        tokens = content_tokens(source_body)
+        if not tokens:
+            continue
+        # Containment, not overlap-over-source-size: a normalized interface
+        # section is usually far shorter than the prose it was distilled from
+        # (a `Wait model:` block against three paragraphs), and dividing by the
+        # larger side scored the correct match near zero.
+        score = len(wanted_words & tokens) / min(len(wanted_words), len(tokens))
+        score += 0.1 * len(wanted_heading & heading_key(source_title))
+        if score > best_score:
+            best_title, best_body, best_score = source_title, source_body, score
+    return (best_title, best_body) if best_score >= 0.3 else ("", "")
+
+
 def check_wait_model_provenance(source: str, normalized: str) -> list[str]:
     """A wait model must trace to blocking language in the matching source section."""
-    source_sections = interface_sections(source)
     errors: list[str] = []
 
     for title, body in interface_sections(normalized).items():
         if not re.search(r"wait\s*model\s*:", body, re.IGNORECASE):
             continue
 
-        wanted = heading_key(title)
-        best_body, best_overlap = "", 0
-        for source_title, source_body in source_sections.items():
-            overlap = len(wanted & heading_key(source_title))
-            if overlap > best_overlap:
-                best_body, best_overlap = source_body, overlap
-
-        haystack = (best_body if best_overlap else source).lower()
-        if not any(word in haystack for word in BLOCKING_LANGUAGE):
-            scope = f"source section matching `{title}`" if best_overlap else "the source document"
+        matched_title, matched_body = match_source_section(title, body, source)
+        if not blocking_hits(matched_body or source):
+            scope = f"source section `{matched_title}`" if matched_body else "the source document"
             errors.append(
                 f"interface `{title}` declares a wait model, but {scope} states no blocking behavior "
                 "(a wait model may not be invented for a silent interface)"
@@ -513,6 +563,171 @@ def check_unplaced_accounting(
     return [
         f"{len(lost)} source block(s) reached neither the normalized body nor `{UNPLACED_HEADING}`: {listed}{suffix}"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Review report
+# --------------------------------------------------------------------------- #
+
+
+def write_report(ip: str, source: str, normalized: str, errors: list[str]) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"{ip}.normalize.md"
+    path.write_text(build_report(ip, source, normalized, errors), encoding="utf-8")
+    return path
+
+
+def sections(text: str) -> list[tuple[str, str]]:
+    """Split a document into (heading, body) pairs at any markdown heading level."""
+    found: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] = ("(document preamble)", [])
+    for line in text.splitlines():
+        if re.match(r"^#{1,6}\s+\S", line.strip()):
+            found.append(current)
+            current = (line.strip().lstrip("#").strip(), [])
+            continue
+        current[1].append(line)
+    found.append(current)
+    return [(title, "\n".join(body)) for title, body in found if title or body]
+
+
+def section_map(source: str, normalized: str) -> list[tuple[str, str, float]]:
+    """Where each source section's content ended up, best match first.
+
+    This is the part of the diff a reviewer cannot easily do by eye: the two
+    documents are the same claims under different headings in a different order,
+    so a line diff shows everything as changed. Matching on content instead of
+    position turns the review into "is this where that belongs?".
+    """
+    targets = [(title, content_tokens(body)) for title, body in sections(normalized)]
+    rows: list[tuple[str, str, float]] = []
+    for title, body in sections(source):
+        tokens = content_tokens(body)
+        if not tokens:
+            continue
+        best_title, best_score = "(no match)", 0.0
+        for other_title, other_tokens in targets:
+            if not other_tokens:
+                continue
+            score = len(tokens & other_tokens) / len(tokens)
+            if score > best_score:
+                best_title, best_score = other_title, score
+        rows.append((title, best_title, best_score))
+    return rows
+
+
+def wait_model_basis(source: str, normalized: str) -> list[tuple[str, str, str]]:
+    """For each declared wait model, the source sentence it rests on.
+
+    A conjured wait model is the invention the mechanical gate is least able to
+    reason about — it can only confirm that *some* blocking language exists in
+    the matching section. Showing the reviewer the actual sentence is what turns
+    that from a checkbox into a judgement they can make.
+    """
+    rows: list[tuple[str, str, str]] = []
+    for title, body in interface_sections(normalized).items():
+        mode_match = re.search(r"Mode:\s*`?([a-z_]+)`?", body)
+        if not re.search(r"wait\s*model\s*:", body, re.IGNORECASE):
+            continue
+        _matched_title, matched_body = match_source_section(title, body, source)
+        evidence = blocking_evidence(matched_body or source)[:170]
+        if not matched_body:
+            evidence = f"(no matching source section — evidence taken document-wide) {evidence}"
+        rows.append((title, mode_match.group(1) if mode_match else "(unparsed)", evidence or "(none found)"))
+    return rows
+
+
+def unplaced_items(normalized: str) -> list[str]:
+    _body, unplaced = split_unplaced(normalized)
+    return [line.strip()[2:].strip() for line in unplaced.splitlines() if line.strip().startswith("- ")]
+
+
+def build_report(ip: str, source: str, normalized: str, errors: list[str]) -> str:
+    """The reviewer's companion to the stamp: what moved, and what did not fit."""
+    fsms = dld.extract_fsms(normalized.splitlines())
+    interfaces = dld.extract_interfaces(normalized.splitlines())
+    lines = [
+        f"# Normalization review: {ip}",
+        "",
+        "> What the `normalize_dld` stage changed, and every claim it could not place.",
+        f"> Read this before running `python tools/check_dld_normalization.py --stamp {ip}` — the stamp asserts",
+        "> the meaning survived, which no mechanical check can decide for you.",
+        "",
+        f"- Source: `dlds/{ip}_dld.src.md` (sha256 `{sha256_text(source)[:12]}`)",
+        f"- Normalized: `dlds/{ip}_dld.md` (sha256 `{sha256_text(normalized)[:12]}`)",
+        f"- Mechanical checks: {'FAIL — ' + str(len(errors)) + ' finding(s)' if errors else 'pass'}",
+        "",
+    ]
+    if errors:
+        lines += ["## Findings", ""] + [f"- {error}" for error in errors] + [""]
+
+    lines += [
+        "## What the extractor now reads",
+        "",
+        f"- FSMs ({len(fsms)}): " + ", ".join(f"`{f['name']}` ({len(f['states'])} states)" for f in fsms),
+        f"- Interfaces ({len(interfaces)}): "
+        + ", ".join(f"`{i['name']}` → {i['wait_model']['mode']}" for i in interfaces),
+        "",
+        "Nothing above was readable in the source; that is what the stage produced.",
+        "",
+        "## Where each source section landed",
+        "",
+        "Matched on content, not position — the same claims under new headings.",
+        "A low score is not automatically wrong (a section may be split), but it is",
+        "where to look first.",
+        "",
+        "| Source section | Landed in | Content match |",
+        "| --- | --- | --- |",
+    ]
+    for title, target, score in section_map(source, normalized):
+        flag = " ⚠" if score < 0.5 else ""
+        lines.append(f"| {title} | {target} | {score:.0%}{flag} |")
+
+    basis = wait_model_basis(source, normalized)
+    if basis:
+        lines += [
+            "",
+            "## Wait models, and the source sentence each rests on",
+            "",
+            "| Interface | Mode | Source basis |",
+            "| --- | --- | --- |",
+        ]
+        for title, mode, evidence in basis:
+            lines.append(f"| {title} | `{mode}` | {evidence} |")
+
+    notes = measurement_count_notes(source, normalized)
+    if notes:
+        lines += [
+            "",
+            "## Measurements stated a different number of times",
+            "",
+            "Legitimate when a value stated once in prose becomes a table entry too.",
+            "Every value itself is conserved — the gate fails otherwise.",
+            "",
+        ] + [f"- {note}" for note in notes]
+
+    items = unplaced_items(normalized)
+    lines += [
+        "",
+        "## Unplaced source content",
+        "",
+        f"{len(items)} claim(s) mapped to no extractor convention and were preserved verbatim."
+        if items
+        else "Nothing was left unplaced.",
+        "",
+    ] + [f"- {item}" for item in items]
+
+    lines += [
+        "",
+        "## What this report cannot tell you",
+        "",
+        "That the meaning survived. Every number and name can be conserved while a",
+        "timing is attached to the wrong FSM — the report shows where things went,",
+        "not whether they belong there. That judgement is the stamp, and it is why",
+        "the stamp is a person.",
+        "",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -665,9 +880,16 @@ def main(argv: list[str]) -> int:
             continue
         source_text = src.read_text(encoding="utf-8")
         normalized_text = normalized.read_text(encoding="utf-8")
-        all_errors += check_ip(ip, source_text, normalized_text, require_stamp=not args.no_stamp_check)
+        errors = check_ip(ip, source_text, normalized_text, require_stamp=not args.no_stamp_check)
+        all_errors += errors
         for note in measurement_count_notes(source_text, normalized_text):
             print(f"  note: {ip}: {note}")
+
+        # The reviewer holding the stamp needs a map, not a line diff of two
+        # documents that share no structure. Written on every run, pass or fail.
+        mechanical = [e for e in errors if "stamp" not in e]
+        report_path = write_report(ip, source_text, normalized_text, mechanical)
+        print(f"  report: {report_path.relative_to(REPO_ROOT).as_posix()}")
 
     if all_errors:
         print("dld normalization: FAIL", file=sys.stderr)

@@ -251,10 +251,10 @@ lint, unit tests, the coding style check, and the coverage thresholds.
 
 ## Continuous Integration (local)
 
-There is no hosted CI. Every gate in this repo runs because someone ran it, which
-means a branch can be pushed and merged with a failing coverage threshold, a
-stale Word overview, or an unstamped normalization, and nothing says so. One
-command runs all of them:
+CI here is **deliberately local**: the gates run on this machine, before a push,
+and nowhere else. Without it a branch can be pushed and merged with a failing
+coverage threshold, a stale Word overview, or an unstamped normalization, and
+nothing says so. One command runs all of them:
 
 ```powershell
 python tools\run_ci.py            # every repo-wide gate, full report
@@ -273,8 +273,20 @@ To run it automatically before every push, enable the tracked hook — once per
 clone:
 
 ```powershell
-git config core.hooksPath .githooks
+python tools\run_ci.py --install-hook
 ```
+
+Running locally instead of on a hosted runner costs two things, so the runner
+replaces both:
+
+- **A clean environment.** A hosted runner installs `requirements.txt` from
+  scratch, so an undeclared dependency fails on the first run; locally a gate can
+  depend on a package someone installed by hand and pass forever, until a fresh
+  clone. The declared set is checked before any gate runs, and a test asserts
+  every third-party import under `tools/` is declared.
+- **A defined commit.** A hosted runner tests the commit that was pushed; a local
+  hook tests the files on disk. With a dirty tree those differ, so the run says
+  so rather than letting you believe the pushed commits were checked.
 
 `SKIP_CI=1 git push` bypasses it for a work-in-progress branch, and says plainly
 that nothing was verified. The escape hatch is deliberate: a hook that cannot be

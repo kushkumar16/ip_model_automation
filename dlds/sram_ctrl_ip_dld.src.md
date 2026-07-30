@@ -63,7 +63,10 @@ frees up.
 ### 3.2 Response port
 
 Responses are returned in completion order, which is not necessarily request
-order, since banks complete independently.
+order, since banks complete independently. Only reads produce a response: a
+write is complete for the requester once the request port has accepted it, and no
+response is presented for it. The read half of an RMW produces the response for
+that command.
 
 | Name | Direction | Meaning |
 | --- | --- | --- |
@@ -166,7 +169,8 @@ READ returns data and a status. It occupies the bank for the access and the ECC
 check.
 
 WRITE takes data with the request and returns no data; the requester is told
-only that the write was accepted.
+only that the write was accepted, on the request port, and it receives no
+response afterwards.
 
 RMW reads the line, merges the new bytes, and writes it back. It holds the bank
 for both halves and cannot be interleaved with another access to the same bank

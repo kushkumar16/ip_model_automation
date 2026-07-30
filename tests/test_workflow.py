@@ -416,6 +416,35 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         ok, _output, _seconds = ci.run_gate("probe", f'"{sys.executable}" -c "raise SystemExit(3)"')
         self.assertFalse(ok)
 
+    def test_ci_checks_the_environment_it_cannot_assume(self):
+        """Local CI has no clean room, so it verifies the one a runner would give.
+
+        A hosted runner installs requirements.txt from scratch, so an undeclared
+        dependency fails on the first run. Here a gate can quietly depend on a
+        package someone installed by hand — python-docx was exactly that, needed
+        by check_overview_sync and the docx DLD path and declared nowhere.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_ci", repo_root / "tools" / "run_ci.py")
+        ci = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ci)
+
+        self.assertEqual(ci.missing_requirements(), [], "this environment does not match requirements.txt")
+
+        requirements = (repo_root / "requirements.txt").read_text(encoding="utf-8")
+        for package in ("python-docx", "PyYAML", "jsonschema", "ruff", "coverage"):
+            self.assertIn(package, requirements, f"{package} is used by a gate but not declared")
+
+        # Every third-party import in tools/ must be declared, or local CI passes
+        # on a machine where it happens to be installed and fails on a clone.
+        declared = {line.split("=")[0].split(">")[0].split("<")[0].strip().lower() for line in requirements.split()}
+        aliases = {"docx": "python-docx", "yaml": "pyyaml"}
+        for tool in (repo_root / "tools").glob("*.py"):
+            for match in re.finditer(r"^\s*(?:from|import) (\w+)", tool.read_text(encoding="utf-8"), re.M):
+                module = match.group(1)
+                if module in aliases:
+                    self.assertIn(aliases[module], declared, f"{tool.name} imports {module}, undeclared")
+
     def test_pre_push_hook_runs_ci_and_can_be_bypassed(self):
         """The hook is tracked, so every clone gets it with one config line."""
         repo_root = Path(__file__).resolve().parents[1]

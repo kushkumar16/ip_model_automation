@@ -67,6 +67,11 @@ EXTRA_CHECKS: list[tuple[str, str, str]] = [
         "python tools/check_overview_sync.py",
         "the Word overview has not drifted from project_overview.md",
     ),
+    (
+        "review_findings",
+        "python tools/check_review_findings.py",
+        "every recorded normalization review finding is fixed or dismissed by name",
+    ),
 ]
 
 

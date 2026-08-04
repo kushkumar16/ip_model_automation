@@ -63,3 +63,18 @@ arithmetic on values that are: the stated 17-cycle RMW total, minus the stated
 decomposition in `timing_model.end_to_end_paths.uncontended_rmw` sums to the
 stated 17. Recorded here because a reader would otherwise have no way to tell a
 derived number from a measured one.
+
+## Normalization review findings
+
+**F1 fixed** (`misplaced_unplaced`, medium) — the source's `8.0 Still open`
+section ends with a paragraph stating that Figure 3 must be reissued before the
+document is approved. Normalization had filed it under `## Unplaced Source
+Content`, which the extractor ignores, so an item the document states as blocking
+its own sign-off reached no reader downstream of extraction. Moved into
+`## 8. Open Items` as a bullet — both the relocation and the bullet formatting
+are shape changes, and it now appears in `reports/sram_ctrl_ip.gaps.md` alongside
+the four engineering open items.
+
+Worth noting for the next reviewer: as a trailing paragraph it would not have
+been extracted even from the right section, because the extractor reads Open
+Items as bullets. Placement alone was not enough.

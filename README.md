@@ -19,7 +19,8 @@ behavior from the DLD.
 | `templates/` | Reviewed template YAMLs (source of truth for generation); extractor drafts land here too (gitignored). |
 | `src/ip_model_automation/` | Flat SimPy model implementations. |
 | `tests/` | Per-IP unit tests and workflow tests. |
-| `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. |
+| `reports/` | **All generated output** (gitignored): gaps reports, readable template docs (md + html), agent requests, experiment results, pipeline state. Regenerated on every run — nothing durable belongs here. |
+| `decisions/` | **Review decisions**, one file per IP: why each gap the DLD left open was resolved the way it was. Written by hand, never generated, tracked in git. |
 | `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
 | `docs/proposals/` | Design proposals for stages not yet wired in, or wired in only partly. Each states what it costs as plainly as what it buys. |
 | `docs/` | Project documentation: `project_overview.md` (single consolidated doc, **canonical source**), `project_overview.docx` (hand-maintained Word rendering of the md, kept in sync by `tools/check_overview_sync.py`), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
@@ -495,7 +496,8 @@ resolves to the same default, so nothing breaks in the meantime).
 - `dlds/*_dld.md`: human-readable IP design documents (template authoring source).
 - `templates/*.template.yaml`: source of truth for model generation.
 - `templates/*.template.draft.yaml`: extractor output awaiting review (gitignored).
-- `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored).
+- `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored, regenerated every parse).
+- `decisions/<ip>.md`: the durable record of how each gap was resolved and why — tracked, never generated; the gaps report is not a place to write anything you want to keep.
 - `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
 - `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.

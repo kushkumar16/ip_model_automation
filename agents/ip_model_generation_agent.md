@@ -35,7 +35,9 @@ output to the same conventions.
 
 - DLD: `dlds/<ip_name>_dld.md`
 - Draft template + gaps report: `templates/<ip_name>.template.draft.yaml`,
-  `reports/<ip_name>.gaps.md`
+  `reports/<ip_name>.gaps.md` (generated, regenerated every parse, gitignored)
+- Review decisions: `decisions/<ip_name>.md` — tracked, never generated, and
+  where every resolved gap is recorded (see `decisions/README.md`)
 - Reviewed template: `templates/<ip_name>.template.yaml`
 - Prompt pack: `prompt_packs/<ip_name>.prompt.md`
 - Optional scaffold: `src/ip_model_automation/<ip_name>.py`
@@ -48,7 +50,12 @@ output to the same conventions.
 
 1. Generate the draft with `python tools/dld_to_template.py dlds/<ip_name>_dld.md`.
 2. Replace every `TODO_REVIEW` in the draft using only DLD-stated behavior;
-   record anything the DLD leaves open in the gaps report with a labeled default.
+   record anything the DLD leaves open in `decisions/<ip_name>.md` with a labeled
+   default. **Not** in the gaps report — that file is regenerated on every parse
+   and gitignored, so anything written there is lost. Record the gap, the default
+   chosen, why it is conservative, and the template field or test scenario that
+   carries it. Values you derived by arithmetic from stated ones belong there
+   too: a reader cannot otherwise tell a derived number from a stated one.
 3. Pass `template_lint.py` and
    `check_template_coverage.py <draft> <dld> --strict`, then promote the draft to
    `templates/<ip_name>.template.yaml`.

@@ -330,7 +330,9 @@ def review_prompt(ip_name: str, extra_context: str = "") -> str:
             f"1. Read reports/{ip_name}.gaps.md and dlds/{ip_name}_dld.md.",
             f"2. Replace every TODO_REVIEW in templates/{ip_name}.template.draft.yaml using only",
             "   DLD-stated behavior. For DLD open items, choose a conservative default and record",
-            "   it in the gaps report — never invent silent behavior.",
+            f"   it in decisions/{ip_name}.md with a labeled default — never invent silent",
+            "   behavior. Do not record it in the gaps report: that file is regenerated on",
+            "   every parse and gitignored, so anything written there is lost.",
             f"3. Run: python tools/template_lint.py templates/{ip_name}.template.draft.yaml",
             f"4. Run: python tools/check_template_coverage.py templates/{ip_name}.template.draft.yaml"
             f" dlds/{ip_name}_dld.md",

@@ -387,6 +387,67 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         prompt = pipeline.amend_prompt("mailbox_ip")
         self.assertIn("mailbox_ip", prompt)
 
+    def test_review_decisions_have_a_durable_tracked_home(self):
+        """Decisions must not live in a file the tooling regenerates.
+
+        They did: the gaps report's own instructions said "note it here", while
+        `dld_to_template.py` rewrites that file on every parse and `reports/` is
+        gitignored. A reviewer's reasoning — why a model behaves as it does —
+        was erased by the next extraction and never reached the repository.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        decisions = repo_root / "decisions"
+        self.assertTrue((decisions / "README.md").is_file(), "decisions/ must explain itself")
+
+        ignored = (repo_root / ".gitignore").read_text(encoding="utf-8")
+        self.assertNotIn("decisions/", ignored, "the durable home must not be gitignored")
+
+        # No tool may write into it — that is the whole point of the directory.
+        for tool in (repo_root / "tools").glob("*.py"):
+            text = tool.read_text(encoding="utf-8")
+            self.assertNotIn("decisions_dir", text, f"{tool.name} appears to generate into decisions/")
+
+        # The instruction that caused the loss must be gone from both places
+        # that carried it.
+        contract = (repo_root / "agents" / "ip_model_generation_agent.md").read_text(encoding="utf-8")
+        self.assertIn("decisions/<ip_name>.md", contract)
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", repo_root / "tools" / "auto_ip_pipeline.py")
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+        self.assertIn("decisions/mailbox_ip.md", pipeline.review_prompt("mailbox_ip"))
+
+    def test_generated_reports_never_destroy_hand_written_content(self):
+        """Regenerating a report must preserve anything a person wrote in it.
+
+        The durable home above is the fix; this is the safety net for content
+        still written in the old place, and for the next generated file someone
+        decides to annotate.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("dld_to_template", repo_root / "tools" / "dld_to_template.py")
+        extractor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(extractor)
+
+        # A stamped generation recognises itself, so the warning does not cry wolf.
+        stamped = extractor.stamp_generated("# Gaps Report\n\nsome generated body\n")
+        self.assertTrue(extractor.is_untouched_generation(stamped))
+
+        # One added line is enough to make it no longer the tool's own output.
+        self.assertFalse(extractor.is_untouched_generation(stamped + "\n**Resolved:** a human wrote this.\n"))
+        self.assertFalse(extractor.is_untouched_generation("no marker at all"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "probe_ip.gaps.md"
+            report.write_text(stamped + "\n**Resolved:** a human wrote this.\n", encoding="utf-8")
+            kept = extractor.preserve_hand_edits(report, "probe_ip")
+            self.assertIsNotNone(kept)
+            self.assertIn("a human wrote this", kept.read_text(encoding="utf-8"))
+
+            # An untouched generation is left alone — no clutter, no warning.
+            report.write_text(stamped, encoding="utf-8")
+            self.assertIsNone(extractor.preserve_hand_edits(report, "probe_ip"))
+
     def test_ci_runs_every_repo_wide_gate_the_harness_declares(self):
         """CI reads the harness, so a new repo-wide gate cannot escape it.
 

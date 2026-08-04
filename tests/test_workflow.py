@@ -448,6 +448,111 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             report.write_text(stamped, encoding="utf-8")
             self.assertIsNone(extractor.preserve_hand_edits(report, "probe_ip"))
 
+    def test_review_findings_gate_accounts_for_every_finding(self):
+        """The deterministic half of the reviewer stage, built before the reviewer.
+
+        A reviewer's verdict is sampled — ask twice, get two answers — so it never
+        votes. It writes an artifact and this gate asks a mechanical question:
+        is every recorded finding fixed or explicitly dismissed?
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "check_review_findings", repo_root / "tools" / "check_review_findings.py"
+        )
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+
+        import yaml  # noqa: PLC0415
+
+        src, normalized = "author source\n", "normalized document\n"
+        base = {
+            "ip": "probe_ip",
+            "source_sha256": gate.sha256_text(src),
+            "normalized_sha256": gate.sha256_text(normalized),
+            "findings": [
+                {
+                    "id": "F1",
+                    "class": "timing_attachment",
+                    "severity": "high",
+                    "claim": "A stated delay is on the wrong FSM.",
+                    "source": "6.0 Timing",
+                    "normalized": "6. FSM Timing Model",
+                    "why": "The model would charge it to the wrong process.",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "dlds").mkdir()
+            (root / "reviews").mkdir()
+            (root / "decisions").mkdir()
+            (root / "dlds" / "probe_ip_dld.src.md").write_text(src, encoding="utf-8")
+            (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
+            gate.DLDS_DIR, gate.REVIEWS_DIR, gate.DECISIONS_DIR = (
+                root / "dlds",
+                root / "reviews",
+                root / "decisions",
+            )
+            findings_file = root / "reviews" / "probe_ip.findings.yaml"
+
+            def write(data):
+                findings_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+            # An unresolved finding blocks.
+            write(base)
+            errors = gate.check_ip("probe_ip")
+            self.assertTrue(any("F1" in e and "unresolved" in e for e in errors), errors)
+
+            # Dismissal by name, with a reason, in the tracked decisions file.
+            (root / "decisions" / "probe_ip.md").write_text(
+                "- **F1 dismissed:** the table row is on the scrub FSM; the finding misreads it.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(gate.check_ip("probe_ip"), [])
+
+            # Editing either document makes the review stale: an old clean review
+            # must not vouch for new text.
+            (root / "dlds" / "probe_ip_dld.md").write_text(normalized + "edit\n", encoding="utf-8")
+            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip")))
+            (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
+
+            # A malformed file is an unknown result, never an absence of findings.
+            findings_file.write_text("findings: [oops\n", encoding="utf-8")
+            self.assertTrue(any("valid YAML" in e for e in gate.check_ip("probe_ip")))
+
+            broken = copy.deepcopy(base)
+            broken["findings"][0]["class"] = "vibes"
+            write(broken)
+            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip")))
+
+            missing_field = copy.deepcopy(base)
+            del missing_field["findings"][0]["why"]
+            write(missing_field)
+            self.assertTrue(any("missing `why`" in e for e in gate.check_ip("probe_ip")))
+
+            duplicated = copy.deepcopy(base)
+            duplicated["findings"].append(copy.deepcopy(base["findings"][0]))
+            write(duplicated)
+            self.assertTrue(any("duplicate" in e for e in gate.check_ip("probe_ip")))
+
+            # No findings file at all: nothing recorded, nothing to account for.
+            findings_file.unlink()
+            self.assertEqual(gate.check_ip("probe_ip"), [])
+
+    def test_review_findings_directory_is_tracked_and_documented(self):
+        """Findings must survive until resolved, so they cannot be gitignored."""
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertTrue((repo_root / "reviews" / "README.md").is_file())
+
+        ignored = (repo_root / ".gitignore").read_text(encoding="utf-8")
+        self.assertNotIn("reviews/", ignored)
+
+        readme = (repo_root / "reviews" / "README.md").read_text(encoding="utf-8")
+        # The asymmetry is the whole safety argument; it must be stated where
+        # someone writing a findings file will read it.
+        self.assertIn("may never pass one", readme)
+
     def test_ci_runs_every_repo_wide_gate_the_harness_declares(self):
         """CI reads the harness, so a new repo-wide gate cannot escape it.
 

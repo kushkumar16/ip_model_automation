@@ -1,0 +1,17 @@
+# Adversarial review of the normalization against its author source. See
+# docs/proposals/review_normalization_stage.md.
+#
+# An empty findings list is NOT a verdict that this normalization is faithful. It
+# records that a reviewer looked and reported nothing, which is a weaker claim.
+# The human stamp (check_dld_normalization.py --stamp) remains the judgement that
+# the meaning survived.
+#
+# History: the previous review of this pair raised F1 (misplaced_unplaced) --
+# the Figure 3 reissue requirement was filed under Unplaced Source Content
+# instead of Open Items, so it never reached the gaps report. That was fixed
+# rather than dismissed; see decisions/sram_ctrl_ip.md. This review is of the
+# corrected document.
+ip: sram_ctrl_ip
+source_sha256: 679ca42b42807f89e9c160f21c7600cae9d1d2d213ae2b2587d9664d3c5ba64d
+normalized_sha256: 836fc9480a13e2f8b6727f114cd60070bac473b08e879292e8b96ea0b414d233
+findings: []

@@ -207,6 +207,7 @@ State that should be visible to a test: bank_queues, outstanding_requests, corre
 - Whether the scrub should be suspended entirely under heavy demand load, or merely deprioritised as described above.
 - The correct queue-full backpressure policy when two requesters are starved at once; rev B leaves this as simple round robin.
 - Whether uncorrectable errors should raise an interrupt directly or be left to software polling.
+- Figure 3 in the rev A note (bank interleave diagram) has not been reissued for four banks and should be regenerated before this document is approved.
 
 ## Unplaced Source Content
 
@@ -219,4 +220,3 @@ State that should be visible to a test: bank_queues, outstanding_requests, corre
 - Status: issued for review.
 - Rev A (2026-05-11): First issue, single bank.
 - Rev B (2026-07-14): Four banks, ECC scrub added after the rev A review.
-- Figure 3 in the rev A note (bank interleave diagram) has not been reissued for four banks and should be regenerated before this document is approved.

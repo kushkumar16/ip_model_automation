@@ -1,8 +1,11 @@
 # Proposal: a `review_normalization` stage between the gate and the stamp
 
-**Status:** step 1 built — `tools/check_review_findings.py` and the findings
-format exist and are wired into local CI. No agent writes findings yet; the
-reviewer stage itself is unbuilt. Steps 2–4 of §8 are open.
+**Status:** steps 1–2 done. `tools/check_review_findings.py` and the findings
+format exist and are wired into local CI, and a mutation test has shown that an
+LLM reviewer does catch a timing moved to the wrong FSM while reporting nothing
+extra on the unmutated pair (§8). The stage itself is still unbuilt: no agent
+writes findings, and there is one real finding from the experiment awaiting a
+decision. Steps 3–4 are open.
 
 **Problem it addresses:** one class of error survives everything the pipeline
 currently checks. `check_dld_normalization.py` proves nothing was dropped,
@@ -212,11 +215,33 @@ things is how a fail-only check gets talked out of its findings.
    hand-written findings files. Same discipline as the extractor's calibration
    and the normalization gate: build the thing that judges before the thing that
    is judged.
-2. **A mutation test for the reviewer itself.** Take the real `sram_ctrl_ip`
-   pair, move one stated timing to the wrong FSM, and check the reviewer catches
-   it. This is the only honest way to learn whether the stage earns its cost —
-   the normalization gate looked fine under calibration and still had five rules
-   that rejected legal reshapes, and only a real document found them.
+2. **A mutation test for the reviewer itself.** ✅ **Done, and it earns its cost.**
+   `Scrub entry read: 5 cycles` was moved from the ECC Scrub FSM's row to the
+   Bank Scheduler's in a copy of the real `sram_ctrl_ip` pair. The mechanical
+   gate passes that mutation — every token conserved, nothing invented — so the
+   model would silently charge a scrub delay to every bank access.
+
+   | Pair | Findings |
+   | --- | --- |
+   | mutated | 2 — the injected timing (`timing_attachment`, high, citing both documents) **and** the Figure 3 observation below |
+   | control (the real, stamped pair) | 1 — the Figure 3 observation only |
+
+   The delta is exactly the mutation: caught when present, not reported when
+   absent. That is the property the stage lives or dies on, and it was measured
+   rather than assumed.
+
+   The repeated finding is not noise. Both runs observed that the source's
+   `8.0 Still open` section ends with a sentence about Figure 3 needing reissue,
+   and that normalization filed it under `## Unplaced Source Content` instead of
+   `## Open Items` — so it never reaches the gaps report, and a reviewer reading
+   the four remaining bullets would think the list complete. Whether that is a
+   defect or a judgement call is exactly the kind of question the dismissal
+   mechanism exists for.
+
+   Caveat worth keeping: one mutation, one IP, one model. It establishes that the
+   signal exists, not its rate. A larger mutation set — wait models on the wrong
+   interface, an altered error condition — is the way to learn precision, and is
+   cheap to run now that the harness exists (`reports/reviewer_experiment/`).
 3. **Write `agents/normalization_reviewer_agent.md`** — the §2 asymmetry, the §4
    checklist, the file format, and a standing instruction to report nothing when
    nothing is found.

@@ -533,6 +533,22 @@ for **every** DLD in the repo (template exists, lints, covers its DLD), then
 the model/test flow, and regenerates the readable template docs. A single
 green result proves the whole repo is consistent.
 
+To run *every* repo-wide gate, not just that chain — style, code coverage,
+provenance, normalization fidelity, and the Word-overview sync as well:
+
+```powershell
+python tools\run_ci.py                 # about a minute
+python tools\run_ci.py --install-hook  # once per clone: run it before every push
+```
+
+This is the repo's CI, and it is **local by choice** — there is no hosted
+runner. The gate list is read from the harness, so adding a `scope: repo` stage
+adds it to CI with no code change. Running locally gives up two things a hosted
+runner provides, so the tool replaces both: it checks that the declared
+dependencies are actually installed (locally a gate can quietly depend on a
+package one machine happens to have), and it warns when the working tree is
+dirty, because then the files being checked are not the commits being pushed.
+
 Two more repo-wide hard gates run in the automated pipeline alongside the
 chain above: `python tools\check_code_style.py` (ruff lint + format — the
 coding style guide's mechanical half) and `python tools\run_code_coverage.py
@@ -982,10 +998,11 @@ drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
-*As of 2026-07-14: all gates green — `validate_dld_flow.py` OK, full unit
-suite passing (run it for the current count).*
+*As of 2026-07-28: all gates green — `python tools/run_ci.py` runs every one of
+them in about a minute, and the pre-push hook runs it before anything leaves the
+machine.*
 
-## Modeled IPs (9)
+## Modeled IPs (10)
 
 | IP | What it models |
 | --- | --- |
@@ -998,6 +1015,7 @@ suite passing (run it for the current count).*
 | `mailbox_ip` | Multi-channel inter-processor messaging: per-channel FIFOs, doorbells, masked interrupt aggregation. |
 | `spi_master_ip` | SPI master with TX/RX byte FIFOs, bit-shift transfer engine, chip-select framing, masked interrupts. |
 | `i3c_ip` | I3C master with queued command engine, bit-level SDR transfer engine, IBI detection/arbitration, masked interrupts. |
+| `sram_ctrl_ip` | Banked on-chip buffer SRAM: request accept and bank decode, round-robin bank scheduling with ECC check and read-modify-write, background ECC scrub. The first IP whose DLD arrived off-shape and was normalized into the pipeline. |
 
 ## Modeled subsystems (2)
 
@@ -1012,6 +1030,17 @@ suite passing (run it for the current count).*
   the pipeline**: brand-new DLDs went through extraction, review, modeling,
   and testing, and the whole suite validated. The same path carries both
   subsystems.
+- `sram_ctrl_ip` went further: its DLD arrived **in another house style**, with
+  no FSM or interface the extractor could read, and was normalized into shape
+  before any of the above ran. Both agent stages passed on the first attempt.
+  It is the proof that the pipeline accepts documents as engineers write them,
+  not only documents written to its conventions.
+- **Every gate runs in one command, locally.** `python tools/run_ci.py` runs the
+  repo-wide gates — read from the harness, so adding a stage adds it to CI — and
+  `.githooks/pre-push` runs them before a push. There is no hosted CI by choice,
+  so the runner replaces what a hosted one gives free: it checks that the
+  declared dependencies are actually installed, and says so when the working
+  tree is dirty and the files checked are not the commits being pushed.
 - The change-driven runner (`auto_ip_pipeline.py`), readable template docs
   (Markdown + HTML), and the performance-experiments layer are in place.
 - A written coding style guide with a ruff-based `code_style` hard gate keeps

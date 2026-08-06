@@ -45,8 +45,9 @@ inputs:
 
 agent_contract: agents/ip_model_generation_agent.md
 normalization_contract: agents/dld_normalization_agent.md
+model_review_contract: agents/model_review_agent.md
 
-# Named agent commands for the two `kind: agent` stages. Select one with
+# Named agent commands for the `kind: agent` stages. Select one with
 # `python tools/auto_ip_pipeline.py --agent <name>` (or pass a raw command
 # via --agent-cmd, which overrides any profile). The pipeline is
 # agent-agnostic — any coding agent works if its command:
@@ -150,6 +151,29 @@ stages:
     command: python -m unittest tests.test_{ip}
     required: true
     notes: Per-IP unit tests — the gate that drives the agent_implementation / amend_implementation loop.
+  - name: review_model
+    kind: agent
+    command: external_agent_or_manual_edit
+    required: false
+    gates: [check_review_findings]
+    max_attempts: 1
+    notes: >
+      Adversarial read of the model and its tests against their template, writing
+      reviews/{ip}.model.findings.yaml. Contract in agents/model_review_agent.md.
+      Exists because every other gate on the model shares one blind spot: the
+      tests are written by the agent that writes the model, so a model that
+      misimplements its contract and a test that agrees with it both pass. It may
+      fail a model and may never pass one - an empty findings list means nothing
+      was found, not that the model is faithful.
+  - name: check_review_findings
+    command: python tools/check_review_findings.py {ip}
+    required: true
+    awaiting_human: true
+    notes: >
+      Deterministic - every recorded finding, of any review kind, must be fixed
+      (which makes that review stale) or dismissed by name in decisions/{ip}.md.
+      Pauses as *awaiting* rather than failing: resolving a finding is a human
+      step, and a sampled verdict must never sit inside an agent's retry loop.
   - name: stamp_provenance
     command: python tools/check_model_provenance.py --stamp {ip}
     required: true
@@ -202,4 +226,5 @@ pass_criteria:
   - every template FSM has scenario coverage
   - unit tests pass (greenfield generate, or brownfield amend from the template diff)
   - model provenance baseline stamped after unit tests pass
+  - every recorded review finding fixed or dismissed by name
   - code style check passes (ruff lint + format)

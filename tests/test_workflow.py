@@ -467,6 +467,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         src, normalized = "author source\n", "normalized document\n"
         base = {
             "ip": "probe_ip",
+            "kind": "normalization",
             "source_sha256": gate.sha256_text(src),
             "normalized_sha256": gate.sha256_text(normalized),
             "findings": [
@@ -489,19 +490,20 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             (root / "decisions").mkdir()
             (root / "dlds" / "probe_ip_dld.src.md").write_text(src, encoding="utf-8")
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
-            gate.DLDS_DIR, gate.REVIEWS_DIR, gate.DECISIONS_DIR = (
+            gate.REPO_ROOT, gate.DLDS_DIR, gate.REVIEWS_DIR, gate.DECISIONS_DIR = (
+                root,
                 root / "dlds",
                 root / "reviews",
                 root / "decisions",
             )
-            findings_file = root / "reviews" / "probe_ip.findings.yaml"
+            findings_file = root / "reviews" / "probe_ip.normalization.findings.yaml"
 
             def write(data):
                 findings_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
             # An unresolved finding blocks.
             write(base)
-            errors = gate.check_ip("probe_ip")
+            errors = gate.check_ip("probe_ip", "normalization")
             self.assertTrue(any("F1" in e and "unresolved" in e for e in errors), errors)
 
             # Dismissal by name, with a reason, in the tracked decisions file.
@@ -509,36 +511,93 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 "- **F1 dismissed:** the table row is on the scrub FSM; the finding misreads it.\n",
                 encoding="utf-8",
             )
-            self.assertEqual(gate.check_ip("probe_ip"), [])
+            self.assertEqual(gate.check_ip("probe_ip", "normalization"), [])
 
             # Editing either document makes the review stale: an old clean review
             # must not vouch for new text.
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized + "edit\n", encoding="utf-8")
-            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip", "normalization")))
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
 
             # A malformed file is an unknown result, never an absence of findings.
             findings_file.write_text("findings: [oops\n", encoding="utf-8")
-            self.assertTrue(any("valid YAML" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("valid YAML" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             broken = copy.deepcopy(base)
             broken["findings"][0]["class"] = "vibes"
             write(broken)
-            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             missing_field = copy.deepcopy(base)
             del missing_field["findings"][0]["why"]
             write(missing_field)
-            self.assertTrue(any("missing `why`" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("missing `why`" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             duplicated = copy.deepcopy(base)
             duplicated["findings"].append(copy.deepcopy(base["findings"][0]))
             write(duplicated)
-            self.assertTrue(any("duplicate" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("duplicate" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             # No findings file at all: nothing recorded, nothing to account for.
             findings_file.unlink()
-            self.assertEqual(gate.check_ip("probe_ip"), [])
+            self.assertEqual(gate.check_ip("probe_ip", "normalization"), [])
+
+            # A model review is a claim about a different set of files, with its
+            # own vocabulary. A normalization class must not be usable here.
+            (root / "templates").mkdir()
+            (root / "src" / "ip_model_automation").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "templates" / "probe_ip.template.yaml").write_text("t\n", encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("m\n", encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text("x\n", encoding="utf-8")
+            model_review = {
+                "ip": "probe_ip",
+                "kind": "model",
+                "template_sha256": gate.sha256_text("t\n"),
+                "model_sha256": gate.sha256_text("m\n"),
+                "tests_sha256": gate.sha256_text("x\n"),
+                "findings": [
+                    {
+                        "id": "M1",
+                        "class": "timing_mismatch",
+                        "severity": "high",
+                        "claim": "A delay differs from the template.",
+                        "template": "timing_model...cycles: 6",
+                        "model": "probe_ip.py:48 uses 12",
+                        "why": "Simulated timing would be wrong.",
+                    }
+                ],
+            }
+            model_file = root / "reviews" / "probe_ip.model.findings.yaml"
+            model_file.write_text(yaml.safe_dump(model_review, sort_keys=False), encoding="utf-8")
+            self.assertTrue(any("M1" in e and "unresolved" in e for e in gate.check_ip("probe_ip", "model")))
+
+            wrong_vocabulary = copy.deepcopy(model_review)
+            wrong_vocabulary["findings"][0]["class"] = "timing_attachment"  # a normalization class
+            model_file.write_text(yaml.safe_dump(wrong_vocabulary, sort_keys=False), encoding="utf-8")
+            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip", "model")))
+
+            # Editing the model — not the DLD — makes a model review stale.
+            model_file.write_text(yaml.safe_dump(model_review, sort_keys=False), encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("m2\n", encoding="utf-8")
+            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip", "model")))
+
+    def test_finding_ids_are_unique_across_an_ips_reviews(self):
+        """One dismissal must not silently clear two different findings.
+
+        Dismissals live in a single decisions/<ip>.md and are matched by id, so
+        `F1` meaning one thing in a normalization review and another in a model
+        review would let one line resolve both.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "check_review_findings", repo_root / "tools" / "check_review_findings.py"
+        )
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+
+        for ip in gate.reviewed_ips():
+            self.assertEqual(gate.duplicate_ids(ip), [], f"{ip} reuses a finding id across reviews")
 
     def test_review_findings_directory_is_tracked_and_documented(self):
         """Findings must survive until resolved, so they cannot be gitignored."""
@@ -759,9 +818,12 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertLess(names.index("check_normalization"), names.index("check_normalization_stamp"))
         self.assertLess(names.index("check_normalization_stamp"), names.index("parse_dld"))
 
-        # Nothing else may quietly claim that exemption.
-        awaiting = [n for n, s in stages.items() if s.get("awaiting_human")]
-        self.assertEqual(awaiting, ["check_normalization_stamp"])
+        # The exemption is for gates the pipeline cannot satisfy in principle,
+        # because a person must act. Both of these wait on a human decision: one
+        # on the normalization stamp, one on unresolved review findings. Anything
+        # else claiming it would be turning a real failure into a shrug.
+        awaiting = sorted(n for n, s in stages.items() if s.get("awaiting_human"))
+        self.assertEqual(awaiting, ["check_normalization_stamp", "check_review_findings"])
 
     def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
         """An IP whose only file is a .src.md must still be discovered and routed.

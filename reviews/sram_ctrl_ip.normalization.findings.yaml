@@ -12,6 +12,7 @@
 # rather than dismissed; see decisions/sram_ctrl_ip.md. This review is of the
 # corrected document.
 ip: sram_ctrl_ip
+kind: normalization
 source_sha256: 679ca42b42807f89e9c160f21c7600cae9d1d2d213ae2b2587d9664d3c5ba64d
 normalized_sha256: 836fc9480a13e2f8b6727f114cd60070bac473b08e879292e8b96ea0b414d233
 findings: []

@@ -49,21 +49,55 @@ DLDS_DIR = REPO_ROOT / "dlds"
 REVIEWS_DIR = REPO_ROOT / "reviews"
 DECISIONS_DIR = REPO_ROOT / "decisions"
 
-# Closed vocabulary. A reviewer that cannot classify an observation should not
-# file it: an "other" bucket is where vague commentary accumulates, and every
-# vague finding costs the same human attention as a real one.
-FINDING_CLASSES = frozenset(
-    {
-        "timing_attachment",
-        "wait_model_attachment",
-        "state_semantics",
-        "command_effect",
-        "misplaced_unplaced",
-        "open_item_drift",
-    }
-)
+# Two review kinds, because there are two places a faithful-looking artifact can
+# still be wrong, and each compares a different pair of things:
+#
+#   normalization — the reshaped DLD against the author's original
+#   model         — the generated model and its tests against their template
+#
+# Each declares the files it is a statement about (staleness is checked against
+# them), the fields a finding must carry, and its own closed class vocabulary.
+# A reviewer that cannot classify an observation should not file it: an "other"
+# bucket is where vague commentary accumulates, and every vague finding costs the
+# same human attention as a real one.
+REVIEW_KINDS: dict[str, dict] = {
+    "normalization": {
+        "subjects": {
+            "source_sha256": "dlds/{ip}_dld.src.md",
+            "normalized_sha256": "dlds/{ip}_dld.md",
+        },
+        "fields": ("id", "class", "severity", "claim", "source", "normalized", "why"),
+        "classes": frozenset(
+            {
+                "timing_attachment",
+                "wait_model_attachment",
+                "state_semantics",
+                "command_effect",
+                "misplaced_unplaced",
+                "open_item_drift",
+            }
+        ),
+    },
+    "model": {
+        "subjects": {
+            "template_sha256": "templates/{ip}.template.yaml",
+            "model_sha256": "src/ip_model_automation/{ip}.py",
+            "tests_sha256": "tests/test_{ip}.py",
+        },
+        "fields": ("id", "class", "severity", "claim", "template", "model", "why"),
+        "classes": frozenset(
+            {
+                "timing_mismatch",
+                "capacity_mismatch",
+                "fsm_structure",
+                "wait_model_impl",
+                "test_asserts_wrong_thing",
+                "scenario_gap",
+            }
+        ),
+    },
+}
 SEVERITIES = frozenset({"high", "medium", "low"})
-REQUIRED_FIELDS = ("id", "class", "severity", "claim", "source", "normalized", "why")
 
 # `- **F1 dismissed:** reason` / `- **F1 fixed:** reason` in decisions/<ip>.md.
 DISMISSAL_RE = re.compile(r"\*\*\s*([A-Za-z][\w.-]*)\s+(dismissed|fixed)\s*:?\s*\*\*\s*(.+)", re.IGNORECASE)
@@ -81,14 +115,25 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def findings_path(ip: str) -> Path:
-    return REVIEWS_DIR / f"{ip}.findings.yaml"
+def findings_path(ip: str, kind: str) -> Path:
+    return REVIEWS_DIR / f"{ip}.{kind}.findings.yaml"
+
+
+def reviews() -> list[tuple[str, str]]:
+    """Every recorded review, as (ip, kind), from `<ip>.<kind>.findings.yaml`."""
+    if not REVIEWS_DIR.is_dir():
+        return []
+    found: list[tuple[str, str]] = []
+    for path in sorted(REVIEWS_DIR.glob("*.findings.yaml")):
+        stem = path.name[: -len(".findings.yaml")]
+        ip, _, kind = stem.rpartition(".")
+        if ip and kind in REVIEW_KINDS:
+            found.append((ip, kind))
+    return found
 
 
 def reviewed_ips() -> list[str]:
-    if not REVIEWS_DIR.is_dir():
-        return []
-    return sorted(path.name[: -len(".findings.yaml")] for path in REVIEWS_DIR.glob("*.findings.yaml"))
+    return sorted({ip for ip, _kind in reviews()})
 
 
 def load_findings(path: Path) -> tuple[dict, list[str]]:
@@ -107,7 +152,12 @@ def load_findings(path: Path) -> tuple[dict, list[str]]:
         return {}, [f"{path.name}: expected a mapping at the top level"]
 
     errors: list[str] = []
-    for key in ("ip", "source_sha256", "normalized_sha256"):
+    kind = data.get("kind")
+    if kind not in REVIEW_KINDS:
+        return data, [f"{path.name}: unknown review kind `{kind}` (one of: {', '.join(sorted(REVIEW_KINDS))})"]
+    spec = REVIEW_KINDS[kind]
+
+    for key in ("ip", *spec["subjects"]):
         if not isinstance(data.get(key), str) or not data[key].strip():
             errors.append(f"{path.name}: missing `{key}`")
 
@@ -123,7 +173,7 @@ def load_findings(path: Path) -> tuple[dict, list[str]]:
         if not isinstance(finding, dict):
             errors.append(f"{where}: expected a mapping")
             continue
-        for field in REQUIRED_FIELDS:
+        for field in spec["fields"]:
             value = finding.get(field)
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"{where}: missing `{field}`")
@@ -132,8 +182,11 @@ def load_findings(path: Path) -> tuple[dict, list[str]]:
             if identifier in seen:
                 errors.append(f"{where}: duplicate finding id `{identifier}`")
             seen.add(identifier)
-        if isinstance(finding.get("class"), str) and finding["class"] not in FINDING_CLASSES:
-            errors.append(f"{where}: unknown class `{finding['class']}` (one of: {', '.join(sorted(FINDING_CLASSES))})")
+        if isinstance(finding.get("class"), str) and finding["class"] not in spec["classes"]:
+            errors.append(
+                f"{where}: unknown class `{finding['class']}` for a {kind} review "
+                f"(one of: {', '.join(sorted(spec['classes']))})"
+            )
         if isinstance(finding.get("severity"), str) and finding["severity"] not in SEVERITIES:
             errors.append(f"{where}: unknown severity `{finding['severity']}`")
 
@@ -152,22 +205,24 @@ def dismissals(ip: str) -> dict[str, str]:
     return found
 
 
-def review_is_stale(data: dict, ip: str) -> str | None:
-    """Whether the reviewed documents have changed since the review was written."""
-    src = DLDS_DIR / f"{ip}_dld.src.md"
-    normalized = DLDS_DIR / f"{ip}_dld.md"
-    for path in (src, normalized):
+def review_is_stale(data: dict, ip: str, kind: str) -> str | None:
+    """Whether anything the review is a statement about has changed since.
+
+    A review is a claim about specific files. Edit one and the claim no longer
+    covers what is there — including the case that matters most, where a finding
+    was fixed and a fresh review is owed.
+    """
+    for key, pattern in REVIEW_KINDS[kind]["subjects"].items():
+        path = REPO_ROOT / pattern.format(ip=ip)
         if not path.is_file():
             return f"{path.name} does not exist, so the review cannot be checked against it"
-    if data.get("source_sha256") != sha256_text(src.read_text(encoding="utf-8")):
-        return "the author source changed since this review"
-    if data.get("normalized_sha256") != sha256_text(normalized.read_text(encoding="utf-8")):
-        return "the normalized DLD changed since this review"
+        if data.get(key) != sha256_text(path.read_text(encoding="utf-8")):
+            return f"{path.name} changed since this review"
     return None
 
 
-def check_ip(ip: str) -> list[str]:
-    path = findings_path(ip)
+def check_ip(ip: str, kind: str) -> list[str]:
+    path = findings_path(ip, kind)
     if not path.is_file():
         return []
 
@@ -175,15 +230,17 @@ def check_ip(ip: str) -> list[str]:
     if errors:
         return errors
 
-    stale = review_is_stale(data, ip)
+    stale = review_is_stale(data, ip, kind)
     if stale:
         return [
-            f"{ip}: review is stale - {stale}. Re-run the reviewer against the current "
-            f"documents; an old clean review must not vouch for new text."
+            f"{ip} ({kind}): review is stale - {stale}. Re-run the reviewer against the current "
+            f"files; an old clean review must not vouch for something that has changed since."
         ]
 
     if data.get("ip") != ip:
         errors.append(f"{path.name}: declares ip `{data.get('ip')}` but is named for `{ip}`")
+    if data.get("kind") != kind:
+        errors.append(f"{path.name}: declares kind `{data.get('kind')}` but is named for `{kind}`")
 
     resolved = dismissals(ip)
     for finding in data["findings"]:
@@ -191,25 +248,53 @@ def check_ip(ip: str) -> list[str]:
         if identifier in resolved:
             continue
         errors.append(
-            f"{ip}: finding {identifier} ({finding.get('class')}, {finding.get('severity')}) is unresolved - "
-            f"{finding.get('claim')} Fix the normalization, or dismiss it by name in "
+            f"{ip} ({kind}): finding {identifier} ({finding.get('class')}, {finding.get('severity')}) is "
+            f"unresolved - {finding.get('claim')} Fix it, or dismiss it by name in "
             f"decisions/{ip}.md (`- **{identifier} dismissed:** <reason>`)."
         )
     return errors
 
 
+def duplicate_ids(ip: str) -> list[str]:
+    """Finding ids must be unique across an IP's reviews.
+
+    Dismissals are written in one file per IP and matched by id, so `F1` meaning
+    one thing in a normalization review and another in a model review would let a
+    single dismissal silently clear both.
+    """
+    seen: dict[str, str] = {}
+    clashes: list[str] = []
+    for review_ip, kind in reviews():
+        if review_ip != ip:
+            continue
+        data, errors = load_findings(findings_path(ip, kind))
+        if errors:
+            continue
+        for finding in data.get("findings", []):
+            identifier = finding.get("id")
+            if not isinstance(identifier, str):
+                continue
+            if identifier in seen:
+                clashes.append(
+                    f"{ip}: finding id `{identifier}` is used by both the {seen[identifier]} and {kind} "
+                    f"reviews; one dismissal would clear both. Give them distinct ids."
+                )
+            seen[identifier] = kind
+    return clashes
+
+
 def outstanding_summary() -> list[str]:
     lines: list[str] = []
-    for ip in reviewed_ips():
-        data, errors = load_findings(findings_path(ip))
+    for ip, kind in reviews():
+        data, errors = load_findings(findings_path(ip, kind))
         if errors:
-            lines.append(f"  {ip}: findings file is malformed")
+            lines.append(f"  {ip} ({kind}): findings file is malformed")
             continue
         resolved = dismissals(ip)
         total = len(data["findings"])
         open_count = sum(1 for f in data["findings"] if f.get("id") not in resolved)
-        state = "stale" if review_is_stale(data, ip) else "current"
-        lines.append(f"  {ip}: {total} finding(s), {open_count} unresolved, review {state}")
+        state = "stale" if review_is_stale(data, ip, kind) else "current"
+        lines.append(f"  {ip} ({kind}): {total} finding(s), {open_count} unresolved, review {state}")
     return lines or ["  (no reviews recorded)"]
 
 
@@ -225,8 +310,9 @@ def main(argv: list[str]) -> int:
             print(line)
         return 0
 
-    ips = args.ips or reviewed_ips()
-    if not ips:
+    wanted = set(args.ips) if args.ips else None
+    pairs = [(ip, kind) for ip, kind in reviews() if wanted is None or ip in wanted]
+    if not pairs:
         # No reviewer has run. That is the current state of the world, not a
         # clean bill of health: the stage is unbuilt (see the proposal's build
         # order), and this becomes a hard requirement when it is wired in.
@@ -234,15 +320,17 @@ def main(argv: list[str]) -> int:
         return 0
 
     errors: list[str] = []
-    for ip in ips:
-        errors += check_ip(ip)
+    for ip in sorted({ip for ip, _kind in pairs}):
+        errors += duplicate_ids(ip)
+    for ip, kind in pairs:
+        errors += check_ip(ip, kind)
 
     if errors:
         print("review findings: FAIL", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print(f"review findings: OK ({len(ips)} review(s), every finding accounted for)")
+    print(f"review findings: OK ({len(pairs)} review(s), every finding accounted for)")
     return 0
 
 

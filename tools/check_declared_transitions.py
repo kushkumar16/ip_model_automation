@@ -65,6 +65,29 @@ def load_template(path: Path) -> dict[str, Any]:
     return data
 
 
+def state_names(fsm: dict[str, Any]) -> set[str]:
+    """A state may be a bare name or a mapping carrying a description."""
+    return {str(s.get("name")) if isinstance(s, dict) else str(s) for s in fsm.get("states", [])}
+
+
+def states_without_exit(template: dict[str, Any]) -> list[tuple[str, str]]:
+    """States the template lists with no declared way out.
+
+    This needs no model and no tests — it is a property of the contract alone,
+    which is what makes it checkable at promotion time, before a model exists to
+    deviate from it. A state with no declared exit does not constrain the model
+    at all: whatever the model does there is undeclared by construction.
+    """
+    missing: list[tuple[str, str]] = []
+    for fsm in template.get("fsm_processes", []):
+        if not isinstance(fsm, dict):
+            continue
+        name = str(fsm.get("name"))
+        sources = {str(t.get("from")) for t in fsm.get("transitions", []) if isinstance(t, dict)}
+        missing.extend((name, state) for state in sorted(state_names(fsm) - sources))
+    return missing
+
+
 def declared_transitions(template: dict[str, Any]) -> set[Transition]:
     """Every ``(fsm, from, to)`` the template lists."""
     declared: set[Transition] = set()
@@ -151,17 +174,27 @@ def run_tests(ip: str) -> tuple[bool, int]:
 # Report
 # --------------------------------------------------------------------------- #
 def check_ip(ip: str, template_path: Path) -> dict[str, Any]:
-    declared = declared_transitions(load_template(template_path))
+    template = load_template(template_path)
+    declared = declared_transitions(template)
+    no_exit = states_without_exit(template)
     classes = model_classes(ip)
     with recording(classes) as taken:
         passed, test_count = run_tests(ip)
     observed = set(taken)
+    undeclared = sorted(observed - declared)
+    dead_ends = {(fsm, state) for fsm, state in no_exit}
     return {
         "ip": ip,
         "tests_passed": passed,
         "test_count": test_count,
-        "undeclared": sorted(observed - declared),
+        "undeclared": undeclared,
+        # An undeclared transition out of a state with no declared exit is not
+        # really the model disagreeing with the contract; the contract said
+        # nothing there. Separating the two is what stops a gate blaming the
+        # model for a hole in the template.
+        "undeclared_from_dead_end": [t for t in undeclared if (t[0], t[1]) in dead_ends],
         "never_taken": sorted(declared - observed),
+        "states_without_exit": no_exit,
         "declared_count": len(declared),
         "observed_count": len(observed),
     }
@@ -174,15 +207,23 @@ def format_report(results: list[dict[str, Any]]) -> list[str]:
         matched = result["observed_count"] - len(result["undeclared"])
         lines.append(
             f"{ip}: {matched}/{result['declared_count']} declared transitions taken, "
-            f"{len(result['undeclared'])} undeclared, {len(result['never_taken'])} never taken "
+            f"{len(result['undeclared'])} undeclared "
+            f"({len(result['undeclared_from_dead_end'])} from a state with no declared exit), "
+            f"{len(result['never_taken'])} never taken, "
+            f"{len(result['states_without_exit'])} states with no declared exit "
             f"({result['test_count']} tests)"
         )
         if not result["tests_passed"]:
             lines.append("  WARN tests did not all pass, so this run is not a full sweep of the declared graph")
+        for fsm, state in result["states_without_exit"]:
+            lines.append(f"  NO DECLARED EXIT {fsm}: {state}")
         for fsm, source, target in result["undeclared"]:
-            lines.append(f"  UNDECLARED {fsm}: {source} -> {target}")
+            marker = "*" if (fsm, source) in {(f, s) for f, s in result["states_without_exit"]} else " "
+            lines.append(f"  UNDECLARED{marker} {fsm}: {source} -> {target}")
         for fsm, source, target in result["never_taken"]:
             lines.append(f"  NEVER TAKEN {fsm}: {source} -> {target}")
+    lines.append("")
+    lines.append("* the state it leaves has no declared exit at all, so the template constrained nothing here")
     return lines
 
 
@@ -213,8 +254,13 @@ def main(argv: list[str]) -> int:
         print(line)
 
     undeclared_total = sum(len(result["undeclared"]) for result in results)
+    dead_end_total = sum(len(result["undeclared_from_dead_end"]) for result in results)
     never_taken_total = sum(len(result["never_taken"]) for result in results)
-    print(f"\ntotal: {undeclared_total} undeclared, {never_taken_total} declared-but-never-taken")
+    no_exit_total = sum(len(result["states_without_exit"]) for result in results)
+    print(
+        f"\ntotal: {undeclared_total} undeclared ({dead_end_total} from a state with no declared exit), "
+        f"{never_taken_total} declared-but-never-taken, {no_exit_total} states with no declared exit"
+    )
 
     if args.strict and undeclared_total:
         return 1

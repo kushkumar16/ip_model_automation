@@ -415,6 +415,7 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
     if not fsms:
         gaps.append("fsm_processes: no `### N.M <Name> FSM` sections found in DLD")
     fsm_names = [f["name"] for f in fsms]
+    gaps.extend(transition_exit_gaps(fsms))
 
     interfaces = extract_interfaces(lines)
     if not interfaces:
@@ -497,6 +498,26 @@ def extract_description(lines: list[str]) -> str | None:
     return None
 
 
+def transition_exit_gaps(fsms: list[dict[str, Any]]) -> list[str]:
+    """Name every state whose exit the DLD has not stated.
+
+    This parser reads a `States:` bullet list and no transition table at all, so
+    at draft time *every* state's exit is unstated. Saying so per state, rather
+    than once per FSM, is the point: the completing agent is answering "how does
+    this machine leave S" once for each S, and the gaps report is where the
+    question is asked. A state that genuinely has no exit is a legitimate answer
+    — it just has to be given rather than left blank.
+    """
+    gaps: list[str] = []
+    for fsm in fsms:
+        for state in fsm.get("states", []):
+            gaps.append(
+                f"fsm_processes.{fsm['name']}: no exit stated from `{state}`; "
+                f"TODO_REVIEW transition emitted — state how this state is left, or that it is terminal"
+            )
+    return gaps
+
+
 def dict_states(fsms: list[dict[str, Any]], name: str) -> list[str]:
     for f in fsms:
         if f["name"] == name:
@@ -510,20 +531,28 @@ def strip_raw(interface: dict[str, Any]) -> dict[str, Any]:
 
 def build_fsm_entry(fsm: dict[str, Any], interfaces: list[dict[str, Any]]) -> dict[str, Any]:
     states = fsm["states"] or ["RESET", "IDLE"]
-    first, second = states[0], (states[1] if len(states) > 1 else states[0])
     return {
         "name": fsm["name"],
         "purpose": fsm["purpose"],
         "simpy_process": True,
         "states": states,
+        # One placeholder per state, not one for the FSM. Nothing here parses the
+        # DLD's transition table, so every exit is unstated at this point -- and a
+        # single placeholder let a completed template declare how a machine is
+        # entered while never saying how it is left. Across the twelve promoted
+        # templates that produced 226 states with no declared exit out of 373, and
+        # 173 of the 227 transitions a model was later observed taking without
+        # declaration started from one of them. A marker per state makes each hole
+        # refuse promotion on its own, via check_template_coverage.py --strict.
         "transitions": [
             {
-                "from": first,
-                "to": second,
+                "from": state,
+                "to": TODO,
                 "condition": TODO,
                 "actions": [TODO],
                 "latency_cycles": 1,
             }
+            for state in states
         ],
         "functional_responsibilities": [TODO],
         "interfaces_touched": [interfaces[0]["name"]] if interfaces else [TODO],

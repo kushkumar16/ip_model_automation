@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 import simpy
+import yaml
 
 from ip_model_automation.common import get_ip_logger
 from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, list_ips, resolve_artifacts
@@ -113,6 +114,15 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
         self.assertIn("templates: 12", text)
+
+        # Every contract an agent stage is told to follow must be a file that
+        # exists. A stage pointing at a missing contract is an agent invoked with
+        # no instructions, which fails as vague output rather than as an error.
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        contracts = [v for k, v in harness.items() if k.endswith("_contract")]
+        self.assertEqual(len(contracts), 4, "expected one contract per agent-driven stage family")
+        for contract in contracts:
+            self.assertTrue((repo_root / contract).is_file(), f"missing agent contract: {contract}")
 
     def test_agent_profile_resolution_supports_any_vendor(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -819,11 +829,28 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertLess(names.index("check_normalization_stamp"), names.index("parse_dld"))
 
         # The exemption is for gates the pipeline cannot satisfy in principle,
-        # because a person must act. Both of these wait on a human decision: one
-        # on the normalization stamp, one on unresolved review findings. Anything
-        # else claiming it would be turning a real failure into a shrug.
+        # because a person must act. All three wait on a human decision: one on
+        # the normalization stamp, two on unresolved review findings -- the same
+        # gate asserted at the two points a finding must not pass. Anything else
+        # claiming it would be turning a real failure into a shrug.
         awaiting = sorted(n for n, s in stages.items() if s.get("awaiting_human"))
-        self.assertEqual(awaiting, ["check_normalization_stamp", "check_review_findings"])
+        self.assertEqual(
+            awaiting,
+            ["check_normalization_stamp", "check_review_findings", "recheck_review_findings"],
+        )
+
+        # review_normalization sits between the mechanical gate and the stamp: no
+        # point asking an LLM whether meaning survived a reshape that has already
+        # lost a number, and its whole purpose is to inform the human who stamps.
+        # Its findings gate must precede the stamp, or an unresolved finding would
+        # not block the thing it exists to block.
+        self.assertLess(names.index("check_normalization"), names.index("review_normalization"))
+        self.assertLess(names.index("review_normalization"), names.index("check_review_findings"))
+        self.assertLess(names.index("check_review_findings"), names.index("check_normalization_stamp"))
+        self.assertEqual(stages["review_normalization"]["gates"], ["check_review_findings"])
+        # max_attempts 1: re-invoking a fail-only reviewer until it stops finding
+        # things is how it gets talked out of its findings.
+        self.assertEqual(stages["review_normalization"]["max_attempts"], 1)
 
     def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
         """An IP whose only file is a .src.md must still be discovered and routed.

@@ -45,6 +45,7 @@ inputs:
 
 agent_contract: agents/ip_model_generation_agent.md
 normalization_contract: agents/dld_normalization_agent.md
+normalization_review_contract: agents/normalization_review_agent.md
 model_review_contract: agents/model_review_agent.md
 
 # Named agent commands for the `kind: agent` stages. Select one with
@@ -95,6 +96,36 @@ stages:
       unplaced accounting. This is the half an agent can satisfy, so it is what
       drives the normalize_dld loop; the human stamp is checked by the next stage
       instead. Gating the agent on the stamp would make its loop unwinnable.
+  - name: review_normalization
+    kind: agent
+    command: external_agent_or_manual_edit
+    required: false
+    when: src_dld_exists
+    gates: [check_review_findings]
+    max_attempts: 1
+    notes: >
+      Adversarial read of the normalization against its source, looking for claims
+      whose meaning changed while their tokens survived. Writes
+      reviews/{ip}.normalization.findings.yaml. Contract in
+      agents/normalization_review_agent.md. Exists because check_normalization
+      proves nothing was dropped, altered or invented, and cannot prove the
+      surviving claims are attached to the right things - a delay moved to another
+      FSM conserves every token and still times the model wrongly. It may fail a
+      normalization and may never pass one: an empty findings list means nothing
+      was found, not that the document is faithful. max_attempts is 1 deliberately
+      - re-invoking a fail-only reviewer until it stops finding things is how it
+      gets talked out of its findings.
+  - name: check_review_findings
+    command: python tools/check_review_findings.py {ip}
+    required: true
+    when: src_dld_exists
+    awaiting_human: true
+    notes: >
+      Deterministic - every recorded finding, of any review kind, must be fixed
+      (which makes that review stale) or dismissed by name in decisions/{ip}.md.
+      Placed before the stamp because that is what a finding blocks: findings must
+      not enter normalize_dld's retry loop, where a non-deterministic verdict
+      inside max_attempts makes the loop unwinnable.
   - name: check_normalization_stamp
     command: python tools/check_dld_normalization.py {ip}
     required: true
@@ -155,7 +186,7 @@ stages:
     kind: agent
     command: external_agent_or_manual_edit
     required: false
-    gates: [check_review_findings]
+    gates: [recheck_review_findings]
     max_attempts: 1
     notes: >
       Adversarial read of the model and its tests against their template, writing
@@ -165,15 +196,18 @@ stages:
       misimplements its contract and a test that agrees with it both pass. It may
       fail a model and may never pass one - an empty findings list means nothing
       was found, not that the model is faithful.
-  - name: check_review_findings
+  - name: recheck_review_findings
     command: python tools/check_review_findings.py {ip}
     required: true
     awaiting_human: true
     notes: >
-      Deterministic - every recorded finding, of any review kind, must be fixed
-      (which makes that review stale) or dismissed by name in decisions/{ip}.md.
-      Pauses as *awaiting* rather than failing: resolving a finding is a human
-      step, and a sampled verdict must never sit inside an agent's retry loop.
+      The same deterministic gate as check_review_findings, run again here because
+      it guards a second thing: the earlier instance sits before the normalization
+      stamp and cannot see a model review that does not exist yet at that point.
+      One tool, one rule - every recorded finding of any kind fixed or dismissed
+      by name - asserted at both places a finding must not pass. Pauses as
+      *awaiting* rather than failing: resolving a finding is a human step, and a
+      sampled verdict must never sit inside an agent's retry loop.
   - name: stamp_provenance
     command: python tools/check_model_provenance.py --stamp {ip}
     required: true

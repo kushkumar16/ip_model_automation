@@ -1,11 +1,21 @@
 # Proposal: a `review_normalization` stage between the gate and the stamp
 
-**Status:** steps 1–2 done. `tools/check_review_findings.py` and the findings
-format exist and are wired into local CI, and a mutation test has shown that an
-LLM reviewer does catch a timing moved to the wrong FSM while reporting nothing
-extra on the unmutated pair (§8). The stage itself is still unbuilt: no agent
-writes findings, and there is one real finding from the experiment awaiting a
-decision. Steps 3–4 are open.
+**Status:** built. Steps 1–2 were the gate, the findings format and the mutation
+test (§8). The stage itself now exists: `agents/normalization_review_agent.md`
+holds the contract, and `review_normalization` is wired into the harness between
+`check_normalization` and `check_normalization_stamp`, gated by
+`check_review_findings` so a finding blocks the stamp rather than entering
+`normalize_dld`'s retry loop.
+
+The findings file is `reviews/<ip>.normalization.findings.yaml` rather than the
+`reviews/<ip>.findings.yaml` named in §5 below — the gate became multi-kind when
+`review_model` was added, and each kind now names itself in its filename and in a
+`kind:` field. Everything else below is as built.
+
+What remains is not construction: no agent has been run against a real IP through
+this stage yet, and the one real finding from the §8 experiment is recorded and
+resolved. The larger mutation set that would establish the reviewer's *rate*,
+rather than that a signal exists, is still owed.
 
 **Problem it addresses:** one class of error survives everything the pipeline
 currently checks. `check_dld_normalization.py` proves nothing was dropped,

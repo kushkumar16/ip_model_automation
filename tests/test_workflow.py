@@ -898,6 +898,70 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("complete_template", stages)
         self.assertEqual(stages["complete_template"]["gates"], ["check_dld_coverage", "lint_template"])
 
+    def test_emitted_transition_findings_are_readable_by_the_gate(self):
+        """A disagreement the checker finds must become a finding that blocks.
+
+        The two tools have to agree on three things or the mechanism is theatre:
+        the closed class vocabulary, the required fields, and the hash of every
+        subject file. Get the last one wrong by a newline and the review reads as
+        stale the moment it is written — green gate, unrecorded disagreement.
+
+        It must also refuse to overwrite findings it did not write. A reviewer's
+        findings are somebody's reading of the model, and a tool that regenerates
+        a file must not delete them.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+
+        def load(name):
+            spec = importlib.util.spec_from_file_location(name, repo_root / "tools" / f"{name}.py")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+
+        checker, gate = load("check_declared_transitions"), load("check_review_findings")
+
+        ip = "sram_ctrl_ip"
+        result = {
+            "ip": ip,
+            "undeclared": [("bank_scheduler", "RETURN_DATA", "SCHED_IDLE")],
+            "never_taken": [("bank_scheduler", "RETURN_DATA", "RETURN_DATA")],
+            "declared": [("bank_scheduler", "RETURN_DATA", "PICK_BANK")],
+            "states_without_exit": [],
+        }
+        path = repo_root / "reviews" / f"{ip}.model.findings.yaml"
+        original = path.read_text(encoding="utf-8") if path.is_file() else None
+        try:
+            _, count, error = checker.emit_findings(result, ip)
+            self.assertIsNone(error)
+            self.assertEqual(count, 2)
+
+            # The gate parses it, accepts every class and field, and does not
+            # call it stale — the hashes agree with the live files.
+            data, errors = gate.load_findings(path)
+            self.assertEqual(errors, [], "the gate rejected findings the checker wrote")
+            self.assertIsNone(gate.review_is_stale(data, ip, "model"))
+            self.assertEqual([f["id"] for f in data["findings"]], ["T1", "T2"])
+
+            # And it blocks: unresolved is the whole point.
+            self.assertTrue(any("T1" in e for e in gate.check_ip(ip, "model")))
+
+            # A reviewer's finding in the same file stops regeneration dead.
+            import yaml as _yaml
+
+            doc = _yaml.safe_load(path.read_text(encoding="utf-8"))
+            doc["findings"].append(dict(doc["findings"][0], id="M42"))
+            path.write_text(_yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
+            _, count, error = checker.emit_findings(result, ip)
+            self.assertIsNotNone(error)
+            self.assertIn("M42", error)
+            self.assertIn("M42", path.read_text(encoding="utf-8"), "it deleted a reviewer's finding")
+        finally:
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(original, encoding="utf-8")
+
     def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
         """An IP whose only file is a .src.md must still be discovered and routed.
 

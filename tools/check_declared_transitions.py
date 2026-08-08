@@ -194,6 +194,7 @@ def check_ip(ip: str, template_path: Path) -> dict[str, Any]:
         # model for a hole in the template.
         "undeclared_from_dead_end": [t for t in undeclared if (t[0], t[1]) in dead_ends],
         "never_taken": sorted(declared - observed),
+        "declared": sorted(declared),
         "states_without_exit": no_exit,
         "declared_count": len(declared),
         "observed_count": len(observed),
@@ -227,10 +228,140 @@ def format_report(results: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def sha256_text(path: Path) -> str:
+    """Hash a subject file exactly as check_review_findings.py does.
+
+    The two must agree or an emitted review would read as stale the moment it was
+    written, so this deliberately mirrors that tool rather than inventing its own
+    normalisation.
+    """
+    import hashlib
+
+    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+
+
+def finding_for(ip: str, kind: str, fsm: str, source: str, target: str, declared_exits: list[str]) -> dict[str, Any]:
+    """One disagreement, written as a finding a person has to resolve.
+
+    The tool states what it saw and refuses to guess which side is wrong. That is
+    not modesty — on sram_ctrl_ip the answer split both ways across six
+    transitions of this exact shape, and the one time an agent picked for itself
+    the author reversed it.
+    """
+    exits = ", ".join(declared_exits) or "(none)"
+    if kind == "undeclared":
+        return {
+            "id": "",
+            "class": "fsm_structure",
+            "severity": "high",
+            "claim": f"{fsm} takes {source} -> {target}, which the template does not declare.",
+            "template": (
+                f"templates/{ip}.template.yaml fsm_processes.{fsm}.transitions declares no edge "
+                f"{source} -> {target}. Declared exits from {source}: {exits}."
+            ),
+            "model": (
+                f"src/ip_model_automation/{ip}.py set {fsm} to {target} while it was in {source}, "
+                f"observed while running tests/test_{ip}.py. Reproduce with "
+                f"`python tools/check_declared_transitions.py {ip}`."
+            ),
+            "why": (
+                f"The contract and the model describe different machines at this point. Until someone "
+                f"rules on which is right -- declare the edge, or stop the model taking it -- {fsm}'s "
+                f"behaviour in {source} is not established, and no downstream stage should treat this "
+                f"part of {ip} as done."
+            ),
+        }
+    return {
+        "id": "",
+        "class": "fsm_structure",
+        "severity": "medium",
+        "claim": f"{fsm} declares {source} -> {target}, which no test ever drives.",
+        "template": f"templates/{ip}.template.yaml fsm_processes.{fsm}.transitions declares {source} -> {target}.",
+        "model": (
+            f"Never observed across tests/test_{ip}.py. Either the model cannot take this edge, or no "
+            f"scenario reaches it. Reproduce with `python tools/check_declared_transitions.py {ip}`."
+        ),
+        "why": (
+            f"A declared edge nothing exercises is either behaviour the model does not implement or a "
+            f"scenario gap. Both leave {fsm}'s {source} behaviour unverified, and which one it is "
+            f"cannot be told from here."
+        ),
+    }
+
+
+def emit_findings(result: dict[str, Any], ip: str) -> tuple[Path, int, str | None]:
+    """Write this run's disagreements to reviews/<ip>.model.findings.yaml.
+
+    Only the disagreements a person must rule on. The transitions leaving a state
+    with no declared exit are excluded on purpose: the template constrained
+    nothing there, so the model cannot be said to disagree with it, and filing
+    those would bury the real ones under a systematic gap that belongs to the
+    promotion gate instead.
+
+    Refuses to overwrite findings it did not write. A reviewer's findings are
+    somebody's reading of this model, and a tool must not delete them.
+    """
+    yaml = require_yaml()
+    path = REPO_ROOT / "reviews" / f"{ip}.model.findings.yaml"
+
+    if path.is_file():
+        existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        foreign = [f for f in existing.get("findings") or [] if not str(f.get("id", "")).startswith("T")]
+        if foreign:
+            ids = ", ".join(str(f.get("id")) for f in foreign)
+            return path, 0, f"{path.name} holds findings this tool did not write ({ids}); refusing to overwrite"
+
+    dead_ends = {(fsm, state) for fsm, state in result["states_without_exit"]}
+    declared_by_source: dict[tuple[str, str], list[str]] = {}
+    for fsm, source, target in result["declared"]:
+        declared_by_source.setdefault((fsm, source), []).append(target)
+
+    findings = []
+    for fsm, source, target in result["undeclared"]:
+        if (fsm, source) in dead_ends:
+            continue
+        findings.append(finding_for(ip, "undeclared", fsm, source, target, declared_by_source.get((fsm, source), [])))
+    for fsm, source, target in result["never_taken"]:
+        findings.append(finding_for(ip, "never_taken", fsm, source, target, []))
+    for index, finding in enumerate(findings, start=1):
+        finding["id"] = f"T{index}"
+
+    document = {
+        "ip": ip,
+        "kind": "model",
+        "template_sha256": sha256_text(REPO_ROOT / f"templates/{ip}.template.yaml"),
+        "model_sha256": sha256_text(REPO_ROOT / f"src/ip_model_automation/{ip}.py"),
+        "tests_sha256": sha256_text(REPO_ROOT / f"tests/test_{ip}.py"),
+        "findings": findings,
+    }
+    header = (
+        f"# Transition disagreements between {ip}'s model and its template, recorded by\n"
+        f"# tools/check_declared_transitions.py --emit-findings. Not an LLM review: this is a\n"
+        f"# mechanical comparison of the transitions the model took while its own tests ran\n"
+        f"# against the ones the template declares.\n"
+        f"#\n"
+        f"# The tool does not decide which side is wrong. Each finding is fixed -- by declaring\n"
+        f"# the edge or by stopping the model taking it -- or dismissed by name in\n"
+        f"# decisions/{ip}.md. Until then check_review_findings holds this IP as awaiting a\n"
+        f"# person, and the states named below are not settled behaviour.\n"
+        f"#\n"
+        f"# Transitions leaving a state the template gives no exit for are deliberately absent.\n"
+        f"# The template constrained nothing there, so there is no disagreement to rule on.\n"
+    )
+    body = yaml.safe_dump(document, sort_keys=False, width=100, allow_unicode=True)
+    path.write_text(header + body, encoding="utf-8")
+    return path, len(findings), None
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("ips", nargs="*", help="IP names; default is every IP with a template and a test module")
     parser.add_argument("--strict", action="store_true", help="exit 1 if any undeclared transition was taken")
+    parser.add_argument(
+        "--emit-findings",
+        action="store_true",
+        help="record each disagreement as a blocking finding in reviews/<ip>.model.findings.yaml",
+    )
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(SRC_DIR))
@@ -261,6 +392,20 @@ def main(argv: list[str]) -> int:
         f"\ntotal: {undeclared_total} undeclared ({dead_end_total} from a state with no declared exit), "
         f"{never_taken_total} declared-but-never-taken, {no_exit_total} states with no declared exit"
     )
+
+    if args.emit_findings:
+        print()
+        refused = False
+        for result in results:
+            path, count, error = emit_findings(result, result["ip"])
+            if error:
+                print(f"  SKIPPED {error}", file=sys.stderr)
+                refused = True
+                continue
+            print(f"  wrote {path.relative_to(REPO_ROOT).as_posix()}: {count} finding(s)")
+        print("\nrun `python tools/check_review_findings.py --list` to see them as the gate does")
+        if refused:
+            return 1
 
     if args.strict and undeclared_total:
         return 1

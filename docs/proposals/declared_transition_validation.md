@@ -1,7 +1,10 @@
 # Proposal: check declared transitions at runtime, and gate what is left over
 
-**Status:** step 1 done. `tools/check_declared_transitions.py` exists and reports;
-it is not a gate. Steps 2–3 open. First run across all twelve IPs is in §6.
+**Status:** step 1 done, steps 2–3 **deferred by decision on 2026-08-09** — see
+§7. `tools/check_declared_transitions.py` exists and reports; it is not a gate,
+and no gate is planned for now. `--emit-findings` can file an IP's disagreements
+as blocking findings when someone chooses to work that IP, but nothing files them
+automatically and no findings file is committed for any IP.
 
 **Problem it addresses:** six of the eleven model-review findings on
 `sram_ctrl_ip` are the same mechanical question — *did the model take a
@@ -186,3 +189,45 @@ attention as the `undeclared` one.
 
 Step 2 is where this stops being free, and it needs the same call the findings
 gate needed: what does a red build mean, and who is allowed to make it green.
+
+---
+
+## 8. Decision, 2026-08-09: neither pile is being resolved
+
+Both categories the checker separates are **deferred, deliberately and on the
+record**. Nothing here is a defect list awaiting triage; it is a measurement of
+how far the transition graphs are from describing the models, taken once and left
+in place.
+
+| | count | status |
+| --- | --- | --- |
+| Disagreement — both sides describe behaviour, differently | 54 | not adjudicated |
+| Gap — the template gives the state no exit at all | 173 | not modelled, not filled in |
+| Declared but never driven by any test | 29 | not investigated |
+
+**Why the two are not the same question.** A gap cannot be modelled without
+inventing behaviour, which the contract forbids outright — so deferring it is the
+only correct action, and would be even if there were time. A disagreement is
+different: the model already does something, so deferring means the model's
+behaviour stands on its own authority rather than on the template's. That is a
+real cost, accepted knowingly.
+
+**What this means for anyone reading a model's numbers.** For the states listed
+by `python tools/check_declared_transitions.py`, the template's transition list
+does not describe what the model does. Latency, `bank_utilization`,
+`transition_counts` and queue figures are still produced for those paths, and
+they are produced by the model's own logic, not by anything the contract states.
+M7 is the worked example of why that matters: the model completed an RMW without
+its write half, reported 11 cycles instead of 17 and one bank touch instead of
+two, and passed 159 tests, coverage, lint and provenance. Nothing said the figure
+came from a path nobody had agreed on.
+
+**No findings were filed.** Filing 83 blocking findings in order to dismiss 83 of
+them writes no information and spends the one thing dismissal is for — a sentence
+of real thought per item. `--emit-findings` remains available per IP, for
+whichever IP someone decides to actually work; that is when the ids earn their
+keep.
+
+**What would reopen this.** The DLD authors answering what a state's exits are,
+for any IP; or a decision to gate one clean IP and grow from there — for which
+`sram_ctrl_ip` is still the only candidate, at 6 disagreements and 0 gaps.

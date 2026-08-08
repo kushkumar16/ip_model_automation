@@ -1,4 +1,4 @@
-# IP Model Automation
+﻿# IP Model Automation
 
 This repo is a workflow for turning HW IP design-level documents into
 model-ready templates, SimPy delay models, and unit tests.
@@ -227,7 +227,7 @@ python tools\auto_ip_pipeline.py dlds\my_ip_dld.docx  # process one DLD explicit
 python tools\auto_ip_pipeline.py --force              # reprocess everything
 ```
 
-The harness agent stages (`normalize_dld`, `review_template`, and one of
+The harness agent stages (`normalize_dld`, `complete_template`, and one of
 `agent_implementation` / `amend_implementation`) need an LLM or a human. The
 pipeline is **agent-agnostic** — models and unit tests may be written by any
 vendor's coding agent that can run headless, read the prompt from stdin, and
@@ -533,3 +533,4 @@ resolves to the same default, so nothing breaks in the meantime).
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.
 - `tests/test_workflow.py`: registry, scaffold, and validation helper checks.
 - `tests/test_<ip_name>.py`: per-IP SimPy model tests.
+

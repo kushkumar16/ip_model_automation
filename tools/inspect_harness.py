@@ -34,6 +34,8 @@ def inspect(repo_root: Path, harness_path: Path) -> list[str]:
         f"description: {config.get('description')}",
         f"agent_contract: {config.get('agent_contract')}",
         f"normalization_contract: {config.get('normalization_contract')}",
+        f"normalization_review_contract: {config.get('normalization_review_contract')}",
+        f"model_review_contract: {config.get('model_review_contract')}",
         "stages:",
     ]
     for stage in config.get("stages", []):

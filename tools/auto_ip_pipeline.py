@@ -12,8 +12,8 @@ authoritative reference):
 
   - ``kind: tool`` stages run their ``command`` from the repo root with
     ``{placeholder}`` substitution ({ip}, {dld}, {template}, {model_dir}, ...).
-  - ``kind: agent`` stages (``normalize_dld``, ``review_template``,
-    ``agent_implementation``) need an LLM or a human. Their ``gates`` — other
+  - ``kind: agent`` stages (``normalize_dld``, ``complete_template``,
+    ``agent_implementation``, and the two reviewers) need an LLM or a human. Their ``gates`` — other
     tool stages — decide the outcome: if the gates already pass the agent is
     skipped; otherwise the agent runs and the gates re-run, up to
     ``max_attempts`` (default ``loop_policy.max_iterations``).
@@ -319,7 +319,16 @@ def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 
-def review_prompt(ip_name: str, extra_context: str = "") -> str:
+def complete_template_prompt(ip_name: str, extra_context: str = "") -> str:
+    """Prompt for the complete_template stage: fill the draft's holes and promote it.
+
+    Named for what it does. It was `review_prompt` for the `review_template`
+    stage, and neither name was true: nothing here reads a finished template
+    looking for defects. The agent answers the questions the extractor could not
+    — every TODO_REVIEW — and promotes the result. A stage called a review, next
+    to two stages that are reviews and run under "may fail, never pass", implied
+    a scrutiny step that has never existed for a promoted template.
+    """
     return "\n".join(
         [
             f"Work in the repository at {REPO_ROOT}.",
@@ -486,7 +495,7 @@ AGENT_STAGE_MARKER = "external_agent_or_manual_edit"
 # Prompt builders for agent stages, keyed by harness stage name.
 AGENT_PROMPT_BUILDERS = {
     "normalize_dld": normalize_prompt,
-    "review_template": review_prompt,
+    "complete_template": complete_template_prompt,
     "agent_implementation": implementation_prompt,
     "amend_implementation": amend_prompt,
 }

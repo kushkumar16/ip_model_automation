@@ -1,4 +1,4 @@
-# Proposal: a `normalize_dld` stage ahead of `parse_dld`
+﻿# Proposal: a `normalize_dld` stage ahead of `parse_dld`
 
 **Status:** built. Steps 1–4 of the build order in §7 are done: the fidelity
 gate, the agent contract, the stage (drivable by `--agent <profile>` or left in
@@ -31,7 +31,7 @@ watch dlds/                     (content-hash change detection)
   -> docx -> markdown           (existing, python-docx)
   -> normalize_dld              ★ NEW — agent stage, gated
   -> parse_dld                  (unchanged, deterministic)
-  -> review_template            (existing agent stage)
+  -> complete_template         (existing agent stage)
   -> check_dld_coverage / lint_template
   -> ... rest of the pipeline unchanged
 ```
@@ -326,3 +326,4 @@ documents, not generating models.
 Step 1 is the one that de-risked everything else, and it was useful on its own.
 Step 3 is what proved the gate: no LLM was involved in finding those five rule
 defects, only a document reshaped by hand.
+

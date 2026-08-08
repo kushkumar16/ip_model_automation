@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 import simpy
+import yaml
 
 from ip_model_automation.common import get_ip_logger
 from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, list_ips, resolve_artifacts
@@ -113,6 +114,15 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
         self.assertIn("templates: 12", text)
+
+        # Every contract an agent stage is told to follow must be a file that
+        # exists. A stage pointing at a missing contract is an agent invoked with
+        # no instructions, which fails as vague output rather than as an error.
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        contracts = [v for k, v in harness.items() if k.endswith("_contract")]
+        self.assertEqual(len(contracts), 4, "expected one contract per agent-driven stage family")
+        for contract in contracts:
+            self.assertTrue((repo_root / contract).is_file(), f"missing agent contract: {contract}")
 
     def test_agent_profile_resolution_supports_any_vendor(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -415,7 +425,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         pipeline = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
-        self.assertIn("decisions/mailbox_ip.md", pipeline.review_prompt("mailbox_ip"))
+        self.assertIn("decisions/mailbox_ip.md", pipeline.complete_template_prompt("mailbox_ip"))
 
     def test_generated_reports_never_destroy_hand_written_content(self):
         """Regenerating a report must preserve anything a person wrote in it.
@@ -467,6 +477,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         src, normalized = "author source\n", "normalized document\n"
         base = {
             "ip": "probe_ip",
+            "kind": "normalization",
             "source_sha256": gate.sha256_text(src),
             "normalized_sha256": gate.sha256_text(normalized),
             "findings": [
@@ -489,19 +500,20 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             (root / "decisions").mkdir()
             (root / "dlds" / "probe_ip_dld.src.md").write_text(src, encoding="utf-8")
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
-            gate.DLDS_DIR, gate.REVIEWS_DIR, gate.DECISIONS_DIR = (
+            gate.REPO_ROOT, gate.DLDS_DIR, gate.REVIEWS_DIR, gate.DECISIONS_DIR = (
+                root,
                 root / "dlds",
                 root / "reviews",
                 root / "decisions",
             )
-            findings_file = root / "reviews" / "probe_ip.findings.yaml"
+            findings_file = root / "reviews" / "probe_ip.normalization.findings.yaml"
 
             def write(data):
                 findings_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
             # An unresolved finding blocks.
             write(base)
-            errors = gate.check_ip("probe_ip")
+            errors = gate.check_ip("probe_ip", "normalization")
             self.assertTrue(any("F1" in e and "unresolved" in e for e in errors), errors)
 
             # Dismissal by name, with a reason, in the tracked decisions file.
@@ -509,36 +521,93 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 "- **F1 dismissed:** the table row is on the scrub FSM; the finding misreads it.\n",
                 encoding="utf-8",
             )
-            self.assertEqual(gate.check_ip("probe_ip"), [])
+            self.assertEqual(gate.check_ip("probe_ip", "normalization"), [])
 
             # Editing either document makes the review stale: an old clean review
             # must not vouch for new text.
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized + "edit\n", encoding="utf-8")
-            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip", "normalization")))
             (root / "dlds" / "probe_ip_dld.md").write_text(normalized, encoding="utf-8")
 
             # A malformed file is an unknown result, never an absence of findings.
             findings_file.write_text("findings: [oops\n", encoding="utf-8")
-            self.assertTrue(any("valid YAML" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("valid YAML" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             broken = copy.deepcopy(base)
             broken["findings"][0]["class"] = "vibes"
             write(broken)
-            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             missing_field = copy.deepcopy(base)
             del missing_field["findings"][0]["why"]
             write(missing_field)
-            self.assertTrue(any("missing `why`" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("missing `why`" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             duplicated = copy.deepcopy(base)
             duplicated["findings"].append(copy.deepcopy(base["findings"][0]))
             write(duplicated)
-            self.assertTrue(any("duplicate" in e for e in gate.check_ip("probe_ip")))
+            self.assertTrue(any("duplicate" in e for e in gate.check_ip("probe_ip", "normalization")))
 
             # No findings file at all: nothing recorded, nothing to account for.
             findings_file.unlink()
-            self.assertEqual(gate.check_ip("probe_ip"), [])
+            self.assertEqual(gate.check_ip("probe_ip", "normalization"), [])
+
+            # A model review is a claim about a different set of files, with its
+            # own vocabulary. A normalization class must not be usable here.
+            (root / "templates").mkdir()
+            (root / "src" / "ip_model_automation").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "templates" / "probe_ip.template.yaml").write_text("t\n", encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("m\n", encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text("x\n", encoding="utf-8")
+            model_review = {
+                "ip": "probe_ip",
+                "kind": "model",
+                "template_sha256": gate.sha256_text("t\n"),
+                "model_sha256": gate.sha256_text("m\n"),
+                "tests_sha256": gate.sha256_text("x\n"),
+                "findings": [
+                    {
+                        "id": "M1",
+                        "class": "timing_mismatch",
+                        "severity": "high",
+                        "claim": "A delay differs from the template.",
+                        "template": "timing_model...cycles: 6",
+                        "model": "probe_ip.py:48 uses 12",
+                        "why": "Simulated timing would be wrong.",
+                    }
+                ],
+            }
+            model_file = root / "reviews" / "probe_ip.model.findings.yaml"
+            model_file.write_text(yaml.safe_dump(model_review, sort_keys=False), encoding="utf-8")
+            self.assertTrue(any("M1" in e and "unresolved" in e for e in gate.check_ip("probe_ip", "model")))
+
+            wrong_vocabulary = copy.deepcopy(model_review)
+            wrong_vocabulary["findings"][0]["class"] = "timing_attachment"  # a normalization class
+            model_file.write_text(yaml.safe_dump(wrong_vocabulary, sort_keys=False), encoding="utf-8")
+            self.assertTrue(any("unknown class" in e for e in gate.check_ip("probe_ip", "model")))
+
+            # Editing the model — not the DLD — makes a model review stale.
+            model_file.write_text(yaml.safe_dump(model_review, sort_keys=False), encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("m2\n", encoding="utf-8")
+            self.assertTrue(any("stale" in e for e in gate.check_ip("probe_ip", "model")))
+
+    def test_finding_ids_are_unique_across_an_ips_reviews(self):
+        """One dismissal must not silently clear two different findings.
+
+        Dismissals live in a single decisions/<ip>.md and are matched by id, so
+        `F1` meaning one thing in a normalization review and another in a model
+        review would let one line resolve both.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "check_review_findings", repo_root / "tools" / "check_review_findings.py"
+        )
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+
+        for ip in gate.reviewed_ips():
+            self.assertEqual(gate.duplicate_ids(ip), [], f"{ip} reuses a finding id across reviews")
 
     def test_review_findings_directory_is_tracked_and_documented(self):
         """Findings must survive until resolved, so they cannot be gitignored."""
@@ -759,9 +828,75 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertLess(names.index("check_normalization"), names.index("check_normalization_stamp"))
         self.assertLess(names.index("check_normalization_stamp"), names.index("parse_dld"))
 
-        # Nothing else may quietly claim that exemption.
-        awaiting = [n for n, s in stages.items() if s.get("awaiting_human")]
-        self.assertEqual(awaiting, ["check_normalization_stamp"])
+        # The exemption is for gates the pipeline cannot satisfy in principle,
+        # because a person must act. All three wait on a human decision: one on
+        # the normalization stamp, two on unresolved review findings -- the same
+        # gate asserted at the two points a finding must not pass. Anything else
+        # claiming it would be turning a real failure into a shrug.
+        awaiting = sorted(n for n, s in stages.items() if s.get("awaiting_human"))
+        self.assertEqual(
+            awaiting,
+            ["check_normalization_stamp", "check_review_findings", "recheck_review_findings"],
+        )
+
+        # review_normalization sits between the mechanical gate and the stamp: no
+        # point asking an LLM whether meaning survived a reshape that has already
+        # lost a number, and its whole purpose is to inform the human who stamps.
+        # Its findings gate must precede the stamp, or an unresolved finding would
+        # not block the thing it exists to block.
+        self.assertLess(names.index("check_normalization"), names.index("review_normalization"))
+        self.assertLess(names.index("review_normalization"), names.index("check_review_findings"))
+        self.assertLess(names.index("check_review_findings"), names.index("check_normalization_stamp"))
+        self.assertEqual(stages["review_normalization"]["gates"], ["check_review_findings"])
+        # max_attempts 1: re-invoking a fail-only reviewer until it stops finding
+        # things is how it gets talked out of its findings.
+        self.assertEqual(stages["review_normalization"]["max_attempts"], 1)
+
+    def test_only_actual_reviews_are_named_review(self):
+        """A stage named `review_*` must be a review, and nothing else may be.
+
+        `review_template` was neither. It replaced TODO_REVIEW markers and
+        promoted a draft — it edited the artifact it was named after. Sitting
+        beside two stages that report findings and can never approve, the name
+        implied a scrutiny step for promoted templates that has never existed,
+        and reading the stage list gave a false account of what the pipeline
+        checks. It is now `complete_template`.
+
+        Renaming one stage is worth little if the next one can lie again, so
+        this pins the property rather than the name: `review_*` means a
+        fail-only agent stage, gated on findings, with a contract of its own.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        stages = {s["name"]: s for s in harness["stages"]}
+
+        reviews = [n for n in stages if n.startswith("review_")]
+        self.assertEqual(sorted(reviews), ["review_model", "review_normalization"])
+
+        for name in reviews:
+            stage = stages[name]
+            subject = name[len("review_") :]
+            with self.subTest(stage=name):
+                self.assertEqual(stage["kind"], "agent", f"{name} must be an agent stage")
+                # Gated on findings, so an unresolved one blocks something.
+                gates = stage.get("gates", [])
+                self.assertTrue(
+                    any("review_findings" in g for g in gates),
+                    f"{name} must be gated on the findings check, not on a gate it can satisfy itself",
+                )
+                # One attempt: re-invoking a fail-only reviewer until it stops
+                # finding things is how it gets talked out of its findings.
+                self.assertEqual(stage["max_attempts"], 1, f"{name} must not be retried")
+                # Its own contract, naming the asymmetry it runs under.
+                contract = harness.get(f"{subject}_review_contract")
+                self.assertIsNotNone(contract, f"{name} has no declared contract")
+                text = (repo_root / contract).read_text(encoding="utf-8")
+                self.assertIn("may never pass", text, f"{contract} must state the fail-only rule")
+
+        # And the converse: a stage that edits the artifact it is named for is
+        # not a review, whatever it is called.
+        self.assertIn("complete_template", stages)
+        self.assertEqual(stages["complete_template"]["gates"], ["check_dld_coverage", "lint_template"])
 
     def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
         """An IP whose only file is a .src.md must still be discovered and routed.

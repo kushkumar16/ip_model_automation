@@ -142,13 +142,21 @@ stages:
     command: python tools/dld_to_template.py {dld}
     required: true
     notes: Extract draft template + gaps report from the DLD.
-  - name: review_template
+  - name: complete_template
     kind: agent
     command: external_agent_or_manual_edit
     required: false
     gates: [check_dld_coverage, lint_template]
     max_attempts: 1
-    notes: Agent replaces every TODO_REVIEW in the draft using only DLD-stated behavior, then promotes the draft to {template}. Skipped when the promoted template already passes both gates.
+    notes: >
+      Agent replaces every TODO_REVIEW in the draft using only DLD-stated
+      behaviour, then promotes the draft to {template}. Skipped when the promoted
+      template already passes both gates. Named complete_template, not
+      review_template: it answers the questions the extractor could not, and
+      nothing here reads a finished template looking for defects. Next to
+      review_normalization and review_model - which are reviews, run under "may
+      fail, never pass" - the old name implied a scrutiny step for promoted
+      templates that has never existed.
   - name: check_dld_coverage
     command: python tools/check_template_coverage.py {template} {dld} --strict
     required: true

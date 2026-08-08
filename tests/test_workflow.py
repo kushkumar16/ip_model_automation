@@ -425,7 +425,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         pipeline = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
-        self.assertIn("decisions/mailbox_ip.md", pipeline.review_prompt("mailbox_ip"))
+        self.assertIn("decisions/mailbox_ip.md", pipeline.complete_template_prompt("mailbox_ip"))
 
     def test_generated_reports_never_destroy_hand_written_content(self):
         """Regenerating a report must preserve anything a person wrote in it.
@@ -851,6 +851,52 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # max_attempts 1: re-invoking a fail-only reviewer until it stops finding
         # things is how it gets talked out of its findings.
         self.assertEqual(stages["review_normalization"]["max_attempts"], 1)
+
+    def test_only_actual_reviews_are_named_review(self):
+        """A stage named `review_*` must be a review, and nothing else may be.
+
+        `review_template` was neither. It replaced TODO_REVIEW markers and
+        promoted a draft — it edited the artifact it was named after. Sitting
+        beside two stages that report findings and can never approve, the name
+        implied a scrutiny step for promoted templates that has never existed,
+        and reading the stage list gave a false account of what the pipeline
+        checks. It is now `complete_template`.
+
+        Renaming one stage is worth little if the next one can lie again, so
+        this pins the property rather than the name: `review_*` means a
+        fail-only agent stage, gated on findings, with a contract of its own.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        stages = {s["name"]: s for s in harness["stages"]}
+
+        reviews = [n for n in stages if n.startswith("review_")]
+        self.assertEqual(sorted(reviews), ["review_model", "review_normalization"])
+
+        for name in reviews:
+            stage = stages[name]
+            subject = name[len("review_") :]
+            with self.subTest(stage=name):
+                self.assertEqual(stage["kind"], "agent", f"{name} must be an agent stage")
+                # Gated on findings, so an unresolved one blocks something.
+                gates = stage.get("gates", [])
+                self.assertTrue(
+                    any("review_findings" in g for g in gates),
+                    f"{name} must be gated on the findings check, not on a gate it can satisfy itself",
+                )
+                # One attempt: re-invoking a fail-only reviewer until it stops
+                # finding things is how it gets talked out of its findings.
+                self.assertEqual(stage["max_attempts"], 1, f"{name} must not be retried")
+                # Its own contract, naming the asymmetry it runs under.
+                contract = harness.get(f"{subject}_review_contract")
+                self.assertIsNotNone(contract, f"{name} has no declared contract")
+                text = (repo_root / contract).read_text(encoding="utf-8")
+                self.assertIn("may never pass", text, f"{contract} must state the fail-only rule")
+
+        # And the converse: a stage that edits the artifact it is named for is
+        # not a review, whatever it is called.
+        self.assertIn("complete_template", stages)
+        self.assertEqual(stages["complete_template"]["gates"], ["check_dld_coverage", "lint_template"])
 
     def test_a_new_off_shape_dld_can_enter_the_pipeline(self):
         """An IP whose only file is a .src.md must still be discovered and routed.

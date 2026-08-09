@@ -829,14 +829,20 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertLess(names.index("check_normalization_stamp"), names.index("parse_dld"))
 
         # The exemption is for gates the pipeline cannot satisfy in principle,
-        # because a person must act. All three wait on a human decision: one on
-        # the normalization stamp, two on unresolved review findings -- the same
-        # gate asserted at the two points a finding must not pass. Anything else
-        # claiming it would be turning a real failure into a shrug.
+        # because a person -- or an agent standing in for one -- must act. One
+        # waits on the normalization stamp, two on unresolved findings, and two
+        # on a review that has not been run. Anything else claiming the exemption
+        # would be turning a real failure into a shrug.
         awaiting = sorted(n for n, s in stages.items() if s.get("awaiting_human"))
         self.assertEqual(
             awaiting,
-            ["check_normalization_stamp", "check_review_findings", "recheck_review_findings"],
+            [
+                "check_model_review_owed",
+                "check_normalization_review_owed",
+                "check_normalization_stamp",
+                "check_review_findings",
+                "recheck_review_findings",
+            ],
         )
 
         # review_normalization sits between the mechanical gate and the stamp: no
@@ -847,10 +853,72 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertLess(names.index("check_normalization"), names.index("review_normalization"))
         self.assertLess(names.index("review_normalization"), names.index("check_review_findings"))
         self.assertLess(names.index("check_review_findings"), names.index("check_normalization_stamp"))
-        self.assertEqual(stages["review_normalization"]["gates"], ["check_review_findings"])
+        self.assertEqual(stages["review_normalization"]["gates"], ["check_normalization_review_owed"])
         # max_attempts 1: re-invoking a fail-only reviewer until it stops finding
         # things is how it gets talked out of its findings.
         self.assertEqual(stages["review_normalization"]["max_attempts"], 1)
+
+    def test_every_agent_stage_can_actually_be_dispatched(self):
+        """Each `kind: agent` stage needs a prompt builder, or the run dies on it.
+
+        `run_agent_stage` raises SystemExit for a stage with no builder. Both
+        reviewers were wired into the harness, contracted and tested with no
+        builder registered, so the pipeline would have hard-exited mid-run the
+        first time either of their gates failed — and neither gate could fail
+        (see the next test), so nothing ever reached the crash. Two defects
+        hiding each other.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", repo_root / "tools" / "auto_ip_pipeline.py")
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        agent_stages = [s["name"] for s in harness["stages"] if s.get("kind") == "agent"]
+        self.assertTrue(agent_stages)
+        for name in agent_stages:
+            with self.subTest(stage=name):
+                self.assertIn(name, pipeline.AGENT_PROMPT_BUILDERS, f"no prompt builder for agent stage {name}")
+                prompt = pipeline.AGENT_PROMPT_BUILDERS[name]("probe_ip")
+                self.assertIn("probe_ip", prompt)
+
+    def test_a_reviewers_gate_is_not_satisfied_by_its_own_absence(self):
+        """The gate driving a reviewer must fail when no review has been run.
+
+        This is the defect an end-to-end run found: both reviewers were gated on
+        `check_review_findings`, which passes when there is no findings file —
+        and a findings file only exists after the reviewer runs. The gate was
+        green precisely because the stage had never run, so it was skipped for
+        every IP, forever. A stage that cannot fire is worse than a missing one:
+        it reads as covered.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("gate", repo_root / "tools" / "check_review_findings.py")
+        gate = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = gate
+        spec.loader.exec_module(gate)
+
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        stages = {s["name"]: s for s in harness["stages"]}
+
+        for name in [n for n in stages if n.startswith("review_")]:
+            kind = name[len("review_") :]
+            with self.subTest(stage=name):
+                gate_names = stages[name]["gates"]
+                self.assertEqual(len(gate_names), 1)
+                command = stages[gate_names[0]]["command"]
+                self.assertIn(f"--require {kind}", command, f"{name} is not gated on a review of its own kind")
+
+                # The question that gate asks: an IP with no review owes one.
+                unreviewed = next(ip for ip in ("timer_ip", "mailbox_ip") if not gate.findings_path(ip, kind).is_file())
+                self.assertIsNotNone(
+                    gate.review_owed(unreviewed, kind),
+                    "a missing review must be owed, or the reviewer stage is skipped forever",
+                )
+                # ...while the findings check stays silent about it, which is
+                # correct for that question and is exactly why the two differ.
+                self.assertEqual(gate.check_ip(unreviewed, kind), [])
 
     def test_only_actual_reviews_are_named_review(self):
         """A stage named `review_*` must be a review, and nothing else may be.
@@ -878,11 +946,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             subject = name[len("review_") :]
             with self.subTest(stage=name):
                 self.assertEqual(stage["kind"], "agent", f"{name} must be an agent stage")
-                # Gated on findings, so an unresolved one blocks something.
+                # Gated on whether a review of its own kind exists -- never on
+                # the findings check, which passes when no review has been run
+                # and so is satisfied by this stage never having fired.
                 gates = stage.get("gates", [])
-                self.assertTrue(
-                    any("review_findings" in g for g in gates),
-                    f"{name} must be gated on the findings check, not on a gate it can satisfy itself",
+                self.assertEqual(len(gates), 1, f"{name} should have exactly one gate")
+                command = stages[gates[0]]["command"]
+                self.assertIn(
+                    f"--require {subject}",
+                    command,
+                    f"{name}'s gate must ask whether its own review exists, not whether findings are resolved",
                 )
                 # One attempt: re-invoking a fail-only reviewer until it stops
                 # finding things is how it gets talked out of its findings.

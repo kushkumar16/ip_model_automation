@@ -352,6 +352,68 @@ def complete_template_prompt(ip_name: str, extra_context: str = "") -> str:
     )
 
 
+def _review_prompt(ip_name: str, kind: str, contract: str, inputs: list[str], extra_context: str) -> str:
+    """Shared body for the two reviewer stages.
+
+    Both say the same things because both run under the same rule, and the parts
+    that are mechanical — id collisions, folded scalars, verifying your own output
+    — are the parts that go wrong in practice rather than the judgement.
+    """
+    return "\n".join(
+        [
+            f"Work in the repository at {REPO_ROOT}.",
+            f"Follow the contract in {contract}. It governs this stage; read it first.",
+            "",
+            f"Task: run the review_{kind} stage for `{ip_name}`. Read these in full:",
+            *[f"  - {path}" for path in inputs],
+            "",
+            f"Write your result to reviews/{ip_name}.{kind}.findings.yaml, overwriting what is there.",
+            "",
+            "Mechanical requirements, which are what usually go wrong:",
+            f"1. Finding ids must be unique across ALL of {ip_name}'s reviews, not just this one -"
+            f" a dismissal names an id, and one line must not clear two findings. Check every"
+            f" reviews/{ip_name}.*.findings.yaml that already exists, and decisions/{ip_name}.md.",
+            "2. Compute the sha256 of each subject file yourself. Read"
+            " tools/check_review_findings.py and use exactly the normalisation it uses, or the"
+            " review reads as stale the moment it is written.",
+            "3. Write every long field as a folded block scalar (>-), never a plain scalar. A good"
+            " finding quotes the artifact, and a plain scalar containing a colon breaks the parse.",
+            "",
+            f"Verify before finishing: python tools/check_review_findings.py {ip_name} --require {kind}",
+            "must pass (a current review exists and parses). It failing is yours to fix.",
+            "",
+            "Reporting nothing is a legitimate result and the expected one for a faithful artifact."
+            " You may fail this artifact; you may never pass it. Do not pad the list to look useful,"
+            " and do not fix anything you find - reporting is the whole of this stage.",
+            extra_context,
+        ]
+    )
+
+
+def normalization_review_prompt(ip_name: str, extra_context: str = "") -> str:
+    return _review_prompt(
+        ip_name,
+        "normalization",
+        "agents/normalization_review_agent.md",
+        [f"dlds/{ip_name}_dld.src.md  (the author's original)", f"dlds/{ip_name}_dld.md  (the normalized document)"],
+        extra_context,
+    )
+
+
+def model_review_prompt(ip_name: str, extra_context: str = "") -> str:
+    return _review_prompt(
+        ip_name,
+        "model",
+        "agents/model_review_agent.md",
+        [
+            f"templates/{ip_name}.template.yaml  (the contract)",
+            f"src/ip_model_automation/{ip_name}.py  (the model)",
+            f"tests/test_{ip_name}.py  (its tests)",
+        ],
+        extra_context,
+    )
+
+
 def normalize_prompt(ip_name: str, extra_context: str = "") -> str:
     """Prompt for the normalize_dld stage: reshape the author's DLD, change nothing.
 
@@ -495,9 +557,11 @@ AGENT_STAGE_MARKER = "external_agent_or_manual_edit"
 # Prompt builders for agent stages, keyed by harness stage name.
 AGENT_PROMPT_BUILDERS = {
     "normalize_dld": normalize_prompt,
+    "review_normalization": normalization_review_prompt,
     "complete_template": complete_template_prompt,
     "agent_implementation": implementation_prompt,
     "amend_implementation": amend_prompt,
+    "review_model": model_review_prompt,
 }
 
 # Conditions usable as a stage's `when:` field, keyed by condition name.

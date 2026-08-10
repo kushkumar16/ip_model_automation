@@ -187,18 +187,35 @@ class InterruptControllerIpModel:
     def pending_update_process(self):
         while True:
             self.fsm_state["pending_update"] = "WAIT_EVENT"
-            event = yield self.source_event_queue.get() | self.software_interrupt_event_queue.get()
-            src_id = next(iter(event.values()))
-            yield self.env.timeout(self.lat["pending"])
-            self.fsm_state["pending_update"] = "SET_PENDING"
-            if src_id in self.enabled:
-                self.pending.add(src_id)
-                self.metrics["pending_updates"] += 1
-                self.logger.debug("pending set source=%s", src_id)
-                yield self.eligible_set_queue.put("pending_changed")
-            else:
-                self.metrics["disabled_source_events"] += 1
-                self.logger.warning("disabled source event source=%s", src_id)
+            source_request = self.source_event_queue.get()
+            software_request = self.software_interrupt_event_queue.get()
+            ready = yield source_request | software_request
+
+            # SimPy leaves the branch that lost sitting in its store's get queue.
+            # The next put to that store is handed to a request nobody is waiting
+            # on any more, so the item is consumed and never seen: an interrupt
+            # accepted by the controller and delivered to no one.
+            for request in (source_request, software_request):
+                if request not in ready:
+                    request.cancel()
+
+            # AnyOf reports every branch that fired, and both ingress paths
+            # arriving in the same cycle is ordinary for a block with two of
+            # them. Reading a single value off it would discard the other.
+            for src_id in ready.values():
+                yield from self._set_pending(src_id)
+
+    def _set_pending(self, src_id: int):
+        yield self.env.timeout(self.lat["pending"])
+        self.fsm_state["pending_update"] = "SET_PENDING"
+        if src_id in self.enabled:
+            self.pending.add(src_id)
+            self.metrics["pending_updates"] += 1
+            self.logger.debug("pending set source=%s", src_id)
+            yield self.eligible_set_queue.put("pending_changed")
+        else:
+            self.metrics["disabled_source_events"] += 1
+            self.logger.warning("disabled source event source=%s", src_id)
 
     def mask_enable_filter_process(self):
         while True:

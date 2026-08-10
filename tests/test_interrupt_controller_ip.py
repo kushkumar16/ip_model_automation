@@ -151,6 +151,70 @@ class TestInterruptControllerIpModel(unittest.TestCase):
         self.assertEqual(len(model.delivered), 2)
         self.assertEqual(model.delivered[1][1], 2)
 
+    def test_software_interrupt_after_a_source_event_is_not_swallowed(self):
+        """A hardware event must not cost the next software interrupt.
+
+        pending_update waits on two stores at once. SimPy's `a | b` leaves the
+        losing branch's Get sitting in its store's queue, and the next put to
+        that store is handed to the stale request -- which nobody is waiting on
+        any more, so the item disappears. The source event here makes the
+        software Get the loser; the software interrupt that follows is the one
+        that used to vanish.
+        """
+        env = simpy.Environment()
+        model = InterruptControllerIpModel(
+            env,
+            sample_latency=1,
+            pending_latency=1,
+            filter_latency=1,
+            priority_latency=1,
+            delivery_latency=1,
+            software_latency=1,
+        )
+        model.configure_source(3, priority=0)
+        model.configure_source(7, priority=0)
+
+        model.assert_edge(3)
+        env.run(until=10)
+        self.assertIn(3, model.pending, "the hardware event itself was lost")
+
+        model.inject_software_interrupt(7)
+        env.run(until=25)
+        # Accepted by the software_interrupt process either way -- the question
+        # is whether pending_update ever saw it. Delivery is not asserted here:
+        # the CPU has not acknowledged source 3, and holding the next interrupt
+        # until it does is modelled behaviour with its own test.
+        self.assertEqual(model.metrics["software_interrupts"], 1)
+        self.assertIn(7, model.pending, "the software interrupt was accepted and then swallowed")
+        self.assertEqual(model.metrics["pending_updates"], 2)
+
+    def test_simultaneous_source_and_software_events_are_both_kept(self):
+        """Both branches firing in the same instant must yield two pendings.
+
+        `AnyOf` returns every event that triggered, and reading one value off it
+        discards the rest. Two interrupts arriving in the same cycle is the
+        normal case for a controller with two ingress paths, not an edge case.
+        """
+        env = simpy.Environment()
+        model = InterruptControllerIpModel(
+            env,
+            sample_latency=1,
+            pending_latency=1,
+            filter_latency=1,
+            priority_latency=1,
+            delivery_latency=1,
+            software_latency=1,
+        )
+        model.configure_source(3, priority=0)
+        model.configure_source(7, priority=1)
+
+        model.assert_edge(3)
+        model.inject_software_interrupt(7)
+        env.run(until=40)
+        self.assertIn(3, model.pending)
+        self.assertIn(7, model.pending, "the event that arrived alongside another was dropped")
+        self.assertEqual(model.metrics["pending_updates"], 2)
+
     def test_interrupt_software_interrupt_delivery(self):
         env = simpy.Environment()
         model = InterruptControllerIpModel(

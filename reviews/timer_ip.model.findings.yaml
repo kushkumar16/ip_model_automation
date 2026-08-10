@@ -1,0 +1,112 @@
+# Model review of src/ip_model_automation/timer_ip.py and tests/test_timer_ip.py
+# against templates/timer_ip.template.yaml. See agents/model_review_agent.md.
+#
+# An empty findings list would NOT be a verdict that this model is faithful. It
+# would record only that a reviewer looked and reported nothing, which is a
+# weaker claim than "correct" -- this review does not carry that weaker claim,
+# because it found three disagreements below. Neither an empty nor a non-empty
+# list here can approve the model; a person resolves each finding by fixing it
+# (which reruns this review) or dismissing it by name in decisions/timer_ip.md.
+#
+# Checked: every declared interface wait_model against its process implementation
+# (register_if, tick_if, interrupt_if), every fsm_processes transition and its
+# latency_cycles against the corresponding process, every queue depth and
+# resource against its simpy object, every command's completion/error conditions
+# against what the model actually does, and every test_scenario's fsm_coverage
+# against the test that claims to exercise it.
+ip: timer_ip
+kind: model
+template_sha256: 11be5a1d477caba8ed99e426eb4999d4de823659428929849361ef1c925d5885
+model_sha256: 1d6282e1a6a5fcc7f9d83e0ec65188875c09291133caf3e195b71157995aa149
+tests_sha256: 39b1cc82fd2891f61b30ae7345ceb2ddb434eaa982ac65ff23edb7d5599b1cf4
+findings:
+  - id: M1
+    class: timing_mismatch
+    severity: high
+    claim: >-
+      debug_freeze's two chained 2-cycle transitions into FROZEN, and the two
+      chained 2-cycle transitions back to RUN, are each collapsed into a single
+      wait in the model, so the simulated latency to freeze or resume is half
+      of what the template declares.
+    template: >-
+      templates/timer_ip.template.yaml fsm_processes.debug_freeze.transitions
+      (lines 184-203) declares four distinct transitions, each latency_cycles:
+      2 -- RUN->FREEZE_REQUEST on debug_halt_asserted, FREEZE_REQUEST->FROZEN
+      on counters_ack_freeze, FROZEN->RESUME_REQUEST on debug_halt_deasserted,
+      RESUME_REQUEST->RUN on counters_ack_resume -- for a declared total of 4
+      cycles to reach FROZEN and 4 cycles to return to RUN.
+    model: >-
+      src/ip_model_automation/timer_ip.py debug_freeze_process (lines 291-310)
+      sets fsm_state to FREEZE_REQUEST then yields a single
+      `env.timeout(self.lat["debug_freeze"])` (line 296) before marking FROZEN
+      directly, with no separate wait for counters_ack_freeze; the resume path
+      sets RESUME_REQUEST then yields one more single timeout (line 304) before
+      marking RUN, with no separate wait for counters_ack_resume. Each direction
+      pays debug_freeze_latency once instead of twice.
+    why: >-
+      Any test or downstream measurement of freeze/resume latency (or of
+      timer_event_path-style end-to-end timing that runs while frozen) will see
+      half the cycles the template specifies, and the two declared hardware
+      handshakes (broadcast vs ack) are indistinguishable in the model because
+      only one of them is ever actually waited on.
+  - id: M2
+    class: fsm_structure
+    severity: high
+    claim: >-
+      The template declares error conditions for TIMER_CONFIG and
+      WATCHDOG_KICK, and an ACCESS_ERROR state for register_access, but the
+      model has no code path that validates a channel or mode, rejects a kick
+      to a disabled watchdog, or ever enters ACCESS_ERROR.
+    template: >-
+      templates/timer_ip.template.yaml commands.TIMER_CONFIG.error_conditions
+      (line 73) lists invalid_channel and invalid_mode;
+      commands.WATCHDOG_KICK.error_conditions (line 85) lists
+      watchdog_disabled; fsm_processes.register_access.states (line 91)
+      declares ACCESS_ERROR as one of register_access's states.
+    model: >-
+      src/ip_model_automation/timer_ip.py configure()/write_register() (lines
+      87-100), _apply_config() (lines 137-151) and register_access_process()
+      (lines 166-188) accept any channel_id or mode string unconditionally and
+      never assign fsm_state["register_access"] = "ACCESS_ERROR" anywhere in
+      the file; kick_watchdog() (lines 125-127) enqueues a kick regardless of
+      self.watchdog["enabled"]. tests/test_timer_ip.py has no test that sends
+      an invalid channel, an invalid mode, or a kick while disabled.
+    why: >-
+      A scenario built to exercise the declared error paths would find the
+      model silently accepting and applying out-of-contract input instead of
+      erroring, which is a wrong simulated result, not a missing nicety; and
+      the declared ACCESS_ERROR state is dead documentation that nothing in
+      the model can ever reach.
+  - id: M3
+    class: fsm_structure
+    severity: medium
+    claim: >-
+      The model advances timer channels through two independent, undeclared
+      mechanisms -- the internal periodic prescaler process and a separate
+      tick_functional() entry point -- where the template declares only one
+      tick source feeding prescaler.WAIT_RAW_TICK.
+    template: >-
+      templates/timer_ip.template.yaml interfaces.tick_if.wait_model (lines
+      37-48) declares a single raw-tick path: requester peer, wait_points
+      [prescaler.WAIT_RAW_TICK], resumes_on raw_tick_observed, with the note
+      that a tick is consumed in the cycle it is presented; fsm_processes
+      prescaler.states (line 117) is the only place raw ticks are converted to
+      effective ticks.
+    model: >-
+      src/ip_model_automation/timer_ip.py prescaler_process (lines 201-209)
+      self-generates ticks on a periodic `env.timeout(self.tick_period)` with
+      no external store or method for a peer to present a raw tick, while
+      tick_functional() (lines 133-135) calls _emit_effective_tick() (lines
+      153-164) directly for every channel without touching
+      fsm_state["prescaler"] or the WAIT_RAW_TICK/INCREMENT_DIVIDER states at
+      all. tests/test_timer_ip.py test_timer_tick_functional_respects_prescaler
+      (lines 110-119) only avoids the two mechanisms colliding by passing
+      tick_period=1000 so the internal ticker does not fire during the test's
+      5-unit window.
+    why: >-
+      Nothing in the contract says when tick_functional() is the right way to
+      drive a channel versus letting the internal ticker run, so a caller that
+      uses both -- or a future test with a shorter tick_period -- would
+      silently double-drive the divider and counter, and fsm_state["prescaler"]
+      goes stale (still reporting WAIT_RAW_TICK or an old value) whenever
+      tick_functional() is what actually moved the channel.

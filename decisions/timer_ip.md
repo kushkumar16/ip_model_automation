@@ -44,6 +44,12 @@ manufactured ticks inside `prescaler_process` from a constructor argument, so th
 declared input interface **had no way in at all** and nothing composing this IP
 could supply its clock.
 
+**The internal ticker itself was not the defect**, and an earlier draft of this
+entry said otherwise. §6.3's Timing block states *"Tick generation may be modeled
+as a periodic SimPy timeout"* — the document explicitly permits it, two lines
+above the wait model that describes a peer presenting ticks. The DLD says both
+things, and the model implemented only one. The missing half was the ingress.
+
 Resolved as the author directed: the tick comes from outside, and the internal
 generator becomes configuration rather than a second mechanism.
 
@@ -79,13 +85,58 @@ IP is a contract gap across all four, not a `timer_ip` defect.
 `invalid_mode` and `watchdog_disabled` error conditions and an `ACCESS_ERROR`
 state; the model validates none of them and never enters that state.
 
-The two halves need different answers. `ACCESS_ERROR` **is** DLD-declared (§6.1
-register access states) and the DLD's timing table prices it — *"Error response:
-2 cycles = 4 ns"* — so the document says an error path exists and what it costs.
-The three named error conditions appear nowhere in the DLD; grep finds no
-"invalid" in the document at all. They were chosen at template completion and
-never recorded, which is why this file did not exist.
+`ACCESS_ERROR` **is** DLD-declared (§6.1 register access states) and the DLD's
+timing table prices it — *"Error response: 2 cycles = 4 ns"* — so the document
+says an error path exists and what it costs. Implementing something that reaches
+it follows the document.
 
-So: implementing `ACCESS_ERROR` follows the document, while the three conditions
-need either a recorded justification here or removal from the template. Awaiting
-the author.
+**The three conditions are not one question, and an earlier draft of this entry
+got them wrong.** It said they "appear nowhere in the DLD", which came from
+grepping for the literal word *invalid*. Read for meaning instead:
+
+| condition | basis |
+| --- | --- |
+| `invalid_mode` | **Derivable.** §2 enumerates exactly three modes — free-running, one-shot, periodic. A mode outside that set is outside the stated contract. |
+| `watchdog_disabled` | **Derivable.** §3 lists `WDT_CTRL`: watchdog enable, and the template's own `WATCHDOG_KICK.valid_conditions` is `[watchdog_enabled]`, so a kick while disabled is the negation of a stated valid condition. |
+| `invalid_channel` | **Not derivable.** §12 Open Items lists *"Number of timer channels"* as undecided. With no channel count, there is no range against which an id is invalid. |
+
+So two of the three are faithful readings that were never written down, and want
+their derivation recorded here rather than removal. The third is a genuine DLD
+Open Item and wants a conservative default with a reason — the same shape as
+`sram_ctrl_ip`'s masked-bank RMW, where the DLD asked the question and the
+template answered it.
+
+**Resolved by the author 2026-08-10: reject at the register access and enter
+`ACCESS_ERROR`, and implement only two of the three.**
+
+Which two follows from the ruling rather than from a preference. `invalid_channel`
+and `invalid_mode` both arrive through `write_register`, so they can be rejected
+at the register access and enter `ACCESS_ERROR`. `watchdog_disabled` arrives
+through `kick_watchdog()` into the watchdog queue and never touches
+`register_access` at all, so it cannot use that path.
+
+`register_access_process` now checks a configure write before `WRITE_SHADOW`, and
+a rejected write costs `lat["register"]` and never reaches the shadow — the DLD's
+timing table prices an error response at 2 cycles, the same as a register write,
+so the existing register latency carries it rather than a new number nobody
+stated.
+
+**The conservative default for an unknown channel.** Since §12 leaves the channel
+count open, the model rejects only what is invalid under *any* count — a negative
+or non-integer id — and takes an optional `channel_count`, unset by default, that
+bounds the range once the document decides. This avoids inventing a channel count
+while still making the declared condition real, and it is the same move as
+`sram_ctrl_ip`'s masked-bank RMW: answer the question the document asked, in the
+direction that assumes least.
+
+Worth noting what this changed beyond the error paths: an unrecognised mode string
+used to fall through `counter_process`'s `if ONE_SHOT / elif PERIODIC` and behave
+as free-running by accident. A typo configured a working timer of the wrong kind.
+
+## Still open
+
+**`watchdog_disabled`**, the third condition declared on `WATCHDOG_KICK`. It is
+derivable — §3 lists `WDT_CTRL: watchdog enable`, and the template's own
+`valid_conditions: [watchdog_enabled]` makes a kick while disabled the negation
+of a stated valid condition — but it needs a rejection path of its own on the
+kick interface, which is a separate change from the one ruled on here.

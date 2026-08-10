@@ -107,6 +107,54 @@ class TestTimerIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["config_applied"], 0)
         self.assertEqual(model.channels, {})
 
+    def test_timer_rejects_invalid_config_at_register_access(self):
+        """The two declared TIMER_CONFIG errors the DLD supports are enforced.
+
+        invalid_mode is derivable: §2 names exactly free-running, one-shot and
+        periodic, so anything else is outside the stated contract. invalid_channel
+        is a conservative default for a DLD Open Item -- §12 leaves the number of
+        channels undecided, so only what is invalid under *any* count is rejected
+        (negative or non-integer), with channel_count bounding it once the
+        document decides.
+
+        Rejection happens at the register access and enters ACCESS_ERROR, which
+        §6.1 declares and the DLD's timing table prices. Before this, the model
+        accepted any channel id and any mode string, and an unknown mode fell
+        through to free-running behaviour by accident.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, register_latency=2, interrupt_latency=1)
+        model.configure(0, "PERIODIC", compare=3)
+        model.configure(-1, "PERIODIC", compare=3)
+        model.configure(1, "SPIRAL", compare=3)
+
+        seen = set()
+        while env.peek() < 40:
+            env.step()
+            seen.add(model.fsm_state["register_access"])
+
+        self.assertIn("ACCESS_ERROR", seen, "the declared error state was never entered")
+        self.assertEqual(model.metrics["config_rejections"], 2)
+        self.assertEqual(model.metrics["rejected_invalid_channel"], 1)
+        self.assertEqual(model.metrics["rejected_invalid_mode"], 1)
+        # The valid one applied; neither rejected write reached the shadow or
+        # became a channel.
+        self.assertIn(0, model.channels)
+        self.assertNotIn(-1, model.channels)
+        self.assertNotIn(1, model.channels)
+        self.assertNotIn(-1, model.register_shadow)
+
+    def test_timer_channel_count_bounds_valid_ids_once_configured(self):
+        """channel_count is how the open item gets closed without inventing one."""
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1, channel_count=2)
+        model.configure(1, "ONE_SHOT", compare=3)
+        model.configure(2, "ONE_SHOT", compare=3)
+        env.run(until=30)
+        self.assertIn(1, model.channels)
+        self.assertNotIn(2, model.channels)
+        self.assertEqual(model.metrics["rejected_invalid_channel"], 1)
+
     def test_timer_tick_can_be_driven_from_outside(self):
         """tick_if is an input interface, so a peer must be able to drive it.
 

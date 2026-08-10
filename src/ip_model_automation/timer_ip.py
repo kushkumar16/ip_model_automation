@@ -21,12 +21,18 @@ class TimerIpModel:
         interrupt_latency=11,
         watchdog_latency=1,
         debug_freeze_latency=2,
+        channel_count=None,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
         self.env = env
         self.logger = get_ip_logger("timer_ip", log_level, log_file)
         self.tick_period = tick_period
+        # The DLD's §12 Open Items lists "Number of timer channels" as undecided,
+        # so no fixed range exists to call an id out of. None leaves it unbounded
+        # and rejects only what is invalid under any count; set it once the
+        # document decides. See decisions/timer_ip.md.
+        self.channel_count = channel_count
         self.lat = {
             "register": register_latency,
             "sync": sync_latency,
@@ -152,6 +158,27 @@ class TimerIpModel:
         for channel_id in list(self.channels):
             self._emit_effective_tick(channel_id)
 
+    # §2 In scope names exactly these three. A mode outside the set is outside
+    # the stated contract, which is what makes invalid_mode checkable at all.
+    VALID_MODES = ("FREE_RUNNING", "ONE_SHOT", "PERIODIC")
+
+    def _config_error(self, update: Dict[str, Any]) -> str | None:
+        """Which declared TIMER_CONFIG error a configure write trips, if any.
+
+        Only the two the DLD supports. `watchdog_disabled` is declared on
+        WATCHDOG_KICK and arrives through the kick queue, never through
+        register_access, so it cannot reject here and is still open -- see
+        decisions/timer_ip.md.
+        """
+        channel_id = update.get("channel_id")
+        if isinstance(channel_id, bool) or not isinstance(channel_id, int) or channel_id < 0:
+            return "invalid_channel"
+        if self.channel_count is not None and channel_id >= self.channel_count:
+            return "invalid_channel"
+        if update.get("mode") not in self.VALID_MODES:
+            return "invalid_mode"
+        return None
+
     def _apply_config(self, update: Dict[str, Any]) -> None:
         if update.get("op") != "configure":
             return
@@ -199,6 +226,25 @@ class TimerIpModel:
                 )
                 self.metrics["register_reads"] += 1
                 continue
+            if update.get("op") == "configure":
+                # Reject at the register access, as the author ruled. ACCESS_ERROR
+                # is DLD-declared (§6.1) and the DLD's timing table prices the
+                # error response at 2 cycles, the same as a register write, so it
+                # costs lat["register"] and the write never reaches the shadow.
+                error = self._config_error(update)
+                if error is not None:
+                    self.fsm_state["register_access"] = "ACCESS_ERROR"
+                    yield self.env.timeout(self.lat["register"])
+                    self.metrics["config_rejections"] += 1
+                    self.metrics[f"rejected_{error}"] += 1
+                    self.logger.error(
+                        "config rejected reason=%s channel=%s mode=%s",
+                        error,
+                        update.get("channel_id"),
+                        update.get("mode"),
+                    )
+                    continue
+
             self.fsm_state["register_access"] = "WRITE_SHADOW"
             if update.get("op") == "configure":
                 self.register_shadow[update["channel_id"]] = dict(update)

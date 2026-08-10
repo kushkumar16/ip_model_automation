@@ -125,6 +125,41 @@ class TestTimerIpModel(unittest.TestCase):
         env.run(until=5)
         self.assertEqual(model.metrics["counter_updates"], 0)
 
+    def test_timer_debug_freeze_pays_both_declared_handshake_steps(self):
+        """Freezing and resuming are each two acknowledged steps, not one.
+
+        The DLD says so -- "Freeze request must be acknowledged before counters
+        stop" -- and the template prices both halves at 2 cycles each, so
+        reaching FROZEN costs 4 and returning to RUN costs 4. The model used to
+        pay once per direction, halving both, and the existing freeze test could
+        not see it: it asserts that the counter holds and resumes, never what
+        that cost.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1, debug_freeze_latency=2)
+        model.configure(0, "PERIODIC", compare=3, reload=0)
+        env.run(until=10)
+
+        model.set_debug_freeze(True)
+        requested = env.now
+        while not model.frozen and env.peek() < 60:
+            env.step()
+        # At least the declared 4. The upper bound is 4 + 1: debug_freeze polls
+        # on a one-unit loop rather than waiting on an event, so it can notice
+        # the request up to a unit late. That slack is a separate modelling
+        # artifact, not latitude in the declared cost.
+        self.assertGreaterEqual(env.now - requested, 4, "freeze paid less than the declared 2 + 2 cycles")
+        self.assertLessEqual(env.now - requested, 5)
+        self.assertEqual(model.fsm_state["debug_freeze"], "FROZEN")
+
+        model.set_debug_freeze(False)
+        requested = env.now
+        while model.frozen and env.peek() < 120:
+            env.step()
+        self.assertGreaterEqual(env.now - requested, 4, "resume paid less than the declared 2 + 2 cycles")
+        self.assertLessEqual(env.now - requested, 5)
+        self.assertEqual(model.fsm_state["debug_freeze"], "RUN")
+
     def test_timer_debug_freeze_holds_and_resumes_counter(self):
         env = simpy.Environment()
         model = TimerIpModel(env, tick_period=1, interrupt_latency=1, debug_freeze_latency=1)

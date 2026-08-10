@@ -291,9 +291,17 @@ class TimerIpModel:
     def debug_freeze_process(self):
         applied = False
         while True:
+            # Freezing and resuming are each two steps, not one. The DLD is
+            # explicit -- "Freeze request must be acknowledged before counters
+            # stop", "Resume request must be acknowledged before counters
+            # restart" -- and the template prices both halves separately
+            # (freeze_request and freeze_ack, 2 cycles each). Paying the cost
+            # once made the broadcast and the acknowledgement indistinguishable
+            # and halved the declared latency in both directions.
             if self.freeze_requested and not applied:
                 self.fsm_state["debug_freeze"] = "FREEZE_REQUEST"
-                yield self.env.timeout(self.lat["debug_freeze"])
+                yield self.env.timeout(self.lat["debug_freeze"])  # broadcast the request
+                yield self.env.timeout(self.lat["debug_freeze"])  # counters acknowledge
                 self.frozen = True
                 applied = True
                 self.fsm_state["debug_freeze"] = "FROZEN"
@@ -301,7 +309,8 @@ class TimerIpModel:
                 self.logger.warning("debug frozen time=%s", self.env.now)
             elif not self.freeze_requested and applied:
                 self.fsm_state["debug_freeze"] = "RESUME_REQUEST"
-                yield self.env.timeout(self.lat["debug_freeze"])
+                yield self.env.timeout(self.lat["debug_freeze"])  # broadcast the request
+                yield self.env.timeout(self.lat["debug_freeze"])  # counters acknowledge
                 self.frozen = False
                 applied = False
                 self.fsm_state["debug_freeze"] = "RUN"

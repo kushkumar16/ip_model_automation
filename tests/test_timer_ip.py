@@ -107,6 +107,44 @@ class TestTimerIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["config_applied"], 0)
         self.assertEqual(model.channels, {})
 
+    def test_timer_tick_can_be_driven_from_outside(self):
+        """tick_if is an input interface, so a peer must be able to drive it.
+
+        The template declares `direction: input`, `requester: peer`, and the
+        prescaler waiting in WAIT_RAW_TICK for raw_tick_observed. The model used
+        to manufacture ticks internally from a constructor argument, so the
+        declared interface had no way in and nothing composing this IP could
+        supply its clock -- while check_wait_model_coverage still passed, because
+        the FSM does enter WAIT_RAW_TICK. It checks the wait point is reached,
+        not what is being waited for.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=None, interrupt_latency=1)
+        model.configure(0, "PERIODIC", compare=2, reload=0)
+        env.run(until=5)
+
+        # With no internal driver and no peer, the counter cannot move at all,
+        # and the prescaler is parked in its declared wait point.
+        self.assertEqual(model.metrics["effective_ticks"], 0)
+        self.assertEqual(model.channels[0]["count"], 0)
+        self.assertEqual(model.fsm_state["prescaler"], "WAIT_RAW_TICK")
+
+        def peer():
+            for _ in range(4):
+                yield model.present_raw_tick()
+                yield env.timeout(1)
+
+        env.process(peer())
+        env.run(until=20)
+        self.assertEqual(model.metrics["external_raw_ticks"], 4)
+        self.assertEqual(model.metrics["internal_raw_ticks"], 0)
+        self.assertEqual(model.metrics["effective_ticks"], 4)
+        # Four peer ticks reach the counter, and two of them complete the
+        # compare=2 period. The count itself is back at its reload value, which
+        # is why it is the wrong thing to assert on here.
+        self.assertEqual(model.metrics["counter_updates"], 4)
+        self.assertEqual(model.metrics["compare_events"], 2)
+
     def test_timer_tick_functional_respects_prescaler(self):
         env = simpy.Environment()
         model = TimerIpModel(env, tick_period=1000, interrupt_latency=1)

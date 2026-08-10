@@ -38,6 +38,13 @@ class TimerIpModel:
             "debug_freeze": debug_freeze_latency,
         }
 
+        # tick_if's ingress. The template declares this interface `direction:
+        # input` with `requester: peer`, and the prescaler waiting in
+        # WAIT_RAW_TICK for raw_tick_observed -- so a raw tick has to arrive from
+        # outside. It used to be manufactured inside prescaler_process from a
+        # constructor argument, which meant the declared input interface had no
+        # way in at all and this IP could not be driven by anything composing it.
+        self.tick_if = simpy.Store(env)
         self.register_if = simpy.Store(env)
         self.register_update_queue = simpy.Store(env, capacity=4)
         self.effective_tick_queue = simpy.Store(env, capacity=8)
@@ -77,6 +84,8 @@ class TimerIpModel:
         self.env.process(self.register_access_process())
         self.env.process(self.configuration_synchronizer_process())
         self.env.process(self.prescaler_process())
+        if self.tick_period is not None:
+            self.env.process(self.internal_tick_driver_process())
         self.env.process(self.counter_process())
         self.env.process(self.compare_event_process())
         self.env.process(self.interrupt_aggregation_process())
@@ -131,6 +140,15 @@ class TimerIpModel:
         self.logger.info("debug_freeze_requested=%s", frozen)
 
     def tick_functional(self) -> None:
+        """Functional-model entry point: advance every channel's divider now.
+
+        Deliberately synchronous and outside the SimPy processes, the same shape
+        as `ack_functional` on interrupt_controller_ip and `step_functional` on
+        completion_ip. It does not present a raw tick on tick_if and does not
+        move `fsm_state["prescaler"]`, so a caller mixing it with a running
+        internal driver drives the divider from two directions at once. Use one
+        or the other, not both.
+        """
         for channel_id in list(self.channels):
             self._emit_effective_tick(channel_id)
 
@@ -198,10 +216,32 @@ class TimerIpModel:
             self.fsm_state["configuration_synchronizer"] = "ACK_UPDATE"
             self.metrics["config_latency"] = self.lat["register"] + self.lat["sync"]
 
+    def internal_tick_driver_process(self):
+        """The built-in stimulus that presents raw ticks on tick_if.
+
+        Configuration, not a second mechanism: it drives the same interface a
+        peer would, so there is one path into the prescaler however the ticks
+        arrive. Construct with `tick_period=None` to run tick_if externally and
+        have nothing generate ticks on its own.
+        """
+        while True:
+            yield self.env.timeout(self.tick_period)
+            yield self.tick_if.put(self.env.now)
+            self.metrics["internal_raw_ticks"] += 1
+
+    def present_raw_tick(self):
+        """tick_if: a peer presents one raw tick. `yield model.present_raw_tick()`.
+
+        The handshake is an event carrying no result -- the tick is consumed in
+        the cycle it is presented -- so there is nothing to wait for afterwards.
+        """
+        self.metrics["external_raw_ticks"] += 1
+        return self.tick_if.put(self.env.now)
+
     def prescaler_process(self):
         while True:
             self.fsm_state["prescaler"] = "WAIT_RAW_TICK"
-            yield self.env.timeout(self.tick_period)
+            yield self.tick_if.get()
             self.fsm_state["prescaler"] = "INCREMENT_DIVIDER"
             yield self.env.timeout(self.lat["prescaler"])
             for channel_id in list(self.channels):

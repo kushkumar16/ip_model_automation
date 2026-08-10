@@ -101,7 +101,7 @@ stages:
     command: external_agent_or_manual_edit
     required: false
     when: src_dld_exists
-    gates: [check_review_findings]
+    gates: [check_normalization_review_owed]
     max_attempts: 1
     notes: >
       Adversarial read of the normalization against its source, looking for claims
@@ -115,6 +115,19 @@ stages:
       was found, not that the document is faithful. max_attempts is 1 deliberately
       - re-invoking a fail-only reviewer until it stops finding things is how it
       gets talked out of its findings.
+  - name: check_normalization_review_owed
+    command: python tools/check_review_findings.py {ip} --require normalization
+    required: true
+    when: src_dld_exists
+    awaiting_human: true
+    notes: >
+      Whether a *current* normalization review exists at all - a different question
+      from whether its findings are resolved, which check_review_findings answers.
+      They were the same stage until an end-to-end run showed what that costs: a
+      reviewer gated on the findings check is gated on a check that passes when no
+      review has ever been written, so the stage was skipped for every IP forever.
+      Unresolved findings deliberately do not make a review owed; a reviewer re-run
+      until its findings go away is a reviewer being talked out of them.
   - name: check_review_findings
     command: python tools/check_review_findings.py {ip}
     required: true
@@ -194,7 +207,7 @@ stages:
     kind: agent
     command: external_agent_or_manual_edit
     required: false
-    gates: [recheck_review_findings]
+    gates: [check_model_review_owed]
     max_attempts: 1
     notes: >
       Adversarial read of the model and its tests against their template, writing
@@ -204,6 +217,15 @@ stages:
       misimplements its contract and a test that agrees with it both pass. It may
       fail a model and may never pass one - an empty findings list means nothing
       was found, not that the model is faithful.
+  - name: check_model_review_owed
+    command: python tools/check_review_findings.py {ip} --require model
+    required: true
+    awaiting_human: true
+    notes: >
+      The model half of the same split. Drives review_model, and only asks whether
+      a current review of this model and its tests exists - editing any of the three
+      subject files makes it stale and owes a fresh one, which is the same hash
+      device the findings file already carries.
   - name: recheck_review_findings
     command: python tools/check_review_findings.py {ip}
     required: true

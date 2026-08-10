@@ -298,11 +298,53 @@ def outstanding_summary() -> list[str]:
     return lines or ["  (no reviews recorded)"]
 
 
+def review_owed(ip: str, kind: str) -> str | None:
+    """Why a fresh `kind` review is owed for `ip`, or None if a current one exists.
+
+    A different question from "is every finding resolved", and keeping the two
+    apart is what lets a reviewer stage run at all. The reviewer's gate used to be
+    the findings check, which passes when no review has ever been written — so the
+    gate was satisfied by the reviewer never having run, and the stage was skipped
+    for every IP, forever.
+
+    Unresolved findings do **not** make a review owed. A reviewer that is re-run
+    until its findings go away is a reviewer being talked out of them.
+    """
+    path = findings_path(ip, kind)
+    if not path.is_file():
+        return f"{ip}: no {kind} review has been run ({path.relative_to(REPO_ROOT).as_posix()} does not exist)"
+    data, errors = load_findings(path)
+    if errors:
+        return f"{ip}: the {kind} review is unreadable - {errors[0]}"
+    stale = review_is_stale(data, ip, kind)
+    if stale:
+        return f"{ip}: the {kind} review is stale - {stale}"
+    return None
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("ips", nargs="*", help="IP names to check (default: every IP with a findings file)")
     parser.add_argument("--list", action="store_true", help="summarise recorded reviews without failing")
+    parser.add_argument(
+        "--require",
+        choices=sorted(REVIEW_KINDS),
+        help="fail unless a current review of this kind exists for each named IP; this is what drives a "
+        "reviewer stage, and it deliberately ignores whether findings are resolved",
+    )
     args = parser.parse_args(argv)
+
+    if args.require:
+        if not args.ips:
+            parser.error("--require needs at least one IP")
+        owed = [reason for ip in args.ips if (reason := review_owed(ip, args.require)) is not None]
+        if owed:
+            print(f"{args.require} review owed:", file=sys.stderr)
+            for reason in owed:
+                print(f"  - {reason}", file=sys.stderr)
+            return 1
+        print(f"{args.require} review: current for {', '.join(args.ips)}")
+        return 0
 
     if args.list:
         print("normalization reviews:")

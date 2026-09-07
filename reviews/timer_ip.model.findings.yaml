@@ -1,116 +1,53 @@
 # Model review of src/ip_model_automation/timer_ip.py and tests/test_timer_ip.py
 # against templates/timer_ip.template.yaml. See agents/model_review_agent.md.
 #
-# Fresh review of the current files, after M1 (debug_freeze handshake) and M3
-# (tick_if ingress) were fixed and M2 was closed (register-access half fixed,
-# watchdog_disabled half dismissed) -- see decisions/timer_ip.md. Those three ids
-# are already spent there, so this review's findings start at M4.
+# Re-run because tests/test_timer_ip.py changed since the prior review (which
+# closed at M6): two tests were added,
+# test_timer_effective_tick_to_irq_matches_the_declared_path and
+# test_timer_watchdog_timeout_latency_matches_declared_cost, written to close
+# M4 and M5 (see decisions/timer_ip.md). templates/timer_ip.template.yaml and
+# src/ip_model_automation/timer_ip.py are byte-identical to the prior review;
+# only the tests changed.
 #
-# Checked: every declared interface wait_model against its process
-# implementation (register_if, tick_if, interrupt_if); every fsm_processes
-# transition and its latency_cycles against the corresponding process; every
-# queue depth and resource against its simpy object; the gating_relationships
+# Checked fresh against the current files: every declared interface
+# wait_model against its process implementation (register_if, tick_if,
+# interrupt_if); every fsm_processes transition and its latency_cycles;
+# every queue depth against its simpy Store capacity; the gating_relationships
 # entry against the processes it names; every command's valid/completion/error
 # conditions against what the model does; and every test_scenario's
 # expected_functional_behavior / expected_performance_properties against the
-# test that claims to exercise it.
+# test that claims to exercise it, including the two new tests.
 #
-# An empty findings list would NOT be a verdict that this model is faithful. It
-# would record only that a reviewer looked and reported nothing, which is a
-# weaker claim than "correct" -- this review does not carry that weaker claim,
-# because it found three disagreements below. Neither an empty nor a non-empty
-# list here can approve the model; a person resolves each finding by fixing it
-# (which reruns this review) or dismissing it by name in decisions/timer_ip.md.
+# The two new tests were traced by hand against the template's declared
+# figures. test_timer_effective_tick_to_irq_matches_the_declared_path: with
+# prescaler_latency=1, counter_latency=1, compare_latency=3, interrupt_latency=6
+# (matching the template's effective_tick_emit=1, count_update=1,
+# compare_check+event_assert=2+1, collect_events+apply_mask+assert_irq=2+2+2),
+# a raw tick presented at t=20 asserts an interrupt at t=31 -- an 11-cycle
+# delta, matching end_to_end_paths.effective_tick_to_irq exactly.
+# test_timer_watchdog_timeout_latency_matches_declared_cost: with
+# watchdog_latency=3 (timeout_detect + timeout_publish = 1 + 2) and a
+# timeout threshold of 5, the timeout fires at t=8 from arming, matching the
+# declared 5 + 3. Both are mutation-sensitive (a wrong knob changes the
+# asserted total), not tautological.
+#
+# The gating_relationships gap this review's predecessor found and the
+# author dismissed by name (counter.COUNT not reflecting debug_freeze; see
+# "M6 dismissed" in decisions/timer_ip.md) and the watchdog kick_reload cost
+# the author ruled not implemented are both still present in the code
+# unchanged. Neither is re-filed here under a new id: both were examined and
+# adjudicated on the record already, and nothing about them is different in
+# this pair of files. Refiling an already-dismissed, unchanged defect under a
+# fresh id would not be a new disagreement -- it would be the same one
+# finding a person has already read and decided about, counted twice.
+#
+# An empty findings list here is not a verdict that this model is faithful.
+# It records that a reviewer looked at the current files and found no new
+# disagreement beyond what is already on record; it does not, and cannot,
+# approve the model or substitute for the gates.
 ip: timer_ip
 kind: model
 template_sha256: 11be5a1d477caba8ed99e426eb4999d4de823659428929849361ef1c925d5885
 model_sha256: ad8bd52e2810beb4b215e14900cf3af248eeb6a6c113a8ac18bf139d07a00bc3
-tests_sha256: 256e6bfde9d7722ffd1851a91fb0b6a1c34592756a1902b43f018997d7d0b016
-findings:
-  - id: M4
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      The periodic_timer_reloads scenario declares interrupt_latency_measured
-      as an expected performance property, but no test in the suite computes
-      an elapsed simulated-time interrupt latency for anything -- periodic or
-      otherwise.
-    template: >-
-      templates/timer_ip.template.yaml test_scenarios[0] periodic_timer_reloads
-      (lines 351-356), expected_performance_properties (line 355):
-      [interrupt_latency_measured].
-    model: >-
-      tests/test_timer_ip.py test_timer_periodic_reloads_and_repeats (lines
-      17-31), the test that exercises this scenario's input_sequence, asserts
-      only metrics["compare_events"], metrics["interrupt_count"] and
-      fsm_state["interrupt_aggregation"] -- never an env.now delta. Across the
-      whole file, only test_timer_register_read_returns_a_response (line 62,
-      `seen["elapsed"] = env.now - started`) and
-      test_timer_debug_freeze_pays_both_declared_handshake_steps (lines 237-238,
-      245-246, `env.now - requested`) compute an elapsed simulated-time value at
-      all; neither measures the compare-to-interrupt path.
-    why: >-
-      The template asserts this property is measured somewhere in the suite.
-      It is not, for any scenario -- so a regression in interrupt latency
-      (for example the collapsed-handshake shape M1 found in debug_freeze,
-      but in interrupt_aggregation instead) would pass every test in the file
-      without being noticed, contrary to what the scenario claims is checked.
-  - id: M5
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      The register_compare_and_watchdog_paths scenario declares both
-      register_latency_measured and watchdog_latency_measured as expected
-      performance properties. The first is measured; the second is not --
-      every watchdog test asserts counts, never elapsed simulated time.
-    template: >-
-      templates/timer_ip.template.yaml test_scenarios[1]
-      register_compare_and_watchdog_paths (lines 357-362),
-      expected_performance_properties (line 361): [register_latency_measured,
-      watchdog_latency_measured].
-    model: >-
-      tests/test_timer_ip.py test_timer_watchdog_timeout_generates_interrupt
-      (lines 43-49) and test_timer_watchdog_kick_defers_timeout (lines 79-89)
-      are the only watchdog tests; both assert only
-      metrics["watchdog_timeouts"], metrics["watchdog_kicks"] and
-      model.interrupts membership, never an env.now delta around a kick or a
-      timeout. register_latency_measured is satisfied elsewhere, by
-      test_timer_register_read_returns_a_response (line 62, `seen["elapsed"] =
-      env.now - started`, asserted `>= 2` at line 68).
-    why: >-
-      A reader trusting the template would believe watchdog latency is under
-      test the same way register latency is. It is not, so a wrong
-      watchdog_latency value, or a structural timing defect in
-      watchdog_process of the same shape M1 found in debug_freeze, has no
-      test that would catch it via timing.
-  - id: M6
-    class: fsm_structure
-    severity: medium
-    claim: >-
-      The template's gating_relationships entry declares debug_freeze gates
-      counter.COUNT, but the model's counter fsm_state is never set to
-      anything reflecting that gate -- it is computed only from whether any
-      channel exists, and the actual freeze check lives in a different
-      process entirely.
-    template: >-
-      templates/timer_ip.template.yaml fsm_relationships.gating_relationships
-      (lines 261-264): `source: debug_freeze`, `gates: counter.COUNT`,
-      `stall_reason: debug_frozen` -- naming counter.COUNT as the node the
-      freeze gates.
-    model: >-
-      src/ip_model_automation/timer_ip.py counter_process (line 299) sets
-      `self.fsm_state["counter"] = "DISABLED" if not self.channels else
-      "COUNT"` unconditionally on every loop iteration, with no reference to
-      `self.frozen` -- it reports "COUNT" while frozen exactly as it does
-      while running. The freeze is enforced instead in
-      `_emit_effective_tick` (lines 198-203), called from
-      `prescaler_process`, which is a different fsm_process than the one the
-      template names as gated.
-    why: >-
-      A reader checking fsm_state["counter"] to see whether the timer is
-      gated by debug freeze -- exactly what the declared gating_relationship
-      says to expect at that node -- sees "COUNT" throughout a freeze and has
-      no way to tell counting is actually held up one stage upstream. It also
-      means a tick already queued in effective_tick_queue before `self.frozen`
-      turns true is drained by counter_process with no gate of its own once
-      it is dequeued, since the only check is at the producer side.
+tests_sha256: 6ac29398256074ebe5506c34581bbe6ad86cb37c6418c4be4eef6c36d0072ace
+findings: []

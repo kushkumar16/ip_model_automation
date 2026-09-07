@@ -133,10 +133,16 @@ Worth noting what this changed beyond the error paths: an unrecognised mode stri
 used to fall through `counter_process`'s `if ONE_SHOT / elif PERIODIC` and behave
 as free-running by accident. A typo configured a working timer of the wrong kind.
 
-**M4 fixed** and **M5 fixed** (`scenario_gap`, medium) — two scenarios declared
-performance properties nothing in the suite measured. `periodic_timer_reloads`
-claimed `interrupt_latency_measured`; `register_compare_and_watchdog_paths`
-claimed `watchdog_latency_measured`. Across the whole test file only two tests
+**M4 fixed** (`scenario_gap`, medium) — `periodic_timer_reloads` claimed
+`interrupt_latency_measured` and nothing measured it. The measurement is written
+below.
+
+**M5 fixed** (`scenario_gap`, medium) — `register_compare_and_watchdog_paths`
+claimed `watchdog_latency_measured` and nothing measured it either.
+
+Both are the same shape, so the reasoning is shared. Two scenarios declared
+performance properties nothing in the suite verified. Across the whole test file
+only two tests
 computed an elapsed simulated time at all — the register read, and the freeze
 handshake added for M1 — and neither touched the compare-to-interrupt path or a
 watchdog kick.
@@ -157,7 +163,28 @@ cost fails it at `8 != 11`.
 **The watchdog timeout path is faithful too** — a timeout fires at the threshold
 plus the declared `timeout_detect + timeout_publish`, measured as 5 + 3 = 8.
 
-## Found while measuring M5, not yet ruled on
+## Declared but not implemented
+
+Both entries below are behaviour the DLD states and the template transcribes
+faithfully, which the model does not have. Neither document is edited: the
+requirement is real and deleting it to match the model would turn a design figure
+into a description of what happens to exist. They are recorded here instead, with
+the consequence stated, so a reader of the template knows which of its claims the
+model currently honours.
+
+- **M6 dismissed:** the template's `gating_relationships` names `counter.COUNT`
+  as the node `debug_freeze` gates, and the model does not reflect that gate at
+  that node — `counter_process` computes `fsm_state["counter"]` from whether any
+  channel exists and never consults `self.frozen`, so it reports `COUNT`
+  throughout a freeze. The freeze is enforced one stage upstream in
+  `_emit_effective_tick`, at the producer, which also means **a tick already
+  queued in `effective_tick_queue` when `frozen` turns true is drained ungated**
+  — one tick can cross a freeze boundary. Both halves are left as they are.
+  Counting does stop during a freeze, which is what §6.8 requires; what is wrong
+  is where the model reports the gate and the single tick of slack at the
+  boundary. Anyone reading `fsm_state["counter"]` to detect a freeze must not
+  trust it, and anyone measuring counts across a freeze edge should expect a
+  possible off-by-one.
 
 **`kick_reload` costs nothing.** The template declares
 `timing_model.fsm_process_delays.watchdog.kick_reload` at 2 cycles.
@@ -166,9 +193,15 @@ increments the counter with **no `env.timeout` at all** — measured at 0 cycles
 
 This is the same shape as M1, where `debug_freeze` paid one declared cost instead
 of two, and the author's ruling there was to pay both halves. Applying that
-precedent would mean paying `lat["watchdog_kick"]` here. It is left unfixed
-because M5 asked for a measurement, not a timing change, and because a kick that
-suddenly costs 2 cycles moves every watchdog test's timeline.
+precedent would mean paying that cost here.
+
+**Ruled 2026-09-07: not implemented.** The DLD states it — §11's timing table
+row for the Watchdog FSM reads *"Kick reload: 2 cycles = 4 ns"* — and the
+document keeps saying so. The model simply does not charge it, which means an
+accepted kick is free and any measurement of kick-to-reload latency reads 2
+cycles short of the specification. The new watchdog test deliberately does not
+assert the kick path, so nothing encodes the 0 and a later fix will not have to
+unpick a test that enshrined it.
 
 The new test deliberately does **not** assert the kick path, so nothing encodes
 the 0. M5's own `why` predicted this exact class of defect — "a structural timing

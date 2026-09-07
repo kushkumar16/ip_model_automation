@@ -21,12 +21,18 @@ class TimerIpModel:
         interrupt_latency=11,
         watchdog_latency=1,
         debug_freeze_latency=2,
+        channel_count=None,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
         self.env = env
         self.logger = get_ip_logger("timer_ip", log_level, log_file)
         self.tick_period = tick_period
+        # The DLD's §12 Open Items lists "Number of timer channels" as undecided,
+        # so no fixed range exists to call an id out of. None leaves it unbounded
+        # and rejects only what is invalid under any count; set it once the
+        # document decides. See decisions/timer_ip.md.
+        self.channel_count = channel_count
         self.lat = {
             "register": register_latency,
             "sync": sync_latency,
@@ -38,6 +44,13 @@ class TimerIpModel:
             "debug_freeze": debug_freeze_latency,
         }
 
+        # tick_if's ingress. The template declares this interface `direction:
+        # input` with `requester: peer`, and the prescaler waiting in
+        # WAIT_RAW_TICK for raw_tick_observed -- so a raw tick has to arrive from
+        # outside. It used to be manufactured inside prescaler_process from a
+        # constructor argument, which meant the declared input interface had no
+        # way in at all and this IP could not be driven by anything composing it.
+        self.tick_if = simpy.Store(env)
         self.register_if = simpy.Store(env)
         self.register_update_queue = simpy.Store(env, capacity=4)
         self.effective_tick_queue = simpy.Store(env, capacity=8)
@@ -77,6 +90,8 @@ class TimerIpModel:
         self.env.process(self.register_access_process())
         self.env.process(self.configuration_synchronizer_process())
         self.env.process(self.prescaler_process())
+        if self.tick_period is not None:
+            self.env.process(self.internal_tick_driver_process())
         self.env.process(self.counter_process())
         self.env.process(self.compare_event_process())
         self.env.process(self.interrupt_aggregation_process())
@@ -131,8 +146,38 @@ class TimerIpModel:
         self.logger.info("debug_freeze_requested=%s", frozen)
 
     def tick_functional(self) -> None:
+        """Functional-model entry point: advance every channel's divider now.
+
+        Deliberately synchronous and outside the SimPy processes, the same shape
+        as `ack_functional` on interrupt_controller_ip and `step_functional` on
+        completion_ip. It does not present a raw tick on tick_if and does not
+        move `fsm_state["prescaler"]`, so a caller mixing it with a running
+        internal driver drives the divider from two directions at once. Use one
+        or the other, not both.
+        """
         for channel_id in list(self.channels):
             self._emit_effective_tick(channel_id)
+
+    # §2 In scope names exactly these three. A mode outside the set is outside
+    # the stated contract, which is what makes invalid_mode checkable at all.
+    VALID_MODES = ("FREE_RUNNING", "ONE_SHOT", "PERIODIC")
+
+    def _config_error(self, update: Dict[str, Any]) -> str | None:
+        """Which declared TIMER_CONFIG error a configure write trips, if any.
+
+        Only the two the DLD supports. `watchdog_disabled` is declared on
+        WATCHDOG_KICK and arrives through the kick queue, never through
+        register_access, so it cannot reject here and is still open -- see
+        decisions/timer_ip.md.
+        """
+        channel_id = update.get("channel_id")
+        if isinstance(channel_id, bool) or not isinstance(channel_id, int) or channel_id < 0:
+            return "invalid_channel"
+        if self.channel_count is not None and channel_id >= self.channel_count:
+            return "invalid_channel"
+        if update.get("mode") not in self.VALID_MODES:
+            return "invalid_mode"
+        return None
 
     def _apply_config(self, update: Dict[str, Any]) -> None:
         if update.get("op") != "configure":
@@ -181,6 +226,25 @@ class TimerIpModel:
                 )
                 self.metrics["register_reads"] += 1
                 continue
+            if update.get("op") == "configure":
+                # Reject at the register access, as the author ruled. ACCESS_ERROR
+                # is DLD-declared (§6.1) and the DLD's timing table prices the
+                # error response at 2 cycles, the same as a register write, so it
+                # costs lat["register"] and the write never reaches the shadow.
+                error = self._config_error(update)
+                if error is not None:
+                    self.fsm_state["register_access"] = "ACCESS_ERROR"
+                    yield self.env.timeout(self.lat["register"])
+                    self.metrics["config_rejections"] += 1
+                    self.metrics[f"rejected_{error}"] += 1
+                    self.logger.error(
+                        "config rejected reason=%s channel=%s mode=%s",
+                        error,
+                        update.get("channel_id"),
+                        update.get("mode"),
+                    )
+                    continue
+
             self.fsm_state["register_access"] = "WRITE_SHADOW"
             if update.get("op") == "configure":
                 self.register_shadow[update["channel_id"]] = dict(update)
@@ -198,10 +262,32 @@ class TimerIpModel:
             self.fsm_state["configuration_synchronizer"] = "ACK_UPDATE"
             self.metrics["config_latency"] = self.lat["register"] + self.lat["sync"]
 
+    def internal_tick_driver_process(self):
+        """The built-in stimulus that presents raw ticks on tick_if.
+
+        Configuration, not a second mechanism: it drives the same interface a
+        peer would, so there is one path into the prescaler however the ticks
+        arrive. Construct with `tick_period=None` to run tick_if externally and
+        have nothing generate ticks on its own.
+        """
+        while True:
+            yield self.env.timeout(self.tick_period)
+            yield self.tick_if.put(self.env.now)
+            self.metrics["internal_raw_ticks"] += 1
+
+    def present_raw_tick(self):
+        """tick_if: a peer presents one raw tick. `yield model.present_raw_tick()`.
+
+        The handshake is an event carrying no result -- the tick is consumed in
+        the cycle it is presented -- so there is nothing to wait for afterwards.
+        """
+        self.metrics["external_raw_ticks"] += 1
+        return self.tick_if.put(self.env.now)
+
     def prescaler_process(self):
         while True:
             self.fsm_state["prescaler"] = "WAIT_RAW_TICK"
-            yield self.env.timeout(self.tick_period)
+            yield self.tick_if.get()
             self.fsm_state["prescaler"] = "INCREMENT_DIVIDER"
             yield self.env.timeout(self.lat["prescaler"])
             for channel_id in list(self.channels):
@@ -291,9 +377,17 @@ class TimerIpModel:
     def debug_freeze_process(self):
         applied = False
         while True:
+            # Freezing and resuming are each two steps, not one. The DLD is
+            # explicit -- "Freeze request must be acknowledged before counters
+            # stop", "Resume request must be acknowledged before counters
+            # restart" -- and the template prices both halves separately
+            # (freeze_request and freeze_ack, 2 cycles each). Paying the cost
+            # once made the broadcast and the acknowledgement indistinguishable
+            # and halved the declared latency in both directions.
             if self.freeze_requested and not applied:
                 self.fsm_state["debug_freeze"] = "FREEZE_REQUEST"
-                yield self.env.timeout(self.lat["debug_freeze"])
+                yield self.env.timeout(self.lat["debug_freeze"])  # broadcast the request
+                yield self.env.timeout(self.lat["debug_freeze"])  # counters acknowledge
                 self.frozen = True
                 applied = True
                 self.fsm_state["debug_freeze"] = "FROZEN"
@@ -301,7 +395,8 @@ class TimerIpModel:
                 self.logger.warning("debug frozen time=%s", self.env.now)
             elif not self.freeze_requested and applied:
                 self.fsm_state["debug_freeze"] = "RESUME_REQUEST"
-                yield self.env.timeout(self.lat["debug_freeze"])
+                yield self.env.timeout(self.lat["debug_freeze"])  # broadcast the request
+                yield self.env.timeout(self.lat["debug_freeze"])  # counters acknowledge
                 self.frozen = False
                 applied = False
                 self.fsm_state["debug_freeze"] = "RUN"

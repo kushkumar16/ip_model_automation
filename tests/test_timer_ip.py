@@ -107,6 +107,153 @@ class TestTimerIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["config_applied"], 0)
         self.assertEqual(model.channels, {})
 
+    def test_timer_effective_tick_to_irq_matches_the_declared_path(self):
+        """M4: periodic_timer_reloads claims interrupt_latency_measured.
+
+        Nothing measured it. Across the whole file only two tests computed an
+        elapsed simulated time at all, and neither touched the compare-to-
+        interrupt path -- so a collapsed handshake in interrupt_aggregation, the
+        shape M1 found in debug_freeze, would have passed every test here.
+
+        The template's effective_tick_to_irq path declares 11 cycles over seven
+        operations. The model covers several of them with one knob each --
+        compare_latency spans compare_check + event_assert (2 + 1) and
+        interrupt_latency spans collect_events + apply_mask + assert_irq
+        (2 + 2 + 2) -- so each is set to the sum the template declares, and the
+        figure asserted is the end-to-end one the template states rather than
+        whatever the model happens to do.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(
+            env,
+            tick_period=None,
+            prescaler_latency=1,
+            counter_latency=1,
+            compare_latency=3,
+            interrupt_latency=6,
+        )
+        model.configure(0, "ONE_SHOT", compare=1, reload=0)
+        env.run(until=20)
+
+        presented = env.now
+        model.present_raw_tick()
+        env.run(until=200)
+
+        self.assertEqual(len(model.interrupts), 1)
+        asserted_at, channel_id = model.interrupts[0]
+        self.assertEqual(channel_id, 0)
+        self.assertEqual(asserted_at - presented, 11, "effective_tick_to_irq is not the declared 11 cycles")
+
+    def test_timer_watchdog_timeout_latency_matches_declared_cost(self):
+        """M5: register_compare_and_watchdog_paths claims watchdog_latency_measured.
+
+        Every watchdog test asserted counts -- watchdog_timeouts, watchdog_kicks,
+        interrupt membership -- and never an elapsed time, so the declared
+        watchdog costs were unverified.
+
+        watchdog_latency covers timeout_detect + timeout_publish (1 + 2), so a
+        timeout fires the threshold plus that. The kick path is deliberately not
+        asserted here: the template declares kick_reload at 2 cycles and the
+        model pays none, which is a defect rather than something to encode --
+        see decisions/timer_ip.md.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=None, watchdog_latency=3)
+        armed = env.now
+        model.configure_watchdog(timeout=5, interrupt=True)
+
+        while model.metrics["watchdog_timeouts"] == 0 and env.peek() < 200:
+            env.step()
+
+        self.assertEqual(model.metrics["watchdog_timeouts"], 1)
+        self.assertEqual(env.now - armed, 8, "timeout threshold 5 plus the declared detect/publish 3")
+
+    def test_timer_rejects_invalid_config_at_register_access(self):
+        """The two declared TIMER_CONFIG errors the DLD supports are enforced.
+
+        invalid_mode is derivable: §2 names exactly free-running, one-shot and
+        periodic, so anything else is outside the stated contract. invalid_channel
+        is a conservative default for a DLD Open Item -- §12 leaves the number of
+        channels undecided, so only what is invalid under *any* count is rejected
+        (negative or non-integer), with channel_count bounding it once the
+        document decides.
+
+        Rejection happens at the register access and enters ACCESS_ERROR, which
+        §6.1 declares and the DLD's timing table prices. Before this, the model
+        accepted any channel id and any mode string, and an unknown mode fell
+        through to free-running behaviour by accident.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, register_latency=2, interrupt_latency=1)
+        model.configure(0, "PERIODIC", compare=3)
+        model.configure(-1, "PERIODIC", compare=3)
+        model.configure(1, "SPIRAL", compare=3)
+
+        seen = set()
+        while env.peek() < 40:
+            env.step()
+            seen.add(model.fsm_state["register_access"])
+
+        self.assertIn("ACCESS_ERROR", seen, "the declared error state was never entered")
+        self.assertEqual(model.metrics["config_rejections"], 2)
+        self.assertEqual(model.metrics["rejected_invalid_channel"], 1)
+        self.assertEqual(model.metrics["rejected_invalid_mode"], 1)
+        # The valid one applied; neither rejected write reached the shadow or
+        # became a channel.
+        self.assertIn(0, model.channels)
+        self.assertNotIn(-1, model.channels)
+        self.assertNotIn(1, model.channels)
+        self.assertNotIn(-1, model.register_shadow)
+
+    def test_timer_channel_count_bounds_valid_ids_once_configured(self):
+        """channel_count is how the open item gets closed without inventing one."""
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1, channel_count=2)
+        model.configure(1, "ONE_SHOT", compare=3)
+        model.configure(2, "ONE_SHOT", compare=3)
+        env.run(until=30)
+        self.assertIn(1, model.channels)
+        self.assertNotIn(2, model.channels)
+        self.assertEqual(model.metrics["rejected_invalid_channel"], 1)
+
+    def test_timer_tick_can_be_driven_from_outside(self):
+        """tick_if is an input interface, so a peer must be able to drive it.
+
+        The template declares `direction: input`, `requester: peer`, and the
+        prescaler waiting in WAIT_RAW_TICK for raw_tick_observed. The model used
+        to manufacture ticks internally from a constructor argument, so the
+        declared interface had no way in and nothing composing this IP could
+        supply its clock -- while check_wait_model_coverage still passed, because
+        the FSM does enter WAIT_RAW_TICK. It checks the wait point is reached,
+        not what is being waited for.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=None, interrupt_latency=1)
+        model.configure(0, "PERIODIC", compare=2, reload=0)
+        env.run(until=5)
+
+        # With no internal driver and no peer, the counter cannot move at all,
+        # and the prescaler is parked in its declared wait point.
+        self.assertEqual(model.metrics["effective_ticks"], 0)
+        self.assertEqual(model.channels[0]["count"], 0)
+        self.assertEqual(model.fsm_state["prescaler"], "WAIT_RAW_TICK")
+
+        def peer():
+            for _ in range(4):
+                yield model.present_raw_tick()
+                yield env.timeout(1)
+
+        env.process(peer())
+        env.run(until=20)
+        self.assertEqual(model.metrics["external_raw_ticks"], 4)
+        self.assertEqual(model.metrics["internal_raw_ticks"], 0)
+        self.assertEqual(model.metrics["effective_ticks"], 4)
+        # Four peer ticks reach the counter, and two of them complete the
+        # compare=2 period. The count itself is back at its reload value, which
+        # is why it is the wrong thing to assert on here.
+        self.assertEqual(model.metrics["counter_updates"], 4)
+        self.assertEqual(model.metrics["compare_events"], 2)
+
     def test_timer_tick_functional_respects_prescaler(self):
         env = simpy.Environment()
         model = TimerIpModel(env, tick_period=1000, interrupt_latency=1)
@@ -124,6 +271,41 @@ class TestTimerIpModel(unittest.TestCase):
         model.effective_tick_queue.put(99)
         env.run(until=5)
         self.assertEqual(model.metrics["counter_updates"], 0)
+
+    def test_timer_debug_freeze_pays_both_declared_handshake_steps(self):
+        """Freezing and resuming are each two acknowledged steps, not one.
+
+        The DLD says so -- "Freeze request must be acknowledged before counters
+        stop" -- and the template prices both halves at 2 cycles each, so
+        reaching FROZEN costs 4 and returning to RUN costs 4. The model used to
+        pay once per direction, halving both, and the existing freeze test could
+        not see it: it asserts that the counter holds and resumes, never what
+        that cost.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=1, interrupt_latency=1, debug_freeze_latency=2)
+        model.configure(0, "PERIODIC", compare=3, reload=0)
+        env.run(until=10)
+
+        model.set_debug_freeze(True)
+        requested = env.now
+        while not model.frozen and env.peek() < 60:
+            env.step()
+        # At least the declared 4. The upper bound is 4 + 1: debug_freeze polls
+        # on a one-unit loop rather than waiting on an event, so it can notice
+        # the request up to a unit late. That slack is a separate modelling
+        # artifact, not latitude in the declared cost.
+        self.assertGreaterEqual(env.now - requested, 4, "freeze paid less than the declared 2 + 2 cycles")
+        self.assertLessEqual(env.now - requested, 5)
+        self.assertEqual(model.fsm_state["debug_freeze"], "FROZEN")
+
+        model.set_debug_freeze(False)
+        requested = env.now
+        while model.frozen and env.peek() < 120:
+            env.step()
+        self.assertGreaterEqual(env.now - requested, 4, "resume paid less than the declared 2 + 2 cycles")
+        self.assertLessEqual(env.now - requested, 5)
+        self.assertEqual(model.fsm_state["debug_freeze"], "RUN")
 
     def test_timer_debug_freeze_holds_and_resumes_counter(self):
         env = simpy.Environment()

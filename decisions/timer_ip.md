@@ -133,6 +133,49 @@ Worth noting what this changed beyond the error paths: an unrecognised mode stri
 used to fall through `counter_process`'s `if ONE_SHOT / elif PERIODIC` and behave
 as free-running by accident. A typo configured a working timer of the wrong kind.
 
+**M4 fixed** and **M5 fixed** (`scenario_gap`, medium) — two scenarios declared
+performance properties nothing in the suite measured. `periodic_timer_reloads`
+claimed `interrupt_latency_measured`; `register_compare_and_watchdog_paths`
+claimed `watchdog_latency_measured`. Across the whole test file only two tests
+computed an elapsed simulated time at all — the register read, and the freeze
+handshake added for M1 — and neither touched the compare-to-interrupt path or a
+watchdog kick.
+
+The measurements were written rather than the claims removed, because both
+properties turned out to be worth having.
+
+**The interrupt path is faithful, and now proven so.** With every latency knob
+set to the value the template declares, an effective tick reaches an asserted IRQ
+in exactly **11 cycles**, matching the `effective_tick_to_irq` end-to-end path.
+Worth recording how the knobs map, since it is not one-to-one: `compare_latency`
+covers `compare_check + event_assert` (2 + 1) and `interrupt_latency` covers
+`collect_events + apply_mask + assert_irq` (2 + 2 + 2). The test sets each to the
+declared sum and asserts the end-to-end figure the template states, rather than
+whatever the model happens to produce. Mutation-checked: halving the aggregation
+cost fails it at `8 != 11`.
+
+**The watchdog timeout path is faithful too** — a timeout fires at the threshold
+plus the declared `timeout_detect + timeout_publish`, measured as 5 + 3 = 8.
+
+## Found while measuring M5, not yet ruled on
+
+**`kick_reload` costs nothing.** The template declares
+`timing_model.fsm_process_delays.watchdog.kick_reload` at 2 cycles.
+`watchdog_process`'s `KICK_RELOAD` branch takes the kick, sets `last_kick` and
+increments the counter with **no `env.timeout` at all** — measured at 0 cycles.
+
+This is the same shape as M1, where `debug_freeze` paid one declared cost instead
+of two, and the author's ruling there was to pay both halves. Applying that
+precedent would mean paying `lat["watchdog_kick"]` here. It is left unfixed
+because M5 asked for a measurement, not a timing change, and because a kick that
+suddenly costs 2 cycles moves every watchdog test's timeline.
+
+The new test deliberately does **not** assert the kick path, so nothing encodes
+the 0. M5's own `why` predicted this exact class of defect — "a structural timing
+defect in `watchdog_process` of the same shape M1 found in `debug_freeze` has no
+test that would catch it via timing" — and writing the measurement it asked for
+is what surfaced it.
+
 ## Deferred, deliberately
 
 - **M2 dismissed:** the register-access half is implemented — `invalid_channel`

@@ -107,6 +107,67 @@ class TestTimerIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["config_applied"], 0)
         self.assertEqual(model.channels, {})
 
+    def test_timer_effective_tick_to_irq_matches_the_declared_path(self):
+        """M4: periodic_timer_reloads claims interrupt_latency_measured.
+
+        Nothing measured it. Across the whole file only two tests computed an
+        elapsed simulated time at all, and neither touched the compare-to-
+        interrupt path -- so a collapsed handshake in interrupt_aggregation, the
+        shape M1 found in debug_freeze, would have passed every test here.
+
+        The template's effective_tick_to_irq path declares 11 cycles over seven
+        operations. The model covers several of them with one knob each --
+        compare_latency spans compare_check + event_assert (2 + 1) and
+        interrupt_latency spans collect_events + apply_mask + assert_irq
+        (2 + 2 + 2) -- so each is set to the sum the template declares, and the
+        figure asserted is the end-to-end one the template states rather than
+        whatever the model happens to do.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(
+            env,
+            tick_period=None,
+            prescaler_latency=1,
+            counter_latency=1,
+            compare_latency=3,
+            interrupt_latency=6,
+        )
+        model.configure(0, "ONE_SHOT", compare=1, reload=0)
+        env.run(until=20)
+
+        presented = env.now
+        model.present_raw_tick()
+        env.run(until=200)
+
+        self.assertEqual(len(model.interrupts), 1)
+        asserted_at, channel_id = model.interrupts[0]
+        self.assertEqual(channel_id, 0)
+        self.assertEqual(asserted_at - presented, 11, "effective_tick_to_irq is not the declared 11 cycles")
+
+    def test_timer_watchdog_timeout_latency_matches_declared_cost(self):
+        """M5: register_compare_and_watchdog_paths claims watchdog_latency_measured.
+
+        Every watchdog test asserted counts -- watchdog_timeouts, watchdog_kicks,
+        interrupt membership -- and never an elapsed time, so the declared
+        watchdog costs were unverified.
+
+        watchdog_latency covers timeout_detect + timeout_publish (1 + 2), so a
+        timeout fires the threshold plus that. The kick path is deliberately not
+        asserted here: the template declares kick_reload at 2 cycles and the
+        model pays none, which is a defect rather than something to encode --
+        see decisions/timer_ip.md.
+        """
+        env = simpy.Environment()
+        model = TimerIpModel(env, tick_period=None, watchdog_latency=3)
+        armed = env.now
+        model.configure_watchdog(timeout=5, interrupt=True)
+
+        while model.metrics["watchdog_timeouts"] == 0 and env.peek() < 200:
+            env.step()
+
+        self.assertEqual(model.metrics["watchdog_timeouts"], 1)
+        self.assertEqual(env.now - armed, 8, "timeout threshold 5 plus the declared detect/publish 3")
+
     def test_timer_rejects_invalid_config_at_register_access(self):
         """The two declared TIMER_CONFIG errors the DLD supports are enforced.
 

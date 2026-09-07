@@ -133,10 +133,24 @@ Worth noting what this changed beyond the error paths: an unrecognised mode stri
 used to fall through `counter_process`'s `if ONE_SHOT / elif PERIODIC` and behave
 as free-running by accident. A typo configured a working timer of the wrong kind.
 
-## Still open
+## Deferred, deliberately
 
-**`watchdog_disabled`**, the third condition declared on `WATCHDOG_KICK`. It is
-derivable — §3 lists `WDT_CTRL: watchdog enable`, and the template's own
-`valid_conditions: [watchdog_enabled]` makes a kick while disabled the negation
-of a stated valid condition — but it needs a rejection path of its own on the
-kick interface, which is a separate change from the one ruled on here.
+- **M2 dismissed:** the register-access half is implemented — `invalid_channel`
+  and `invalid_mode` now reject and enter `ACCESS_ERROR`. `watchdog_disabled` is
+  deliberately not implemented, per the author's "model only 2" ruling, because
+  it arrives on the kick interface and cannot reject at `register_access`.
+  Deferred, not refuted; the detail is below.
+
+The author ruled "model only 2", and the two that can reject at the register
+access are
+`invalid_channel` and `invalid_mode`. This third condition is declared on
+`WATCHDOG_KICK` and arrives through `kick_watchdog()` into the watchdog queue,
+never touching `register_access`, so it cannot use the path that ruling
+describes and would need a rejection route of its own on the kick interface.
+
+It remains derivable — §3 lists `WDT_CTRL: watchdog enable`, and the template's
+own `valid_conditions: [watchdog_enabled]` makes a kick while disabled the
+negation of a stated valid condition — so this is a deferral, not a judgement
+that the condition is wrong. Until it is implemented, `WATCHDOG_KICK` accepts a
+kick to a disabled watchdog and reloads nothing, and the declared error condition
+describes behaviour the model does not have.

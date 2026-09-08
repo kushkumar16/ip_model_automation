@@ -137,6 +137,106 @@ class TestSramCtrlIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["uncorrectable_count"], 1)
         self.assertEqual(model.metrics["interrupts_asserted"], 0)
 
+    def test_sram_rmw_bank_hold_excludes_a_competing_same_bank_request(self):
+        """`rmw_holds_bank_for_read_merge_and_write` claims
+        no_interleaved_access_to_same_bank_during_rmw.
+
+        Nothing exercised it. The scenario's input_sequence is a single
+        REQ2_RMW_bank2, so the only request in flight was the RMW itself and
+        there was nothing that *could* have interleaved -- the test asserted
+        bank_utilization[2] == 2 and a comment claimed the stronger property.
+        A scheduler that released the bank between the read and write halves
+        would have passed unchanged.
+
+        The measurement queues a READ behind the RMW on the same bank. The
+        RMW's two touches must be the only accesses to bank 2 until it
+        completes, and it must still complete in the DLD-quoted 17 cycles with
+        a competitor waiting.
+        """
+        env = simpy.Environment()
+        model = SramCtrlIpModel(env)
+        model.submit_request(Command("RMW0", "RMW", addr=2, source_id="S0"))
+        model.submit_request(Command("RD0", "READ", addr=2, source_id="S0"))
+
+        env.run(until=18)
+        self.assertEqual(model.bank_utilization[2], 2, "a third access touched bank 2 during the RMW")
+        self.assertEqual([command.cmd_id for _, command in model.completed], ["RMW0"])
+        self.assertEqual(model.completed[0][0], 17, "RMW no longer costs the declared 17 cycles")
+        self.assertEqual(len(model.bank_queues[2]), 1, "the competing read was serviced early")
+
+        env.run(until=40)
+        self.assertEqual(model.bank_utilization[2], 3)
+        self.assertEqual([command.cmd_id for _, command in model.completed], ["RMW0", "RD0"])
+
+    def test_sram_req_ready_is_low_exactly_while_accept_is_in_queue_full(self):
+        """`central_and_bank_queue_full_deasserts_ready_until_drain` claims
+        req_ready_deasserted_while_bank_queue_full.
+
+        Nothing observed it. All nine requests were submitted at t=0 before
+        env.run, so the whole burst was consumed inside one uninterrupted run
+        and req_ready was only ever sampled once, at the end, already
+        reasserted. The test proved reassertion and the stall counter; the
+        deassertion the scenario is named for went unmeasured, and a model that
+        never dropped req_ready at all would have passed.
+
+        The measurement samples req_ready every cycle and asserts the
+        relationship the scenario states: low if and only if request_accept is
+        in QUEUE_FULL, once per counted stall, high again once drained.
+        """
+        env = simpy.Environment()
+        model = SramCtrlIpModel(env)
+        request_count = 9
+        for index in range(request_count):
+            model.submit_request(Command(f"REQ{3 + index}", "READ", addr=0, source_id="S0"))
+
+        low_cycles = []
+        states_while_low = set()
+        for cycle in range(1, 400):
+            env.run(until=cycle)
+            if not model.req_ready:
+                low_cycles.append(cycle)
+                states_while_low.add(model.fsm_state["request_accept"])
+
+        self.assertTrue(low_cycles, "req_ready was never observed low")
+        self.assertEqual(states_while_low, {"QUEUE_FULL"}, "req_ready went low outside QUEUE_FULL")
+
+        windows = sum(1 for i, c in enumerate(low_cycles) if i == 0 or c != low_cycles[i - 1] + 1)
+        self.assertEqual(windows, model.metrics["queue_full_stalls"], "one deassertion per counted stall")
+
+        self.assertTrue(model.req_ready, "req_ready was not reasserted once the queue drained")
+        self.assertEqual(len(model.completed), request_count)
+
+    def test_sram_response_hold_blocks_the_next_access_on_that_bank(self):
+        """`response_backpressure_holds_bank_in_return_data` claims
+        bank_not_started_on_new_access_while_held.
+
+        Nothing exercised it. The scenario's input_sequence is one
+        REQ8_READ_bank3 with rsp_ready low, so no second request existed to be
+        wrongly started. The test proved the response is held; it could not
+        prove the bank is.
+
+        The measurement queues a second read on the same bank while the first
+        is held in RETURN_DATA. Bank 3 must be touched exactly once for as long
+        as the hold lasts, and both requests must complete in order once
+        rsp_ready returns.
+        """
+        env = simpy.Environment()
+        model = SramCtrlIpModel(env)
+        model.set_response_ready(False)
+        model.submit_request(Command("REQ8", "READ", addr=3, source_id="S0"))
+        model.submit_request(Command("REQ8B", "READ", addr=3, source_id="S0"))
+
+        env.run(until=50)
+        self.assertEqual(model.fsm_state["bank_scheduler"], "RETURN_DATA")
+        self.assertEqual(model.bank_utilization[3], 1, "a second access to bank 3 started during the hold")
+        self.assertEqual(len(model.bank_queues[3]), 1, "the queued read left the bank queue during the hold")
+        self.assertEqual(model.completed, [])
+
+        model.set_response_ready(True)
+        env.run(until=80)
+        self.assertEqual(model.bank_utilization[3], 2)
+        self.assertEqual([command.cmd_id for _, command in model.completed], ["REQ8", "REQ8B"])
+
 
 if __name__ == "__main__":
     unittest.main()

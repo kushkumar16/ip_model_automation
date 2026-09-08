@@ -78,3 +78,92 @@ the four engineering open items.
 Worth noting for the next reviewer: as a trailing paragraph it would not have
 been extracted even from the right section, because the extractor reads Open
 Items as bullets. Placement alone was not enough.
+
+## Model review findings
+
+The model review that produced M1–M11 was built on `feature/model-review`, which
+was dropped at `ef47d2b`. `df8f134` recovered the stage machinery and explicitly
+none of the model, template, test or decision changes those eleven findings
+produced, so **every one of them regressed** and the findings' own text is gone
+with the branch — `ef47d2b` is not reachable in any clone and nothing dangles.
+What survives is the summary table in
+[`docs/proposals/declared_transition_validation.md`](../docs/proposals/declared_transition_validation.md),
+which records M5 and M6 as `scenario_gap` without saying what they claimed.
+
+`tools/check_declared_transitions.py` still reproduces M2, M3, M8, M9 and M11 on
+`sram_ctrl_ip` today. Those are transition findings and are not addressed here.
+
+### Three scenario gaps, closed by measurement
+
+`scenario_gap` is defined in `agents/model_review_agent.md` as *a template
+`test_scenario` whose stated behaviour the test named for it does not actually
+exercise*, which makes it re-derivable without the lost text: compare each of the
+nine scenarios against what its test asserts. Three came out, all the same shape
+— **a contention property that the scenario's own `input_sequence` makes
+unobservable, because only one request is ever in flight.**
+
+| Scenario | Declared behaviour nothing exercised |
+| --- | --- |
+| `rmw_holds_bank_for_read_merge_and_write` | `no_interleaved_access_to_same_bank_during_rmw` |
+| `central_and_bank_queue_full_deasserts_ready_until_drain` | `req_ready_deasserted_while_bank_queue_full` |
+| `response_backpressure_holds_bank_in_return_data` | `bank_not_started_on_new_access_while_held` |
+
+Two of these are presumably the regressed M5 and M6. **Which two cannot be
+established** — the finding text is unrecoverable, and guessing an id is worse
+than not carrying one, so they are recorded here by scenario name instead. The
+third was never reported.
+
+The measurements were written rather than the claims removed, and each was
+mutation-checked, since a test that passes proves nothing until it is shown to
+bite:
+
+**RMW holds its bank across both halves — faithful.** With a READ queued behind
+it on the same bank, the RMW's two accesses are still the only touches of bank 2
+until it completes, and it still completes in the DLD-quoted **17 cycles** with a
+competitor waiting. The old test asserted `bank_utilization[2] == 2` on a
+single-request run and a comment claimed the stronger property; a scheduler that
+released the bank between the read and write halves would have passed it
+unchanged. *Mutation-checked:* charging `rmw_merge_latency` one extra cycle, and
+dropping the write half's `_touch_bank`, each fail it.
+
+**`req_ready` deasserts exactly while `request_accept` is in `QUEUE_FULL` —
+faithful.** The old test submitted all nine requests at `t=0` before `env.run`,
+so the entire burst was consumed inside one uninterrupted run and `req_ready` was
+sampled once, at the end, already reasserted. It proved reassertion and the stall
+counter; the deassertion the scenario is named for went unmeasured, and a model
+that never dropped `req_ready` at all would have passed. Sampling every cycle
+shows it low in exactly three windows, one per counted stall, and in no cycle
+outside `QUEUE_FULL`. *Mutation-checked:* removing both `req_ready` assignments
+fails it.
+
+**A held response blocks the next access on that bank — faithful, and on every
+other bank too.** See below.
+
+### Response backpressure stalls every bank, not only the held one
+
+Writing the third measurement surfaced this, and it is the one thing here a
+reader must not trust the template on.
+
+`response_backpressure_holds_bank_in_return_data` declares
+`bank_not_started_on_new_access_while_held` — *another access on **that** bank*.
+The model satisfies that, and more: `bank_scheduler_process` is a single
+sequential process, so while it waits in `RETURN_DATA` for `rsp_ready` it
+services no bank at all. A `WRITE` to bank 0 queued behind a read held on bank 3
+is not touched for the whole duration of the hold and completes only after
+`rsp_ready` returns.
+
+So the scenario reads as though the other three banks continue independently
+under response backpressure, and they do not. Nothing in the template says
+otherwise and nothing catches it: `check_template_coverage.py` compares FSM names
+and counts, and the transition checker sees only edges, not the bank a stalled
+process is failing to serve. The consequence for anyone reading a model's
+numbers: **under sustained response backpressure, `bank_utilization`,
+`queue_high_water` and per-request latency for banks other than the held one are
+figures for a controller that stops entirely, not one that keeps three banks
+running.**
+
+This is recorded, not fixed. Which side is wrong is a judgement about intent —
+whether the DLD intends per-bank independence under backpressure or a single
+shared return path — and `agents/model_review_agent.md` rule 6 puts that with the
+author, not with the agent that found it. The declared property is measured; the
+undeclared stronger one is written down.

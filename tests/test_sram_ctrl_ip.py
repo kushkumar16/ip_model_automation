@@ -237,6 +237,33 @@ class TestSramCtrlIpModel(unittest.TestCase):
         self.assertEqual(model.bank_utilization[3], 2)
         self.assertEqual([command.cmd_id for _, command in model.completed], ["REQ8", "REQ8B"])
 
+    def test_sram_uncorrectable_rmw_still_issues_its_write_half(self):
+        """M7: the model abandoned an RMW's write half on an uncorrectable read.
+
+        Nothing on develop drove this path -- the uncorrectable scenario uses a
+        plain READ -- so check_declared_transitions could not see the undeclared
+        WAIT_ECC exit either, and the defect survived every deterministic gate.
+
+        The first resolution corrected the template to match the model, arguing
+        against writing into a line just declared unusable. The author reversed
+        it: the controller does not make that call on the requester's behalf.
+        So the RMW completes both halves and reports the ECC status it saw.
+        """
+        env = simpy.Environment()
+        model = SramCtrlIpModel(env)
+        model.forced_status["RMWU"] = "UNCORRECTABLE"
+        model.submit_request(Command("RMWU", "RMW", addr=2, source_id="S0"))
+        env.run(until=60)
+
+        self.assertEqual(len(model.completed), 1)
+        completed_at, command = model.completed[0]
+        self.assertEqual(completed_at, 17, "the write half was skipped, not merely reported")
+        self.assertEqual(model.bank_utilization[2], 2, "bank 2 was touched once, so no write was issued")
+        self.assertEqual(command.status, "UNCORRECTABLE", "the ECC status the read half saw was lost")
+        self.assertEqual(model.metrics["uncorrectable_count"], 1)
+        self.assertIsNone(model.get_response("RMWU"))
+        self.assertEqual(model.metrics["interrupts_asserted"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

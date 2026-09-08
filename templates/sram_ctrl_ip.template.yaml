@@ -195,6 +195,13 @@ fsm_processes:
           - deassert_req_ready
           - increment_queue_full_stall
         latency_cycles: 0
+      - from: DECODE_BANK
+        to: ACCEPT_IDLE
+        condition: rmw_targets_masked_off_bank
+        actions:
+          - raise_rmw_masked_bank_error
+          - increment_rmw_masked_bank_rejections
+        latency_cycles: 0
       - from: PUSH_QUEUE
         to: ACCEPT_IDLE
         condition: entry_written
@@ -333,6 +340,13 @@ fsm_processes:
         actions:
           - read_scrub_entry
         latency_cycles: 5
+      - from: READ_ENTRY
+        to: SCRUB_WAIT
+        condition: per_bank_queue_non_empty
+        actions:
+          - yield_to_demand_traffic
+          - increment_scrub_yields_to_demand
+        latency_cycles: 0
       - from: CORRECT_ENTRY
         to: REPORT
         condition: line_rewritten

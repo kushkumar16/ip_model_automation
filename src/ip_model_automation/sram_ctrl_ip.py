@@ -276,15 +276,16 @@ class SramCtrlIpModel:
                 self.metrics["corrected_count"] += 1
 
             if command.kind == "RMW":
-                if status == "UNCORRECTABLE":
-                    self._complete(command, start_time, status)
-                    continue
+                # M7: an uncorrectable read half does not cancel the write half.
+                # The controller does not make that call on the requester's
+                # behalf -- it completes the RMW and reports the ECC status it
+                # saw. Ruled by the author; see decisions/sram_ctrl_ip.md.
                 self._set_fsm_state("bank_scheduler", "RMW_MERGE")
                 yield self.env.timeout(self.rmw_merge_latency)
                 self._set_fsm_state("bank_scheduler", "ISSUE_ACCESS")
                 self._touch_bank(bank)
                 yield self.env.timeout(self.sram_write_latency)
-                self._complete(command, start_time, "OK")
+                self._complete(command, start_time, status)
                 continue
 
             self._set_fsm_state("bank_scheduler", "RETURN_DATA")

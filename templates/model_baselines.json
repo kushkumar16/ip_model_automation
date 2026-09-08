@@ -9,6 +9,6 @@
   "mailbox_ip": "6d95d3c7d12a2be02a6ca7e0cc335d9a2f7a9b92fabccc7cbf427a757c46ce2a",
   "mailbox_irq_subsystem": "e39a1e367b9b8386d4e771baff5a74c8cb4b5fa5ae1f8b01dd760ff1f1d47209",
   "spi_master_ip": "a83099a6789eba0d4015b179d6b9466528cf08a4c2d2c0def4cb091f2b9e3854",
-  "sram_ctrl_ip": "8f7acbd7f6e6a84d85ce42fbdd398038d1e1371098d75d4589bdf341c1319c11",
+  "sram_ctrl_ip": "c4b7573d95a5c14940096f0a7868bb0529b58b278d7886e5f4c037d5f1a28e83",
   "timer_ip": "11be5a1d477caba8ed99e426eb4999d4de823659428929849361ef1c925d5885"
 }

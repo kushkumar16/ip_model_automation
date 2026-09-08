@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import simpy
 
@@ -17,7 +17,9 @@ class GdmaIpModel:
         write_latency=20,
         completion_latency=32,
         channel_scan_latency=12,
+        credit_check_latency=4,
         irq_latency=8,
+        outstanding_read_depth=None,
         buffer_depth=16,
         descriptor_queue_depth=4,
         completion_queue_depth=16,
@@ -33,8 +35,19 @@ class GdmaIpModel:
             "write": write_latency,
             "completion": completion_latency,
             "channel_scan": channel_scan_latency,
+            "credit_check": credit_check_latency,
             "irq": irq_latency,
         }
+        # §8 Resources names "per-channel outstanding read credits", §6.4 says read
+        # issue "can run ahead of write issue until internal buffer or outstanding
+        # read limit is full", and §3's CH_CFG carries the per-channel outstanding
+        # depth. The *value* of that depth is configuration, so it is set per
+        # channel and left unbounded until it is, rather than inventing a number
+        # the DLD does not state.
+        self.outstanding_read_depth = outstanding_read_depth
+        self.channel_read_depth: Dict[int, Optional[int]] = {}
+        self.outstanding_reads: Dict[int, int] = defaultdict(int)
+        self.read_credit_available: Dict[int, simpy.Event] = {}
         self.coalesce_threshold = coalesce_threshold
 
         self.desc_q = simpy.Store(env)
@@ -90,8 +103,20 @@ class GdmaIpModel:
         self.env.process(self.interrupt_coalescing_process())
         self.logger.info("initialized coalesce_threshold=%s", self.coalesce_threshold)
 
-    def configure_channel(self, channel_id: int, enabled: bool = True, priority: int = 0) -> None:
+    def configure_channel(
+        self,
+        channel_id: int,
+        enabled: bool = True,
+        priority: int = 0,
+        outstanding_read_depth: Optional[int] = None,
+    ) -> None:
+        """CH_CFG: per-channel priority, outstanding depth, burst size (DLD §3).
+
+        `priority` is stored and **not acted on** -- see `channel_scheduler_process`.
+        """
         self.channel_priority[channel_id] = priority
+        if outstanding_read_depth is not None:
+            self.channel_read_depth[channel_id] = outstanding_read_depth
         if enabled:
             self.enable_channel(channel_id)
         else:
@@ -188,6 +213,21 @@ class GdmaIpModel:
             self.metrics["descriptors_fetched"] += 1
 
     def channel_scheduler_process(self):
+        # NOT CLEAR -- CHECK_PRIORITY and NO_ELIGIBLE are not modelled, and this
+        # process grants in arrival order instead.
+        #
+        # The DLD names both states (§6.3) and CH_CFG carries a per-channel
+        # priority field (§3), but it never says how that field is used: whether a
+        # higher number means more urgent or less, how ties break, whether
+        # arbitration is strict-priority, weighted or round-robin among equals, or
+        # what makes a channel ineligible and sends it to NO_ELIGIBLE. §6.3 says
+        # only that the scheduler "may arbitrate across channels every dispatch
+        # tick".
+        #
+        # Any of those choices would be an invention that changes which descriptor
+        # runs first, so none is made here. `configure_channel` still records
+        # `priority` so a future implementation has the input; nothing reads it.
+        # See decisions/gdma_ip.md.
         while True:
             self.fsm_state["channel_scheduler"] = "SCAN_CHANNELS"
             desc = yield self.active_descriptor_queue.get()
@@ -196,10 +236,45 @@ class GdmaIpModel:
             self.metrics["channel_grants"] += 1
             yield self.read_issue_queue.put(desc)
 
+    def _read_credit_limit(self, channel_id: int) -> Optional[int]:
+        limit = self.channel_read_depth.get(channel_id, self.outstanding_read_depth)
+        return limit
+
+    def _release_read_credit(self, channel_id: int) -> None:
+        if self.outstanding_reads[channel_id] > 0:
+            self.outstanding_reads[channel_id] -= 1
+        waiter = self.read_credit_available.pop(channel_id, None)
+        if waiter is not None and not waiter.triggered:
+            waiter.succeed()
+
     def read_issue_process(self):
         while True:
             self.fsm_state["read_issue"] = "WAIT_DESCRIPTOR"
             desc = yield self.read_issue_queue.get()
+
+            # CHECK_READ_CREDITS. Declared as a state in §6.4, as a resource in §8
+            # ("per-channel outstanding read credits"), and priced in §11's timing
+            # table at 4 cycles. §6.4 states the behaviour it gates: read issue
+            # "can run ahead of write issue until internal buffer or outstanding
+            # read limit is full". The model previously went straight from
+            # WAIT_DESCRIPTOR to ISSUE_READ, so the limit did not exist and reads
+            # ran ahead without bound.
+            self.fsm_state["read_issue"] = "CHECK_READ_CREDITS"
+            yield self.env.timeout(self.lat["credit_check"])
+            limit = self._read_credit_limit(desc.channel_id)
+            while limit is not None and self.outstanding_reads[desc.channel_id] >= limit:
+                self.metrics["read_credit_stalls"] += 1
+                self.logger.warning(
+                    "read credit exhausted channel=%s outstanding=%s limit=%s",
+                    desc.channel_id,
+                    self.outstanding_reads[desc.channel_id],
+                    limit,
+                )
+                waiter = self.read_credit_available.setdefault(desc.channel_id, self.env.event())
+                yield waiter
+            self.outstanding_reads[desc.channel_id] += 1
+            self.metrics["read_credits_taken"] += 1
+
             while not self.source_ready:
                 self.fsm_state["read_issue"] = "READ_STALL"
                 self.metrics["read_stalls"] += 1
@@ -222,6 +297,9 @@ class GdmaIpModel:
                 self.fsm_state["read_response"] = "RESP_ERROR"
                 self.metrics["buffer_full_stalls"] += 1
             self.fsm_state["read_response"] = "WRITE_BUFFER"
+            # The read is no longer outstanding once its response has landed, so
+            # the channel's credit returns here.
+            self._release_read_credit(desc.channel_id)
             yield self.internal_data_buffer.put(desc)
             self.metrics["buffer_writes"] += 1
             self.metrics["buffer_occupancy"] = max(

@@ -53,24 +53,49 @@ input; nothing reads it. The consequence for a reader: **this model's channel
 ordering is arrival order, and any measurement that depends on channel priority
 is measuring FIFO.**
 
-## Found while implementing the credit check, not yet ruled on
+**Reads now pipeline**, which is what makes the credit limit above mean anything.
 
-**Read issue cannot have more than one read outstanding**, so the credit limit
-above can never bind. `read_issue_process` is a single sequential process — it
-takes a descriptor, issues the read, waits for it, and loops — so peak
-outstanding reads is 1 whether or not a depth is configured.
+`read_issue_process` held `source_read_port` for the entire read and waited for it
+before taking the next descriptor, so peak outstanding reads was 1 whether or not
+a depth was configured — and the credit check, correct as it was, could never
+fire. §6.4 states the opposite twice: *"Multiple read requests may be
+outstanding"*, and read issue *"can run ahead of write issue until internal buffer
+or outstanding read limit is full"*.
 
-§6.4 states the opposite twice: *"Multiple read requests may be outstanding"* and
-*"Read issue can run ahead of write issue until internal buffer or outstanding
-read limit is full"*. Running ahead is the behaviour the credit limit exists to
-bound, and the model does not do it.
+The split the documents already describe is what fixes it, so nothing here is
+invented. §11 prices *"Read request issue"* separately from everything after it,
+and the template's `source_read_port` resource carries its own `latency_cycles: 8`
+— the memory round trip. So the port is held for the issue only, released, and the
+round trip runs behind it in a dispatched process while read issue returns for the
+next descriptor.
 
-This was not fixed here because it is a restructure rather than an addition — read
-issue would have to dispatch reads it does not wait for, and the buffer and write
-paths would then see concurrency they have never seen. The credit check is
-correct and stated, but until this is settled it is a mechanism that cannot fire,
-which is the same shape as an `ACCESS_ERROR` state nothing can reach.
+`UPDATE_READ_POINTER` came along with that restructure: it is a declared
+`read_issue` state priced at 2 cycles (`read_pointer_update`) that the model did
+not have. It sits between the issue and `READ_DONE`.
 
-The test asserts the ceiling and says plainly that the structure imposes it today,
-so the assertion becomes load-bearing the moment read issue pipelines rather than
-silently passing for the wrong reason.
+The depth knob now changes behaviour, which is the test that it is real:
+
+| depth | peak outstanding | credit stalls |
+| --- | --- | --- |
+| unset | 2 | 0 |
+| 1 | 1 | 7 |
+| 2 or 4 | 2 | 0 |
+
+Peak settles at 2 under default latencies because the 22-cycle issue is longer
+than the 8-cycle round trip, so a third read cannot start before the first
+returns. That is arithmetic, not a limit — see below.
+
+## Found while pipelining, not fixed
+
+**`read_latency` defaults to 22 and the template declares `source_read_issue` at
+6.** Nothing in §11 or the template's `read_issue` operations produces 22. Since
+the issue occupancy now bounds how many reads can overlap, this default alone
+holds peak outstanding near 2; at the declared 6 the same configuration would
+sustain more. It is a `timing_mismatch` in its own right and wants its own
+ruling, not a silent correction folded into a restructure.
+
+**`read_response` implements none of its declared costs.** §11 gives it *"Response
+lookup: 4 cycles. Response status check: 2 cycles. Buffer write: 4 cycles"*, and
+`read_response_process` pays none of them — it moves through the states with no
+`env.timeout` at all. Same class as `timer_ip`'s M1, and the same reason it went
+unnoticed: nothing measures the read response path.

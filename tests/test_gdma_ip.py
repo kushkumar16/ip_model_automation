@@ -28,6 +28,8 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             credit_check_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.configure_channel(0, outstanding_read_depth=1)
@@ -44,15 +46,13 @@ class TestGdmaIpModel(unittest.TestCase):
         # Every credit taken is returned when its response lands.
         self.assertEqual(model.outstanding_reads[0], 0)
         self.assertLessEqual(peak, 1, "outstanding reads exceeded the configured depth")
-
-        # And the limit cannot yet be observed to bind, because read_issue is a
-        # single sequential process: it issues one read, waits for it, and loops,
-        # so the peak is 1 with no limit configured either. §6.4 says otherwise --
-        # "Multiple read requests may be outstanding" -- so the ceiling this
-        # asserts is currently imposed by the model's structure rather than by the
-        # credit check. Recorded in decisions/gdma_ip.md; this assertion becomes
-        # load-bearing the moment read issue pipelines.
-        self.assertEqual(model.metrics["read_credit_stalls"], 0)
+        # And the limit is what holds it there. Reads now pipeline -- the port is
+        # released after the issue and the round trip runs behind it -- so with a
+        # depth of 1 and three descriptors, two must wait for a credit to come
+        # back. Before pipelining this was 0, because a single sequential read
+        # process could never exceed one outstanding read for the limit to bind
+        # against.
+        self.assertGreater(model.metrics["read_credit_stalls"], 0)
 
     def test_gdma_read_credits_are_unbounded_until_configured(self):
         """No depth configured means no limit -- the DLD states no default."""
@@ -65,6 +65,8 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             credit_check_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
@@ -84,11 +86,13 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             credit_check_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=10)
+        env.run(until=16)
         self.assertEqual(model.metrics["completed_descriptors"], 1)
         self.assertEqual(model.metrics["channel_grants"], 1)
         self.assertEqual(model.metrics["read_requests"], 1)
@@ -113,16 +117,18 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.set_memory_ready(destination=False)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=8)
+        env.run(until=14)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["write_stalls"], 0)
         model.set_memory_ready(destination=True)
-        env.run(until=14)
+        env.run(until=22)
         self.assertEqual(model.completed[0][1].desc_id, "d0")
 
     def test_gdma_configure_channel_disable_and_halt(self):
@@ -158,16 +164,18 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.set_memory_ready(completion=False)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=10)
+        env.run(until=16)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["completion_stalls"], 0)
         model.set_memory_ready(completion=True)
-        env.run(until=16)
+        env.run(until=24)
         self.assertEqual(model.completed[0][1].desc_id, "d0")
 
     def test_gdma_full_descriptor_queue_counts_fetch_stall(self):
@@ -208,6 +216,8 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=2,
         )
@@ -229,6 +239,8 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=1,
         )

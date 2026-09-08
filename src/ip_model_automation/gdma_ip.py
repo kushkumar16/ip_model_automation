@@ -18,6 +18,8 @@ class GdmaIpModel:
         completion_latency=32,
         channel_scan_latency=12,
         credit_check_latency=4,
+        read_pointer_latency=2,
+        source_read_port_latency=8,
         irq_latency=8,
         outstanding_read_depth=None,
         buffer_depth=16,
@@ -36,8 +38,14 @@ class GdmaIpModel:
             "completion": completion_latency,
             "channel_scan": channel_scan_latency,
             "credit_check": credit_check_latency,
+            "read_pointer": read_pointer_latency,
             "irq": irq_latency,
         }
+        # templates/gdma_ip.template.yaml resources.source_read_port declares
+        # capacity 1 and latency_cycles 8. The port is occupied for the *issue*
+        # only -- timing_model source_read_issue -- and the memory round trip runs
+        # after it is released, which is what lets reads overlap at all.
+        self.source_read_port_latency = source_read_port_latency
         # §8 Resources names "per-channel outstanding read credits", §6.4 says read
         # issue "can run ahead of write issue until internal buffer or outstanding
         # read limit is full", and §3's CH_CFG carries the per-channel outstanding
@@ -280,13 +288,30 @@ class GdmaIpModel:
                 self.metrics["read_stalls"] += 1
                 self.logger.warning("read stall descriptor=%s time=%s", desc.desc_id, self.env.now)
                 yield self.env.timeout(1)
+            # The port is held for the issue only. §11 prices "Read request issue"
+            # separately from everything after it, and the template's
+            # source_read_port carries its own latency_cycles -- the memory round
+            # trip. Holding the port for both, as this did, serialised the read
+            # path completely: one read in flight at a time, so §6.4's "multiple
+            # read requests may be outstanding" was unreachable and the credit
+            # limit could never bind.
             self.fsm_state["read_issue"] = "ISSUE_READ"
             with self.source_read_port.request() as req:
                 yield req
                 yield self.env.timeout(self.lat["read"])
+            self.fsm_state["read_issue"] = "UPDATE_READ_POINTER"
+            yield self.env.timeout(self.lat["read_pointer"])
             self.fsm_state["read_issue"] = "READ_DONE"
             self.metrics["read_requests"] += 1
-            yield self.read_response_queue.put(desc)
+            # Dispatched, not awaited: this read is now outstanding, and read
+            # issue goes back for the next descriptor while it is in flight.
+            self.env.process(self._source_read_in_flight(desc))
+
+    def _source_read_in_flight(self, desc: Descriptor):
+        """The memory round trip, running after the port has been released."""
+        self.metrics["reads_in_flight"] = max(self.metrics["reads_in_flight"], sum(self.outstanding_reads.values()))
+        yield self.env.timeout(self.source_read_port_latency)
+        yield self.read_response_queue.put(desc)
 
     def read_response_process(self):
         while True:

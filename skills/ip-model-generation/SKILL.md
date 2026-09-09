@@ -26,8 +26,13 @@ surface it in the gaps report.
 
 2. Read `reports\<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker in the
    draft using only behavior the DLD states. Where the DLD leaves a detail open
-   (see its "Open Items"), pick a conservative, clearly-labeled default and
-   record it in the gaps report instead of silently inventing behavior.
+   (see its "Open Items"), record how you resolved it in `decisions\<ip_name>.md`
+   — **not** in the gaps report, which is regenerated on every parse and
+   gitignored, so anything written there is lost. Resolving it does not always
+   mean choosing a value: an unstated number is left unset and made configuration,
+   a behavior the model must reach gets the conservative branch clearly labeled,
+   and a behavior whose conservative branch would itself be a guess is not modeled
+   at all. `decisions\README.md` states the three.
 3. Lint and check DLD coverage of the draft:
 
    ```powershell

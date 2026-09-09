@@ -1,11 +1,40 @@
 # Review Decisions
 
-When a DLD does not state something the template needs, the rule is *choose a
-conservative default and record it, never invent silently*. **This directory is
-where that record lives.**
+When a DLD does not state something the template needs, the rule used to be
+written as *choose a conservative default and record it, never invent silently*.
+That is half a rule, and the half it leaves out is the one this repo reaches for
+most: often the right move is to choose nothing at all. **This directory is where
+the record lives in every case.**
 
-It exists because the record used to live in `reports/<ip>.gaps.md`, which is the
-wrong place twice over: `dld_to_template.py` regenerates that file on every
+Which of the three applies depends on what the DLD left open.
+
+**A value it does not state** — a depth, a channel count, a threshold. Do not
+pick a number. Make it configuration, leave it unset, and record that it is
+unset. There is a way not to choose here, so choosing is inventing. `gdma_ip`'s
+per-channel `outstanding_read_depth` and `timer_ip`'s `channel_count` are both
+left unset for exactly this reason.
+
+**A behaviour with no null option** — the model reaches that point and has to do
+something, and every branch is a choice. Here, and only here, choose the
+conservative branch: label it, record it, and record the evidence that makes it
+conservative rather than merely convenient. `sram_ctrl_ip` rejecting an invalid
+configuration at accept time is one of these.
+
+**A behaviour where even the conservative branch is a guess** — the DLD names a
+state but not the policy that reaches it, or not what happens once it is there.
+Do not model it. Record it under *Declared but not implemented* below, with what
+the model does instead and what a reader must not trust as a result. `gdma_ip`'s
+`CHECK_PRIORITY` and `RESP_ERROR` are both this.
+
+*Never invent silently* survives all three and was never the part in question.
+What was in question is that "choose a conservative default", read on its own,
+instructs you to invent the number the document declined to state — which is the
+thing the pipeline's other rule forbids in as many words (`docs/project_overview.md`:
+*"fill in only what the DLD states … don't invent"*). The two lines were in
+tension wherever they were restated, and the practice had already settled it.
+
+This directory exists because the record used to live in `reports/<ip>.gaps.md`,
+which is the wrong place twice over: `dld_to_template.py` regenerates that file on every
 parse, and `reports/` is gitignored. So a reviewer's reasoning — the engineering
 judgement that explains why a model behaves the way it does — was erased by the
 next extraction and never reached the repository. Everything else in the pipeline
@@ -18,7 +47,8 @@ is provenance-stamped and reviewable; this was not.
 
 ## What belongs here
 
-- Every DLD **Open Item**, and the default chosen for it.
+- Every DLD **Open Item**, and how it was resolved — the default chosen, or the
+  decision not to choose one and what carries the gap instead.
 - Ambiguities found during review that the DLD's own Open Items did not list —
   these are the valuable ones, because they are document defects nobody knew
   about.

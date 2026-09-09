@@ -417,15 +417,41 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             text = tool.read_text(encoding="utf-8")
             self.assertNotIn("decisions_dir", text, f"{tool.name} appears to generate into decisions/")
 
-        # The instruction that caused the loss must be gone from both places
-        # that carried it.
-        contract = (repo_root / "agents" / "ip_model_generation_agent.md").read_text(encoding="utf-8")
-        self.assertIn("decisions/<ip_name>.md", contract)
+        # The instruction that caused the loss must be gone from every place that
+        # carried it. It was fixed in two and left in two others for long enough
+        # that the skill file -- the one the pipeline prompt tells the agent to
+        # follow -- was still pointing at the regenerated report.
+        carriers = {
+            "agents/ip_model_generation_agent.md": "decisions/<ip_name>.md",
+            "skills/ip-model-generation/SKILL.md": "decisions",
+            "skills/ip-model-generation/references/dld_extraction_rules.md": "decisions/<ip>.md",
+        }
+        # The wrong destination was written across a line break in one of them, so
+        # the text is compared with its whitespace flattened.
+        forbidden = ("record it in the gaps report", "record it in the\ngaps report", "note it here")
+        for relative, expected in carriers.items():
+            text = (repo_root / relative).read_text(encoding="utf-8")
+            flat = " ".join(text.split())
+            self.assertIn(expected, text, f"{relative} must name the durable home")
+            for phrase in forbidden:
+                self.assertNotIn(
+                    " ".join(phrase.split()),
+                    flat.lower(),
+                    f"{relative} still sends the record to a regenerated file",
+                )
+
         spec = importlib.util.spec_from_file_location("auto_ip_pipeline", repo_root / "tools" / "auto_ip_pipeline.py")
         pipeline = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
         self.assertIn("decisions/mailbox_ip.md", pipeline.complete_template_prompt("mailbox_ip"))
+
+        # The extractor prints the same instruction into every gaps report it
+        # generates, so it is a carrier too -- and the one that reaches a reader
+        # who never opens the skill.
+        extractor_source = (repo_root / "tools" / "dld_to_template.py").read_text(encoding="utf-8")
+        self.assertIn("`decisions/{ip_name}.md`", extractor_source)
+        self.assertIn("Do not record it", extractor_source)
 
     def test_generated_reports_never_destroy_hand_written_content(self):
         """Regenerating a report must preserve anything a person wrote in it.

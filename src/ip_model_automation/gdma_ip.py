@@ -351,9 +351,28 @@ class GdmaIpModel:
             yield self.env.timeout(self.lat["response_lookup"])
             self.fsm_state["read_response"] = "CHECK_RESP_STATUS"
             yield self.env.timeout(self.lat["status_check"])
+            # This is the buffer_space half of the declared
+            # CHECK_RESP_STATUS -> WRITE_BUFFER condition
+            # (`response_ok_and_buffer_space`). A full buffer is backpressure, not
+            # an error -- §6.5 says the FSM "can backpressure read response if
+            # internal buffer is full" -- so it is counted and the response goes on
+            # to WRITE_BUFFER, where the put blocks until a slot frees.
             if len(self.internal_data_buffer.items) >= self.internal_data_buffer.capacity:
-                self.fsm_state["read_response"] = "RESP_ERROR"
                 self.metrics["buffer_full_stalls"] += 1
+            # NOT CLEAR -- RESP_ERROR is declared but never entered, and the state
+            # this process used to set here was the wrong one anyway: it labelled a
+            # full buffer as a response error, on the line before falling through to
+            # WRITE_BUFFER regardless. So the state existed at no simulated time and
+            # named a condition that is not an error.
+            #
+            # RESP_ERROR belongs to the other half of that condition, `response_ok`.
+            # §4.3 declares `read_resp` on the source read interface, so a non-ok
+            # status is a real field -- but nothing in this model drives one, and
+            # §12 lists "Error recovery policy" as an open item, so the DLD does not
+            # say what entering the state would then do: retry the read, abort the
+            # descriptor, halt the channel, raise an interrupt. Inventing an error
+            # source and a recovery to reach a state with is two inventions, so
+            # neither is made. See decisions/gdma_ip.md.
             self.fsm_state["read_response"] = "WRITE_BUFFER"
             # The read is no longer outstanding once its response has landed, so
             # the channel's credit returns here. Unchanged in placement, but it is

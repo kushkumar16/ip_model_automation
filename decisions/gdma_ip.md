@@ -198,11 +198,47 @@ had none. `test_gdma_interrupt_coalescing_threshold` also gained
 `credit_check_latency=1`, which that list had been missing since the credit check
 was added.
 
-## Found while pipelining, not fixed
+## Declared but not implemented
 
-**`RESP_ERROR` is assigned and immediately overwritten.**
-`read_response_process` sets the state on a full buffer, counts
-`buffer_full_stalls`, then falls straight through to `WRITE_BUFFER` on the next
-line — so the state never exists for any observer at any simulated time, and no
-error handling runs. The backpressure itself is real (the `put` blocks); the
-declared error state is cosmetic.
+**`RESP_ERROR` is never entered, and the model no longer pretends otherwise.**
+
+`read_response_process` used to set the state on a full buffer, count
+`buffer_full_stalls`, and fall straight through to `WRITE_BUFFER` on the next
+line. Two things were wrong with that, not one:
+
+- **The state existed at no simulated time.** Nothing yields between the
+  assignment and the overwrite, so no observer — a test, a log, a trace — could
+  ever see `fsm_state["read_response"] == "RESP_ERROR"`. It was decoration.
+- **It named the wrong condition.** A full buffer is not a response error. §6.5
+  says this FSM *"can backpressure read response if internal buffer is full"*, and
+  the declared transition condition names the two separately:
+  `response_ok_and_buffer_space`. Buffer space is backpressure; `response_ok` is
+  what `RESP_ERROR` is the failure of.
+
+The assignment is gone. The count stays, under a comment saying which half of the
+condition it is, and the backpressure itself is unchanged and real — the `put`
+blocks until a slot frees, holding the FSM in `WRITE_BUFFER`. Measured by
+`check_declared_transitions.py`, gdma_ip's undeclared transitions drop 32 → 30:
+the two that vanish are `CHECK_RESP_STATUS → RESP_ERROR` and
+`RESP_ERROR → WRITE_BUFFER`, neither of which the template declares and neither of
+which the model was really taking.
+
+**Reaching the state properly would take two inventions, so neither is made.**
+§4.3 declares `read_resp` on the source read interface, so a non-ok status is a
+real field rather than something the DLD omits — but nothing in this model drives
+one. `set_memory_ready(source=False)` is a stall, not an error status. So the
+first invention would be an error source.
+
+The second is worse: **§12 lists *"Error recovery policy"* as an open item.** Even
+given a non-ok response the DLD does not say what `RESP_ERROR` then does — retry
+the read, abort the descriptor, halt the channel, raise an interrupt, return the
+credit or leak it. Each choice changes what a run measures, and the credit
+question changes whether the channel deadlocks. `write_response` and
+`completion_update` declare `RESP_ERROR` and `COMPLETE_ERROR` on exactly the same
+terms and are in exactly the same position.
+
+Per the convention in [`decisions/README.md`](README.md) the claim stays in both
+documents and the gap is recorded here. **What a reader must not trust:** this
+model has no read-response error path at all. `fsm_state["read_response"]` will
+never report `RESP_ERROR`, and any error-injection study on the source read
+interface is measuring a model that cannot represent the error.

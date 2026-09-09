@@ -73,29 +73,75 @@ next descriptor.
 `read_issue` state priced at 2 cycles (`read_pointer_update`) that the model did
 not have. It sits between the issue and `READ_DONE`.
 
-The depth knob now changes behaviour, which is the test that it is real:
+The depth knob now changes behaviour, which is the test that it is real. Measured
+with the tuned latencies the credit test uses (every stage 1 cycle, read 4,
+three descriptors) — **not** with the model defaults:
 
 | depth | peak outstanding | credit stalls |
 | --- | --- | --- |
 | unset | 2 | 0 |
-| 1 | 1 | 7 |
+| 1 | 1 | 2 |
 | 2 or 4 | 2 | 0 |
 
-Peak settles at 2 under default latencies because the 22-cycle issue is longer
-than the 8-cycle round trip, so a third read cannot start before the first
-returns. That is arithmetic, not a limit — see below.
+Two earlier figures here were wrong and are corrected above: the stall count at
+depth 1 was recorded as 7, and the table was attributed to *default* latencies.
+It was never measured at defaults.
+
+**At default latencies the credit check cannot bind at all.** Peak outstanding is
+1 for every depth setting, because the 53-cycle descriptor fetch is serialized
+ahead of the read path and reads never arrive faster than they retire. The
+mechanism is real and the knob works, but a reader sweeping outstanding depth on
+a default-configured channel will see no change until the fetch path is also
+given realistic concurrency.
+
+## Ruling 2026-09-09: `read_latency` set to the declared 6
+
+Raised as a `timing_mismatch` — the model defaulted to 22 where the template
+declares `source_read_issue: 6` — and ruled by the user: **make it 6.**
+
+Investigating it explained where every default in this model came from. Each one
+is the sum of a single FSM's declared operations in `timing_model`:
+`fetch 5+40+6+2 = 53`, `completion 8+20+4 = 32`, `channel_scan 10+2 = 12`,
+`irq 2+2+4 = 8`. So 22 was not arbitrary. It is the only default that lumps *two*
+FSMs together:
+
+| declared FSM | operations | total |
+| --- | --- | --- |
+| `read_issue` | credit_check 4 + source_read_issue 6 + pointer 2 | 12 |
+| `read_response` | lookup 4 + status 2 + buffer_write 4 | 10 |
+
+`12 + 10 = 22`, charged in one timeout at the issue site — which is precisely
+*why* `read_response` pays nothing below. `write_latency = 20` has the identical
+shape (`write_issue 3+6+2` plus `write_response 4+2+3`) and is left alone,
+because nothing has split the write path yet, so it is still self-consistent.
+
+Once `credit_check` and `read_pointer` became their own timeouts, the model paid
+`4 + 22 + 2 = 28` cycles for a path declaring 12 — **6 cycles double-charged.**
+Setting `read_latency = 6` makes `read_issue` cost exactly its declared 12.
+
+**The consequence must not be lost:** of the 16 cycles removed, 6 were the
+double-charge and **10 were `read_response`'s costs, riding inside the old 22.**
+Until the item below is fixed the read path is now 10 cycles *cheaper* than
+declared, where before it was 6 cycles dearer. The two are halves of one repair.
+
+No test caught the change, and that is itself a finding: every test that reaches
+a read passes an explicit `read_latency`, so the ones left on the default are all
+error paths that never issue one. Measured effect at defaults, six descriptors:
+last completion moves 418 → 402, the tail read only, because the serialized fetch
+dominates.
 
 ## Found while pipelining, not fixed
-
-**`read_latency` defaults to 22 and the template declares `source_read_issue` at
-6.** Nothing in §11 or the template's `read_issue` operations produces 22. Since
-the issue occupancy now bounds how many reads can overlap, this default alone
-holds peak outstanding near 2; at the declared 6 the same configuration would
-sustain more. It is a `timing_mismatch` in its own right and wants its own
-ruling, not a silent correction folded into a restructure.
 
 **`read_response` implements none of its declared costs.** §11 gives it *"Response
 lookup: 4 cycles. Response status check: 2 cycles. Buffer write: 4 cycles"*, and
 `read_response_process` pays none of them — it moves through the states with no
 `env.timeout` at all. Same class as `timer_ip`'s M1, and the same reason it went
-unnoticed: nothing measures the read response path.
+unnoticed: nothing measures the read response path. Now also the other half of
+the ruling above.
+
+**`RESP_ERROR` is assigned and immediately overwritten.**
+`read_response_process` sets the state on a full buffer, counts
+`buffer_full_stalls`, then falls straight through to `WRITE_BUFFER` on the next
+line — so the state never exists for any observer at any simulated time, and no
+error handling runs. The backpressure itself is real (the `put` blocks); the
+declared error state is cosmetic.

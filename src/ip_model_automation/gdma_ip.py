@@ -13,7 +13,7 @@ class GdmaIpModel:
         self,
         env: simpy.Environment,
         fetch_latency=53,
-        read_latency=22,
+        read_latency=6,
         write_latency=20,
         completion_latency=32,
         channel_scan_latency=12,
@@ -31,6 +31,15 @@ class GdmaIpModel:
     ):
         self.env = env
         self.logger = get_ip_logger("gdma_ip", log_level, log_file)
+        # Each default is the sum of one FSM's declared operations in the
+        # template's timing_model -- fetch 5+40+6+2, completion 8+20+4,
+        # channel_scan 10+2, irq 2+2+4. "read" is the exception: it was 22, which
+        # is read_issue (4+6+2) *plus* read_response (4+2+4), both FSMs lumped
+        # into one timeout at the issue site. Once credit_check and read_pointer
+        # became their own timeouts that double-charged 6 cycles, so "read" is now
+        # source_read_issue alone. read_response's own 10 cycles are still unpaid
+        # -- see decisions/gdma_ip.md. ("write" keeps the same lumped shape:
+        # write_issue 3+6+2 plus write_response 4+2+3.)
         self.lat = {
             "fetch": fetch_latency,
             "read": read_latency,

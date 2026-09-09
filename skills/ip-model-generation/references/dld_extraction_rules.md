@@ -7,8 +7,14 @@ source of truth: the promoted `templates/<ip>.template.yaml` is.
 ## Source Priority
 
 1. The DLD is the only source for *authoring* the template.
-2. If the DLD does not state a behavior, do **not** invent it. Record it in the
-   gaps report and choose a labeled, conservative default.
+2. If the DLD does not state a behavior, do **not** invent it. Record it in
+   `decisions/<ip>.md` — **not** in the gaps report, which is regenerated on every
+   parse and gitignored. What to record depends on what was left open: an unstated
+   *value* is left unset and made configuration rather than given a number; a
+   *behavior* the model cannot avoid reaching gets the conservative branch,
+   labeled; a behavior whose conservative branch would itself be a guess is not
+   modeled at all. `decisions/README.md` states the three and why "choose a
+   conservative default", on its own, contradicts the sentence above it.
 3. Once promoted, the template — not the DLD — is the source of truth for model
    generation (see `model_generation_rules.md`).
 

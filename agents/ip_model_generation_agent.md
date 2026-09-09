@@ -50,12 +50,20 @@ output to the same conventions.
 
 1. Generate the draft with `python tools/dld_to_template.py dlds/<ip_name>_dld.md`.
 2. Replace every `TODO_REVIEW` in the draft using only DLD-stated behavior;
-   record anything the DLD leaves open in `decisions/<ip_name>.md` with a labeled
-   default. **Not** in the gaps report — that file is regenerated on every parse
-   and gitignored, so anything written there is lost. Record the gap, the default
-   chosen, why it is conservative, and the template field or test scenario that
-   carries it. Values you derived by arithmetic from stated ones belong there
-   too: a reader cannot otherwise tell a derived number from a stated one.
+   record anything the DLD leaves open in `decisions/<ip_name>.md`. **Not** in the
+   gaps report — that file is regenerated on every parse and gitignored, so
+   anything written there is lost. Record the gap, how it was resolved, and the
+   template field or test scenario that carries it. Values you derived by
+   arithmetic from stated ones belong there too: a reader cannot otherwise tell a
+   derived number from a stated one.
+
+   Resolving a gap does not always mean choosing a default, and reaching for one
+   by reflex is how invented numbers get in. An unstated **value** is left unset
+   and made configuration. A **behavior the model must reach** takes the
+   conservative branch, labeled, with the evidence that makes it conservative
+   rather than convenient. A **behavior whose conservative branch would itself be
+   a guess** is not modeled, and is recorded as declared-but-not-implemented with
+   what a reader must not trust. `decisions/README.md` states all three.
 3. Pass `template_lint.py` and
    `check_template_coverage.py <draft> <dld> --strict`, then promote the draft to
    `templates/<ip_name>.template.yaml`.

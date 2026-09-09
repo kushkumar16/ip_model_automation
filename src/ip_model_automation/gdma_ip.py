@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import simpy
 
@@ -13,11 +13,18 @@ class GdmaIpModel:
         self,
         env: simpy.Environment,
         fetch_latency=53,
-        read_latency=22,
+        read_latency=6,
         write_latency=20,
         completion_latency=32,
         channel_scan_latency=12,
+        credit_check_latency=4,
+        read_pointer_latency=2,
+        response_lookup_latency=4,
+        status_check_latency=2,
+        buffer_write_latency=4,
+        source_read_port_latency=8,
         irq_latency=8,
+        outstanding_read_depth=None,
         buffer_depth=16,
         descriptor_queue_depth=4,
         completion_queue_depth=16,
@@ -27,14 +34,46 @@ class GdmaIpModel:
     ):
         self.env = env
         self.logger = get_ip_logger("gdma_ip", log_level, log_file)
+        # Each default is the sum of one FSM's declared operations in the
+        # template's timing_model -- fetch 5+40+6+2, completion 8+20+4,
+        # channel_scan 10+2, irq 2+2+4. "read" was the exception: it was 22, which
+        # is read_issue (4+6+2) *plus* read_response (4+2+4), both FSMs lumped
+        # into one timeout at the issue site. That is no longer the shape here.
+        # read_issue's three operations are three timeouts (credit_check, read,
+        # read_pointer) and read_response's three are now the three below, so each
+        # declared operation is charged once, in the state that performs it.
+        # ("write" keeps the old lumped shape: write_issue 3+6+2 plus
+        # write_response 4+2+3, in one timeout at the issue site. Nothing has split
+        # the write path yet, so it is still self-consistent -- see
+        # decisions/gdma_ip.md.)
         self.lat = {
             "fetch": fetch_latency,
             "read": read_latency,
             "write": write_latency,
             "completion": completion_latency,
             "channel_scan": channel_scan_latency,
+            "credit_check": credit_check_latency,
+            "read_pointer": read_pointer_latency,
+            "response_lookup": response_lookup_latency,
+            "status_check": status_check_latency,
+            "buffer_write": buffer_write_latency,
             "irq": irq_latency,
         }
+        # templates/gdma_ip.template.yaml resources.source_read_port declares
+        # capacity 1 and latency_cycles 8. The port is occupied for the *issue*
+        # only -- timing_model source_read_issue -- and the memory round trip runs
+        # after it is released, which is what lets reads overlap at all.
+        self.source_read_port_latency = source_read_port_latency
+        # §8 Resources names "per-channel outstanding read credits", §6.4 says read
+        # issue "can run ahead of write issue until internal buffer or outstanding
+        # read limit is full", and §3's CH_CFG carries the per-channel outstanding
+        # depth. The *value* of that depth is configuration, so it is set per
+        # channel and left unbounded until it is, rather than inventing a number
+        # the DLD does not state.
+        self.outstanding_read_depth = outstanding_read_depth
+        self.channel_read_depth: Dict[int, Optional[int]] = {}
+        self.outstanding_reads: Dict[int, int] = defaultdict(int)
+        self.read_credit_available: Dict[int, simpy.Event] = {}
         self.coalesce_threshold = coalesce_threshold
 
         self.desc_q = simpy.Store(env)
@@ -90,8 +129,20 @@ class GdmaIpModel:
         self.env.process(self.interrupt_coalescing_process())
         self.logger.info("initialized coalesce_threshold=%s", self.coalesce_threshold)
 
-    def configure_channel(self, channel_id: int, enabled: bool = True, priority: int = 0) -> None:
+    def configure_channel(
+        self,
+        channel_id: int,
+        enabled: bool = True,
+        priority: int = 0,
+        outstanding_read_depth: Optional[int] = None,
+    ) -> None:
+        """CH_CFG: per-channel priority, outstanding depth, burst size (DLD §3).
+
+        `priority` is stored and **not acted on** -- see `channel_scheduler_process`.
+        """
         self.channel_priority[channel_id] = priority
+        if outstanding_read_depth is not None:
+            self.channel_read_depth[channel_id] = outstanding_read_depth
         if enabled:
             self.enable_channel(channel_id)
         else:
@@ -188,6 +239,21 @@ class GdmaIpModel:
             self.metrics["descriptors_fetched"] += 1
 
     def channel_scheduler_process(self):
+        # NOT CLEAR -- CHECK_PRIORITY and NO_ELIGIBLE are not modelled, and this
+        # process grants in arrival order instead.
+        #
+        # The DLD names both states (§6.3) and CH_CFG carries a per-channel
+        # priority field (§3), but it never says how that field is used: whether a
+        # higher number means more urgent or less, how ties break, whether
+        # arbitration is strict-priority, weighted or round-robin among equals, or
+        # what makes a channel ineligible and sends it to NO_ELIGIBLE. §6.3 says
+        # only that the scheduler "may arbitrate across channels every dispatch
+        # tick".
+        #
+        # Any of those choices would be an invention that changes which descriptor
+        # runs first, so none is made here. `configure_channel` still records
+        # `priority` so a future implementation has the input; nothing reads it.
+        # See decisions/gdma_ip.md.
         while True:
             self.fsm_state["channel_scheduler"] = "SCAN_CHANNELS"
             desc = yield self.active_descriptor_queue.get()
@@ -196,32 +262,128 @@ class GdmaIpModel:
             self.metrics["channel_grants"] += 1
             yield self.read_issue_queue.put(desc)
 
+    def _read_credit_limit(self, channel_id: int) -> Optional[int]:
+        limit = self.channel_read_depth.get(channel_id, self.outstanding_read_depth)
+        return limit
+
+    def _release_read_credit(self, channel_id: int) -> None:
+        if self.outstanding_reads[channel_id] > 0:
+            self.outstanding_reads[channel_id] -= 1
+        waiter = self.read_credit_available.pop(channel_id, None)
+        if waiter is not None and not waiter.triggered:
+            waiter.succeed()
+
     def read_issue_process(self):
         while True:
             self.fsm_state["read_issue"] = "WAIT_DESCRIPTOR"
             desc = yield self.read_issue_queue.get()
+
+            # CHECK_READ_CREDITS. Declared as a state in §6.4, as a resource in §8
+            # ("per-channel outstanding read credits"), and priced in §11's timing
+            # table at 4 cycles. §6.4 states the behaviour it gates: read issue
+            # "can run ahead of write issue until internal buffer or outstanding
+            # read limit is full". The model previously went straight from
+            # WAIT_DESCRIPTOR to ISSUE_READ, so the limit did not exist and reads
+            # ran ahead without bound.
+            self.fsm_state["read_issue"] = "CHECK_READ_CREDITS"
+            yield self.env.timeout(self.lat["credit_check"])
+            limit = self._read_credit_limit(desc.channel_id)
+            while limit is not None and self.outstanding_reads[desc.channel_id] >= limit:
+                self.metrics["read_credit_stalls"] += 1
+                self.logger.warning(
+                    "read credit exhausted channel=%s outstanding=%s limit=%s",
+                    desc.channel_id,
+                    self.outstanding_reads[desc.channel_id],
+                    limit,
+                )
+                waiter = self.read_credit_available.setdefault(desc.channel_id, self.env.event())
+                yield waiter
+            self.outstanding_reads[desc.channel_id] += 1
+            self.metrics["read_credits_taken"] += 1
+
             while not self.source_ready:
                 self.fsm_state["read_issue"] = "READ_STALL"
                 self.metrics["read_stalls"] += 1
                 self.logger.warning("read stall descriptor=%s time=%s", desc.desc_id, self.env.now)
                 yield self.env.timeout(1)
+            # The port is held for the issue only. §11 prices "Read request issue"
+            # separately from everything after it, and the template's
+            # source_read_port carries its own latency_cycles -- the memory round
+            # trip. Holding the port for both, as this did, serialised the read
+            # path completely: one read in flight at a time, so §6.4's "multiple
+            # read requests may be outstanding" was unreachable and the credit
+            # limit could never bind.
             self.fsm_state["read_issue"] = "ISSUE_READ"
             with self.source_read_port.request() as req:
                 yield req
                 yield self.env.timeout(self.lat["read"])
+            self.fsm_state["read_issue"] = "UPDATE_READ_POINTER"
+            yield self.env.timeout(self.lat["read_pointer"])
             self.fsm_state["read_issue"] = "READ_DONE"
             self.metrics["read_requests"] += 1
-            yield self.read_response_queue.put(desc)
+            # Dispatched, not awaited: this read is now outstanding, and read
+            # issue goes back for the next descriptor while it is in flight.
+            self.env.process(self._source_read_in_flight(desc))
+
+    def _source_read_in_flight(self, desc: Descriptor):
+        """The memory round trip, running after the port has been released."""
+        self.metrics["reads_in_flight"] = max(self.metrics["reads_in_flight"], sum(self.outstanding_reads.values()))
+        yield self.env.timeout(self.source_read_port_latency)
+        yield self.read_response_queue.put(desc)
 
     def read_response_process(self):
         while True:
             self.fsm_state["read_response"] = "WAIT_READ_RESP"
             desc = yield self.read_response_queue.get()
+            # §11 prices three operations for this FSM -- response lookup 4,
+            # status check 2, buffer write 4 -- and this process charged none of
+            # them. They were riding inside read_issue's old read_latency of 22,
+            # which is why splitting that number left the read path 10 cycles
+            # short of its declared cost.
+            #
+            # Each operation is charged in the state that performs it, the same
+            # mapping read_issue uses. §6.5 declares four states, and RESP_ERROR is
+            # off the happy path, so the remaining three take one operation each.
+            # The lookup is what leaves WAIT_READ_RESP: §6.5 requires the response
+            # to "be associated with an outstanding read tag", and the FSM's
+            # declared resource is read_outstanding_table -- the response cannot be
+            # named as any descriptor's until that association is made.
+            yield self.env.timeout(self.lat["response_lookup"])
             self.fsm_state["read_response"] = "CHECK_RESP_STATUS"
+            yield self.env.timeout(self.lat["status_check"])
+            # This is the buffer_space half of the declared
+            # CHECK_RESP_STATUS -> WRITE_BUFFER condition
+            # (`response_ok_and_buffer_space`). A full buffer is backpressure, not
+            # an error -- §6.5 says the FSM "can backpressure read response if
+            # internal buffer is full" -- so it is counted and the response goes on
+            # to WRITE_BUFFER, where the put blocks until a slot frees.
             if len(self.internal_data_buffer.items) >= self.internal_data_buffer.capacity:
-                self.fsm_state["read_response"] = "RESP_ERROR"
                 self.metrics["buffer_full_stalls"] += 1
+            # NOT CLEAR -- RESP_ERROR is declared but never entered, and the state
+            # this process used to set here was the wrong one anyway: it labelled a
+            # full buffer as a response error, on the line before falling through to
+            # WRITE_BUFFER regardless. So the state existed at no simulated time and
+            # named a condition that is not an error.
+            #
+            # RESP_ERROR belongs to the other half of that condition, `response_ok`.
+            # §4.3 declares `read_resp` on the source read interface, so a non-ok
+            # status is a real field -- but nothing in this model drives one, and
+            # §12 lists "Error recovery policy" as an open item, so the DLD does not
+            # say what entering the state would then do: retry the read, abort the
+            # descriptor, halt the channel, raise an interrupt. Inventing an error
+            # source and a recovery to reach a state with is two inventions, so
+            # neither is made. See decisions/gdma_ip.md.
             self.fsm_state["read_response"] = "WRITE_BUFFER"
+            # The read is no longer outstanding once its response has landed, so
+            # the channel's credit returns here. Unchanged in placement, but it is
+            # now 6 cycles later in time than it was: the lookup and the status
+            # check happen before it and used to be free.
+            self._release_read_credit(desc.channel_id)
+            yield self.env.timeout(self.lat["buffer_write"])
+            # The write costs its declared 4 cycles and the data lands at the end
+            # of them. The put is where §6.5's "can backpressure read response if
+            # internal buffer is full" actually bites -- it blocks until a slot
+            # frees, holding this FSM in WRITE_BUFFER.
             yield self.internal_data_buffer.put(desc)
             self.metrics["buffer_writes"] += 1
             self.metrics["buffer_occupancy"] = max(

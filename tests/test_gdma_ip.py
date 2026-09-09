@@ -6,6 +6,123 @@ from ip_model_automation.ip import Descriptor, GdmaIpModel
 
 
 class TestGdmaIpModel(unittest.TestCase):
+    def test_gdma_read_credits_bound_outstanding_reads_per_channel(self):
+        """§6.4's outstanding read limit, which the model did not have.
+
+        The DLD declares CHECK_READ_CREDITS as a state, names per-channel
+        outstanding read credits as a resource in §8, and says read issue "can run
+        ahead of write issue until internal buffer or outstanding read limit is
+        full". read_issue went straight from WAIT_DESCRIPTOR to ISSUE_READ, so
+        nothing bounded it.
+
+        A depth of 1 is used here because it is the smallest limit that can be
+        observed at all; the DLD states no depth value, so the model takes it as
+        the configuration CH_CFG says it is rather than assuming one.
+        """
+        env = simpy.Environment()
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=4,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            credit_check_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
+            irq_latency=1,
+        )
+        model.configure_channel(0, outstanding_read_depth=1)
+        for index in range(3):
+            model.submit(Descriptor(f"d{index}", channel_id=0))
+
+        peak = 0
+        while env.peek() < 200:
+            env.step()
+            peak = max(peak, model.outstanding_reads[0])
+
+        self.assertEqual(model.metrics["completed_descriptors"], 3)
+        self.assertEqual(model.metrics["read_credits_taken"], 3)
+        # Every credit taken is returned when its response lands.
+        self.assertEqual(model.outstanding_reads[0], 0)
+        self.assertLessEqual(peak, 1, "outstanding reads exceeded the configured depth")
+        # And the limit is what holds it there. Reads now pipeline -- the port is
+        # released after the issue and the round trip runs behind it -- so with a
+        # depth of 1 and three descriptors, two must wait for a credit to come
+        # back. Before pipelining this was 0, because a single sequential read
+        # process could never exceed one outstanding read for the limit to bind
+        # against.
+        self.assertGreater(model.metrics["read_credit_stalls"], 0)
+
+    def test_gdma_read_credits_are_unbounded_until_configured(self):
+        """No depth configured means no limit -- the DLD states no default."""
+        env = simpy.Environment()
+        model = GdmaIpModel(
+            env,
+            fetch_latency=1,
+            read_latency=4,
+            write_latency=1,
+            completion_latency=1,
+            channel_scan_latency=1,
+            credit_check_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
+            irq_latency=1,
+        )
+        model.enable_channel(0)
+        for index in range(3):
+            model.submit(Descriptor(f"d{index}", channel_id=0))
+        env.run(until=200)
+        self.assertEqual(model.metrics["completed_descriptors"], 3)
+        self.assertEqual(model.metrics["read_credit_stalls"], 0)
+
+    def test_gdma_read_path_costs_its_declared_cycles_at_defaults(self):
+        """The read path at model defaults, which nothing measured before.
+
+        Every other test that reaches a read passes an explicit read_latency, so
+        the defaults were only ever exercised by error paths that never issue one.
+        That is how read_latency sat at 22 against a declared 6 through twelve
+        green tests, and how read_response paid nothing at all.
+
+        Every stage outside the read path is zeroed so the sum is the read path
+        and nothing else. §11 prices read_issue at credit_check 4 +
+        source_read_issue 6 + read_pointer_update 2, and read_response at
+        response_lookup 4 + read_status_check 2 + buffer_write 4; between them the
+        template's source_read_port resource declares latency_cycles 8 for the
+        memory round trip. 12 + 8 + 10 = 30, and the buffer write is the last of
+        them, so the data lands at 30.
+        """
+        env = simpy.Environment()
+        model = GdmaIpModel(
+            env,
+            fetch_latency=0,
+            write_latency=0,
+            completion_latency=0,
+            channel_scan_latency=0,
+            irq_latency=0,
+        )
+        model.enable_channel(0)
+        model.submit(Descriptor("d0", channel_id=0))
+
+        buffer_write_time = None
+        while env.peek() < 200:
+            env.step()
+            if buffer_write_time is None and model.metrics["buffer_writes"] == 1:
+                buffer_write_time = env.now
+
+        self.assertEqual(model.metrics["read_requests"], 1)
+        self.assertEqual(
+            buffer_write_time,
+            30,
+            "the read path no longer costs read_issue 12 + port 8 + read_response 10",
+        )
+
     def test_gdma_completes_descriptor(self):
         env = simpy.Environment()
         model = GdmaIpModel(
@@ -15,11 +132,17 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=3,
             completion_latency=1,
             channel_scan_latency=1,
+            credit_check_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=10)
+        env.run(until=16)
         self.assertEqual(model.metrics["completed_descriptors"], 1)
         self.assertEqual(model.metrics["channel_grants"], 1)
         self.assertEqual(model.metrics["read_requests"], 1)
@@ -44,16 +167,21 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.set_memory_ready(destination=False)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=8)
+        env.run(until=14)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["write_stalls"], 0)
         model.set_memory_ready(destination=True)
-        env.run(until=14)
+        env.run(until=22)
         self.assertEqual(model.completed[0][1].desc_id, "d0")
 
     def test_gdma_configure_channel_disable_and_halt(self):
@@ -89,16 +217,21 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
         )
         model.enable_channel(0)
         model.set_memory_ready(completion=False)
         model.submit(Descriptor("d0", channel_id=0))
-        env.run(until=10)
+        env.run(until=16)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["completion_stalls"], 0)
         model.set_memory_ready(completion=True)
-        env.run(until=16)
+        env.run(until=24)
         self.assertEqual(model.completed[0][1].desc_id, "d0")
 
     def test_gdma_full_descriptor_queue_counts_fetch_stall(self):
@@ -139,6 +272,12 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            credit_check_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=2,
         )
@@ -160,6 +299,11 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
+            source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=1,
         )

@@ -722,9 +722,12 @@ def render_gaps_report(ip_name: str, draft: dict[str, Any], gaps: list[str], ope
         "## How To Resolve",
         "",
         "1. Replace every `TODO_REVIEW` in the draft using only DLD-stated behavior.",
-        "2. If the DLD does not state a detail, choose a conservative default and record",
-        f"   it in `decisions/{ip_name}.md` rather than inventing silent behavior. Do not",
-        "   record it here: this file is regenerated and gitignored.",
+        "2. If the DLD does not state a detail, record how you resolved it in",
+        f"   `decisions/{ip_name}.md` rather than inventing silent behavior. Do not record it",
+        "   here: this file is regenerated and gitignored. Resolving it does not always mean",
+        "   choosing a value — an unstated number is left unset and made configuration, and a",
+        "   behavior whose conservative reading would itself be a guess is not modeled at all.",
+        "   `decisions/README.md` states the three cases.",
         "3. Run `python tools/template_lint.py templates/" + ip_name + ".template.draft.yaml`.",
         "4. Run `python tools/check_template_coverage.py templates/"
         + ip_name

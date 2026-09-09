@@ -19,6 +19,9 @@ class GdmaIpModel:
         channel_scan_latency=12,
         credit_check_latency=4,
         read_pointer_latency=2,
+        response_lookup_latency=4,
+        status_check_latency=2,
+        buffer_write_latency=4,
         source_read_port_latency=8,
         irq_latency=8,
         outstanding_read_depth=None,
@@ -33,13 +36,16 @@ class GdmaIpModel:
         self.logger = get_ip_logger("gdma_ip", log_level, log_file)
         # Each default is the sum of one FSM's declared operations in the
         # template's timing_model -- fetch 5+40+6+2, completion 8+20+4,
-        # channel_scan 10+2, irq 2+2+4. "read" is the exception: it was 22, which
+        # channel_scan 10+2, irq 2+2+4. "read" was the exception: it was 22, which
         # is read_issue (4+6+2) *plus* read_response (4+2+4), both FSMs lumped
-        # into one timeout at the issue site. Once credit_check and read_pointer
-        # became their own timeouts that double-charged 6 cycles, so "read" is now
-        # source_read_issue alone. read_response's own 10 cycles are still unpaid
-        # -- see decisions/gdma_ip.md. ("write" keeps the same lumped shape:
-        # write_issue 3+6+2 plus write_response 4+2+3.)
+        # into one timeout at the issue site. That is no longer the shape here.
+        # read_issue's three operations are three timeouts (credit_check, read,
+        # read_pointer) and read_response's three are now the three below, so each
+        # declared operation is charged once, in the state that performs it.
+        # ("write" keeps the old lumped shape: write_issue 3+6+2 plus
+        # write_response 4+2+3, in one timeout at the issue site. Nothing has split
+        # the write path yet, so it is still self-consistent -- see
+        # decisions/gdma_ip.md.)
         self.lat = {
             "fetch": fetch_latency,
             "read": read_latency,
@@ -48,6 +54,9 @@ class GdmaIpModel:
             "channel_scan": channel_scan_latency,
             "credit_check": credit_check_latency,
             "read_pointer": read_pointer_latency,
+            "response_lookup": response_lookup_latency,
+            "status_check": status_check_latency,
+            "buffer_write": buffer_write_latency,
             "irq": irq_latency,
         }
         # templates/gdma_ip.template.yaml resources.source_read_port declares
@@ -326,14 +335,36 @@ class GdmaIpModel:
         while True:
             self.fsm_state["read_response"] = "WAIT_READ_RESP"
             desc = yield self.read_response_queue.get()
+            # §11 prices three operations for this FSM -- response lookup 4,
+            # status check 2, buffer write 4 -- and this process charged none of
+            # them. They were riding inside read_issue's old read_latency of 22,
+            # which is why splitting that number left the read path 10 cycles
+            # short of its declared cost.
+            #
+            # Each operation is charged in the state that performs it, the same
+            # mapping read_issue uses. §6.5 declares four states, and RESP_ERROR is
+            # off the happy path, so the remaining three take one operation each.
+            # The lookup is what leaves WAIT_READ_RESP: §6.5 requires the response
+            # to "be associated with an outstanding read tag", and the FSM's
+            # declared resource is read_outstanding_table -- the response cannot be
+            # named as any descriptor's until that association is made.
+            yield self.env.timeout(self.lat["response_lookup"])
             self.fsm_state["read_response"] = "CHECK_RESP_STATUS"
+            yield self.env.timeout(self.lat["status_check"])
             if len(self.internal_data_buffer.items) >= self.internal_data_buffer.capacity:
                 self.fsm_state["read_response"] = "RESP_ERROR"
                 self.metrics["buffer_full_stalls"] += 1
             self.fsm_state["read_response"] = "WRITE_BUFFER"
             # The read is no longer outstanding once its response has landed, so
-            # the channel's credit returns here.
+            # the channel's credit returns here. Unchanged in placement, but it is
+            # now 6 cycles later in time than it was: the lookup and the status
+            # check happen before it and used to be free.
             self._release_read_credit(desc.channel_id)
+            yield self.env.timeout(self.lat["buffer_write"])
+            # The write costs its declared 4 cycles and the data lands at the end
+            # of them. The put is where §6.5's "can backpressure read response if
+            # internal buffer is full" actually bites -- it blocks until a slot
+            # frees, holding this FSM in WRITE_BUFFER.
             yield self.internal_data_buffer.put(desc)
             self.metrics["buffer_writes"] += 1
             self.metrics["buffer_occupancy"] = max(

@@ -29,6 +29,9 @@ class TestGdmaIpModel(unittest.TestCase):
             channel_scan_latency=1,
             credit_check_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
         )
@@ -66,6 +69,9 @@ class TestGdmaIpModel(unittest.TestCase):
             channel_scan_latency=1,
             credit_check_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
         )
@@ -75,6 +81,47 @@ class TestGdmaIpModel(unittest.TestCase):
         env.run(until=200)
         self.assertEqual(model.metrics["completed_descriptors"], 3)
         self.assertEqual(model.metrics["read_credit_stalls"], 0)
+
+    def test_gdma_read_path_costs_its_declared_cycles_at_defaults(self):
+        """The read path at model defaults, which nothing measured before.
+
+        Every other test that reaches a read passes an explicit read_latency, so
+        the defaults were only ever exercised by error paths that never issue one.
+        That is how read_latency sat at 22 against a declared 6 through twelve
+        green tests, and how read_response paid nothing at all.
+
+        Every stage outside the read path is zeroed so the sum is the read path
+        and nothing else. §11 prices read_issue at credit_check 4 +
+        source_read_issue 6 + read_pointer_update 2, and read_response at
+        response_lookup 4 + read_status_check 2 + buffer_write 4; between them the
+        template's source_read_port resource declares latency_cycles 8 for the
+        memory round trip. 12 + 8 + 10 = 30, and the buffer write is the last of
+        them, so the data lands at 30.
+        """
+        env = simpy.Environment()
+        model = GdmaIpModel(
+            env,
+            fetch_latency=0,
+            write_latency=0,
+            completion_latency=0,
+            channel_scan_latency=0,
+            irq_latency=0,
+        )
+        model.enable_channel(0)
+        model.submit(Descriptor("d0", channel_id=0))
+
+        buffer_write_time = None
+        while env.peek() < 200:
+            env.step()
+            if buffer_write_time is None and model.metrics["buffer_writes"] == 1:
+                buffer_write_time = env.now
+
+        self.assertEqual(model.metrics["read_requests"], 1)
+        self.assertEqual(
+            buffer_write_time,
+            30,
+            "the read path no longer costs read_issue 12 + port 8 + read_response 10",
+        )
 
     def test_gdma_completes_descriptor(self):
         env = simpy.Environment()
@@ -87,6 +134,9 @@ class TestGdmaIpModel(unittest.TestCase):
             channel_scan_latency=1,
             credit_check_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
         )
@@ -118,6 +168,9 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
         )
@@ -165,6 +218,9 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
         )
@@ -216,7 +272,11 @@ class TestGdmaIpModel(unittest.TestCase):
             write_latency=1,
             completion_latency=1,
             channel_scan_latency=1,
+            credit_check_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=2,
@@ -240,6 +300,9 @@ class TestGdmaIpModel(unittest.TestCase):
             completion_latency=1,
             channel_scan_latency=1,
             read_pointer_latency=1,
+            response_lookup_latency=1,
+            status_check_latency=1,
+            buffer_write_latency=1,
             source_read_port_latency=1,
             irq_latency=1,
             coalesce_threshold=1,

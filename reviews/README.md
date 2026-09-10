@@ -65,8 +65,12 @@ collect in.
 
 ## Current contents
 
-**No review findings files remain.** Every IP that had been reviewed has since
-been retired, so `check_review_findings.py` currently has nothing to check and
-passes by having no work to do. That is not a statement that the surviving models
-are faithful — no one has reviewed them. It is the weaker claim still: nobody has
-looked.
+Both surviving IPs now carry a model review, filed 2026-09-10:
+`arbitration_ip.model.findings.yaml` and `completion_ip.model.findings.yaml`,
+seven findings each. `check_review_findings.py` therefore **fails** until every
+one of the fourteen is fixed or dismissed by name in `decisions/<ip>.md`. That is
+the gate doing its job, not breaking.
+
+Read the direction of the claim carefully. Fourteen findings is not a verdict
+that these models are worse than the ones retired before them — those were never
+reviewed at all. It is the first time anyone has looked.

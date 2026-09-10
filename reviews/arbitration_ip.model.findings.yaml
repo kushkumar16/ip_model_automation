@@ -1,0 +1,147 @@
+ip: arbitration_ip
+kind: model
+template_sha256: 6d11f8492d5c05a6ce4f6350269297f31a45affaf7668a19e2b9f91bb73fbb06
+model_sha256: eb1e1013edd5bb3dfedfb9e75bbbb8c98015af9b8a81fe3028b15b3ff9de141d
+tests_sha256: a814f2e5279c2232d366201cc403c44f0684e90f7e04cbd96eb2b8cdf9c83f34
+findings:
+- id: M1
+  class: fsm_structure
+  severity: high
+  claim: arbiter_main never takes the declared PORT_SCAN -> STALL on no_eligible_port; it runs the tenant
+    and SQ scans unconditionally and stalls out of SQ_SCAN instead, charging 18 cycles before it records
+    a no-port-pending stall.
+  template: 'templates/arbitration_ip.template.yaml:140-144 fsm_processes.arbiter_main.transitions declares
+    `from: PORT_SCAN, to: STALL, condition: no_eligible_port, actions: [increment_no_eligible_stall]`,
+    and :125-134 gate PORT_SCAN -> TENANT_SCAN on eligible_port_found and TENANT_SCAN -> SQ_SCAN on eligible_tenant_found.
+    timing_model.fsm_process_delays.arbiter_main charges port_scan 4 cycles (:316) and backpressure_retry
+    1 cycle (:320).'
+  model: 'src/ip_model_automation/arbitration_ip.py:277-289 steps PORT_SCAN -> TENANT_SCAN -> SQ_SCAN
+    with no condition between them and only then calls select_sq() (:283, :235-250), so STALL is always
+    entered from SQ_SCAN. Measured on an idle model by stepping the environment: PORT_SCAN at t=0, TENANT_SCAN
+    at t=4, SQ_SCAN at t=10, STALL at t=18, next PORT_SCAN at t=19 - one no_port_pending stall per 19-20
+    cycles rather than per 5. `python tools/check_declared_transitions.py arbitration_ip` corroborates:
+    `NEVER TAKEN arbiter_main: PORT_SCAN -> STALL` and `UNDECLARED arbiter_main: SQ_SCAN -> STALL`.'
+  why: 'The model charges tenant_scan (6) and sq_scan (8) on a path the contract says ends at PORT_SCAN,
+    so every unsuccessful scan costs 18 cycles instead of 4. That is not only 14 cycles of latency the
+    contract does not describe: it sets the arbiter''s polling period to ~19 cycles, so the arrival-to-grant
+    time of a command that lands just after a scan begins carries up to 19 cycles of jitter the timing
+    model does not account for, and the no_port_pending_stalls / stalls metrics are scaled by that period.'
+- id: M2
+  class: fsm_structure
+  severity: medium
+  claim: The RESET state declared for all three FSMs is occupied at no simulated time, and the reset behaviour
+    the template declares is not modelled at all.
+  template: 'templates/arbitration_ip.template.yaml:100-101 declares arbiter_main state RESET (`Initialize
+    pointers and counters`) with :115-119 `RESET -> IDLE, condition: reset_deasserted, actions: [clear_state]`;
+    :156 and :199 declare RESET for issue_pipeline and policy_update; :8-10 declares `reset: {type: sync,
+    behavior: clear_policy_state_and_grant_counters}`.'
+  model: 'src/ip_model_automation/arbitration_ip.py:122-126 sets fsm_state to RESET in the constructor,
+    and each process overwrites it with its first line before any yield (arbiter_main :271 IDLE, issue_pipeline
+    :297 WAIT_SELECTION, policy_update :363 WAIT_GRANT). Measured by stepping the environment and recording
+    fsm_state at every step boundary: arbiter_main.RESET is never observed at any boundary, issue_pipeline.RESET
+    and policy_update.RESET are observed only at t=0 before their own process bodies run, and all three
+    hold for 0 simulated time. There is no reset input, no reset_deasserted condition and no clear_policy_state_and_grant_counters
+    anywhere in the file.'
+  why: No test, log line or trace can observe a state that exists for zero simulated time, so the model
+    cannot be exercised in reset and a reader of fsm_state is told about a state the simulation never
+    occupies. `tools/check_declared_transitions.py` reports RESET -> IDLE among the 15/17 declared transitions
+    taken, because the constructor's assignment followed by the process's first assignment looks like
+    a transition to it - so nothing in the pipeline currently distinguishes a modelled reset from an unmodelled
+    one.
+- id: M3
+  class: wait_model_impl
+  severity: high
+  claim: qos_credit_if is declared as a wait_for_response interface whose sampled eligibility result decides
+    whether a candidate may be granted, but the model samples nothing and its grant decision does not
+    depend on credit or tenant liveness at all.
+  template: 'templates/arbitration_ip.template.yaml:51-67 declares qos_credit_if with `mode: wait_for_response`,
+    `wait_points: [arbiter_main.TENANT_SCAN]`, `resumes_on: credit_status_sampled`, `response_used_for:
+    "the eligibility result decides whether the candidate may be granted"`, and the eligibility_check
+    transaction carrying tenant_alive, read/write_iops_credit and read/write_bw_credit. :276 sets `eligibility_owner:
+    arbitration_ip_check_only`, and :73/:81 list tenant_alive among each command''s valid_conditions.'
+  model: src/ip_model_automation/arbitration_ip.py:279-280 is the whole of TENANT_SCAN - `_set_fsm_state`
+    then an unconditional 6-cycle timeout - and _select_tenant (:223-227) reads only tenant_pending_bitmap.
+    There is no credit, eligibility, tenant_alive, iops or bandwidth state anywhere in the file (grep
+    finds no such identifier), and select_sq (:235-255) grants on bitmap availability alone.
+  why: 'A declared blocking interface that the model never waits on and never reads has no effect on any
+    simulated grant: the model behaves as though every tenant is alive with unlimited credit, and no configuration
+    of it can express an ineligible tenant. `python tools/check_wait_model_coverage.py arbitration_ip`
+    reports OK because the declared wait point names a state the model does enter, so the gate confirms
+    the wait point exists while the wait itself is absent.'
+- id: M4
+  class: timing_mismatch
+  severity: medium
+  claim: The declared policy_update operation weighted_order_rebuild (8 cycles / 16 ns) is charged nowhere
+    in the model.
+  template: 'templates/arbitration_ip.template.yaml:321-326 timing_model.fsm_process_delays for fsm policy_update
+    declares three operations: pointer_update 1/2, age_update 2/4 and `{name: weighted_order_rebuild,
+    cycles: 8, ns: 16}`.'
+  model: 'src/ip_model_automation/arbitration_ip.py:362-376 policy_update charges only latency[''pointer_update'']
+    (1) and latency[''age_update''] (2); the WeightedOrder objects are built once in the constructor (:67-79)
+    outside simulated time and are never rebuilt. Measured with default latencies: policy_update enters
+    UPDATE_POINTER at t=23 and is back in WAIT_GRANT at t=26 - a 3-cycle span, against the 11 cycles the
+    three declared operations sum to.'
+  why: 'The declared cost of rebuilding the weighted order is absorbed silently, so policy state becomes
+    visible to the next scan 8 cycles earlier than the timing model says it can. Under the default latencies
+    the arbiter''s next selection is far enough away that the difference does not change the outcome,
+    which is exactly what makes it easy to miss: any configuration that shortens the scan (as every test
+    in the suite does) or lengthens the rebuild would reorder grants, and no measurement of this model
+    would show the operation was free.'
+- id: M5
+  class: scenario_gap
+  severity: medium
+  claim: The weighted_order_four_tenants scenario is exercised by no test, and the order the model actually
+    produces under that stimulus is not the order the scenario states.
+  template: 'templates/arbitration_ip.template.yaml:373-378 test_scenarios[0] weighted_order_four_tenants:
+    `Weights 1,4,2,1 select T0,T1,T1,T1,T1,T2,T2,T3 when all queues are non-empty`, input_sequence [port0_T0_SQ0_READ,
+    port0_T1_SQ0_READ, port1_T2_SQ0_READ, port1_T3_SQ0_READ], expected_functional_behavior [weighted_order_respected].'
+  model: No test in tests/test_arbitration_ip.py drives four tenants across both ports; the nearest, test_arbitration_weighted_tenant_selection_under_port
+    (tests/test_arbitration_ip.py:61-82), forces port_mode='single' and replaces the weights with {T0:1,
+    T1:4}, so T2 and T3 never appear and no weighted sequence is asserted. Running the scenario's own
+    stimulus against src/ip_model_automation/arbitration_ip.py with all four queues kept non-empty gives
+    the tenant order T0, T2, T1, T2, T1, T3, T1, T2, ... - strict port alternation from the port-level
+    round robin at :217-221 with weights {port0:1, port1:1}, never the declared T0,T1,T1,T1,T1,T2,T2,T3.
+  why: 'The scenario states the headline QoS property of this IP and nothing checks it. The divergence
+    is not random: the template declares `hierarchy: [port, tenant, sq]` (:271) with equal port weights,
+    which forces ports to alternate and therefore cannot produce a flat tenant-weighted sequence - so
+    either the scenario or the hierarchy is wrong, and with no test driving it either way the disagreement
+    is invisible.'
+- id: M6
+  class: test_asserts_wrong_thing
+  severity: medium
+  claim: test_arbitration_weighted_tenant_selection_under_port passes identically for every tenant weighting,
+    so it cannot fail if weighted round robin were implemented as plain round robin.
+  template: 'templates/arbitration_ip.template.yaml:268-275 declares `default_policy: WEIGHTED_ROUND_ROBIN`
+    with tenant weights {T0:1, T1:4, T2:2, T3:1}, and :355 the invariant `Weighted round-robin order is
+    deterministic for equal bitmap availability`.'
+  model: 'tests/test_arbitration_ip.py:81-82 asserts only `[entry[''tenant_id''] for entry in model.selection_trace[:2]]
+    == [''T0'',''T1'']` and `[request[''issue_count''] for request in model.downstream_requests[:2]] ==
+    [1,4]`. Re-running that exact test body with the tenant weights changed to {T0:1,T1:1}, {T0:4,T1:1}
+    and {T0:1,T1:9} leaves both assertions passing and the full selection_trace at [''T0'',''T1''] in
+    every case: the first grant drains T1''s whole queue in one burst (issue_count = min(pending, bursts),
+    src/ip_model_automation/arbitration_ip.py:260-268, 328-331), so the scan never revisits T1 and the
+    weight-4 pointer behaviour of WeightedOrder is never reached.'
+  why: The only test named for weighting asserts a two-element prefix that equal weights produce just
+    as readily, and the issue_count of 4 it checks comes from the burst minimum, not the policy. A regression
+    that replaced WEIGHTED_ROUND_ROBIN with ROUND_ROBIN would leave the whole suite green.
+- id: M7
+  class: scenario_gap
+  severity: medium
+  claim: The scenarios that declare latency-applied performance properties are implemented by tests that
+    override those very latencies to 0 or 1, so no test in the suite exercises the declared timing model.
+  template: 'templates/arbitration_ip.template.yaml:379-390: hierarchical_bitmap_selection declares expected_performance_properties
+    [bitmap_update_latency_applied, hierarchical_scan_latency_applied] and burst_min_issue_count declares
+    [pending_count_read_latency, burst_read_latency, min_calculation_latency], against timing_model values
+    tenant_scan 6, sq_scan 8, grant_selected_sq 2, pending_count_read 3, burst_read 4, min_burst_calculation
+    2 (:311-335).'
+  model: Every test in tests/test_arbitration_ip.py constructs the model with scan_latency=1, which src/ip_model_automation/arbitration_ip.py:81-86
+    turns into tenant_scan_latency=0, sq_scan_latency=0 and grant_latency=0; test_arbitration_updates_hierarchical_bitmaps
+    (:29-50) and test_arbitration_issue_pipeline_uses_min_burst_and_pending_count (:84-109) additionally
+    pass pending_count_latency=1, burst_read_latency=1 and burst_calc_latency=1, and neither makes any
+    assertion about env.now or about a recorded time.
+  why: 'The declared timing is in fact charged correctly at default settings - measured per operation
+    and end to end, the new_command_to_issue path is exactly the declared 38 cycles - but that is verified
+    by nothing: the suite runs the model only in a configuration where the hierarchical scan costs nothing,
+    and any regression in bitmap_update, tenant_scan, sq_scan, grant, pending_count_read, burst_read or
+    min_burst_calculation would pass every test. It is also why M4''s uncharged operation left no failing
+    test behind.'

@@ -337,7 +337,17 @@ timing_model:
     - name: no_stall_command_issue
       cycles: 23
       ns: 46
-      path: [port_scan, tenant_scan, sq_scan, grant_selected_sq]
+      path: [bitmap_update, port_scan, tenant_scan, sq_scan, grant_selected_sq]
+      note: >-
+        bitmap_update was missing from this list while the 23-cycle total
+        included it: the four operations named summed to 20, which is what the
+        model charges from PORT_SCAN to the end of GRANT. The total was right
+        and the path was incomplete, so the operation is added rather than the
+        figure reduced -- a scan reaches a new command only after the bitmaps
+        that made it visible were refreshed, so the refresh belongs on the path.
+        The model charges bitmap_update only when the bitmaps are actually
+        dirty, which is the case this path describes; an idle re-scan with
+        nothing to refresh pays the 1-cycle retry instead and is not this path.
     - name: new_command_to_issue
       cycles: 38
       ns: 76

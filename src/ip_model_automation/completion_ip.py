@@ -23,6 +23,7 @@ class CompletionIpModel:
         usage_assessment_latency=20,
         base_refill_latency=10,
         metrics_publish_latency=10,
+        port_latency=1,
         pending_depth: Optional[int] = None,
         tenant_weights: Optional[Dict[str, int]] = None,
         start_refill_process=False,
@@ -40,6 +41,7 @@ class CompletionIpModel:
         self.usage_assessment_latency = usage_assessment_latency
         self.base_refill_latency = base_refill_latency
         self.metrics_publish_latency = metrics_publish_latency
+        self.port_latency = port_latency
         # accept declares READY -> BACKPRESSURE on incoming_valid_and_queue_full,
         # and the only declared queue is tenant_pending_queues at depth
         # unbounded -- which can never be full, so the declared transition was
@@ -309,11 +311,20 @@ class CompletionIpModel:
                 # nothing could reach.
                 self._debit(tenant_id, costs)
                 self.pending[tenant_id].popleft()
-                # completion_output_port: capacity 1, one completion per dispatch
-                # tick. Held across the emit so the declared contention is real.
-                with self.completion_output_port.request() as port:
-                    yield port
-                    yield self.env.timeout(self.emit_latency)
+                # completion_output_port: capacity 1, declared latency 1 cycle.
+                # That cycle was charged nowhere, and charging it inline would
+                # make the declared no_stall_completion path 18 rather than the
+                # 17 the template states and the model matches. So the port pays
+                # it in the background: the scheduler holds the port across the
+                # emit and hands the release to a process that lets the port's
+                # own latency elapse first. The completion is done at the end of
+                # the emit -- the end-to-end path is unchanged -- while the port
+                # stays busy a cycle longer, which is where a capacity of 1 is
+                # supposed to be felt.
+                port = self.completion_output_port.request()
+                yield port
+                yield self.env.timeout(self.emit_latency)
+                self.env.process(self._release_output_port(port))
                 self.completed.append((self.env.now, command))
                 self.metrics[f"completed_{command.kind.lower()}"] += 1
                 self.metrics["completed_commands"] += 1
@@ -329,6 +340,15 @@ class CompletionIpModel:
                 # declared shortcut was never taken.
                 if not self._any_pending_command():
                     break
+
+    def _release_output_port(self, port):
+        """Let the port's declared latency elapse, then release it.
+
+        Runs off the scheduler's critical path deliberately: the cost belongs to
+        the port, not to the completion that just left it.
+        """
+        yield self.env.timeout(self.port_latency)
+        self.completion_output_port.release(port)
 
     def refill_once(self) -> None:
         """Restore base tokens and snapshot the window, all at once.

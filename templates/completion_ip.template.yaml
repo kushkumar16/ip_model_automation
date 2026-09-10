@@ -185,6 +185,17 @@ resources:
     capacity: 1
     bandwidth: one_completion_per_dispatch_tick
     latency_cycles: 1
+    note: >-
+      This cycle is charged off the completion's critical path, not on it:
+      end_to_end_paths.no_stall_completion states 17 cycles over a list this
+      port is not in, so charging it inline would make that path 18 and break a
+      figure the model matches exactly. The model holds the port across the emit
+      and releases it one cycle later from a background process, so the
+      completion finishes at the end of the emit while the port stays busy for
+      its own latency -- which is where a capacity of 1 is meant to be felt.
+      See decisions/completion_ip.md. The bandwidth figure above remains
+      unmodelled and unreconciled with the 17-cycle path; that is recorded
+      there too rather than resolved in the model'"'"'s favour.
     arbitration: weighted_round_robin
     sharing_scope: global
 

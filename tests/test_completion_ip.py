@@ -222,6 +222,46 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertEqual(len(model.completed), 1)
         self.assertIn(1, seen, "the emit never held the completion output port")
 
+    def test_completion_output_port_latency_is_charged_off_the_critical_path(self):
+        """The port's declared latency_cycles: 1, which was charged nowhere.
+
+        Charging it inline would make the declared no_stall_completion path 18
+        rather than the 17 the template states and the model matches, so the
+        port pays it in the background: the completion is done at the end of the
+        emit, and the port stays busy one cycle longer. Both halves are pinned
+        here -- a port latency that changed nothing observable would be no better
+        than the uncharged one it replaced.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, log_level="CRITICAL")
+        model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        busy = []
+
+        def watcher():
+            while True:
+                busy.append((env.now, model.completion_output_port.count))
+                yield env.timeout(1)
+
+        env.process(watcher())
+        env.run(until=120)
+
+        self.assertEqual(len(model.completed), 1)
+        completed_at = model.completed[0][0]
+        # The declared path is measured from the command becoming pending, which
+        # is the end of ENQUEUE -- the scheduler cannot select what has not
+        # arrived. tenant_select 8 + token_check 5 + emit 4 = 17.
+        self.assertEqual(completed_at - model.service_latency, 8 + 5 + 4)
+
+        held = [now for now, count in busy if count]
+        self.assertEqual(
+            len(held),
+            model.emit_latency + model.port_latency,
+            "the port was not busy for its own latency beyond the emit",
+        )
+        self.assertEqual(max(held), completed_at, "the port was released before its declared latency elapsed")
+
     def test_completion_scheduler_takes_the_more_candidates_shortcut(self):
         """EMIT -> SELECT_TENANT is declared, and was never taken.
 

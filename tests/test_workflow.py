@@ -59,6 +59,46 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertIn("def completion_scheduler_process", text)
             self.assertIn("def refill_process", text)
 
+    def test_generator_scaffold_does_not_ack_the_peer_at_submission(self):
+        """The scaffold must not hand back the `input_q.put` event.
+
+        An unbounded Store completes a put at the instant of submission, so a
+        model built on that acknowledges its peer at t=0 whatever state it is
+        in, and declared backpressure stalls nothing upstream. This scaffold
+        emitted exactly that, and completion_ip shipped with it -- filed as
+        round-two M8. Guarded here so a regenerated model cannot be born with it
+        again.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        generator_path = repo_root / "tools" / "generate_model_scaffold.py"
+        spec = importlib.util.spec_from_file_location("generate_model_scaffold", generator_path)
+        generator = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(generator)
+
+        for template_name in ("completion_ip.template.yaml", "arbitration_ip.template.yaml"):
+            with self.subTest(template=template_name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    target = generator.write_scaffold(
+                        repo_root / "templates" / template_name, Path(tmpdir), stdout=False
+                    )
+                    text = target.read_text(encoding="utf-8")
+                    self.assertNotIn("return self.input_q.put(command)", text)
+                    self.assertIn("accepted = self.env.event()", text)
+                    self.assertIn("return accepted", text)
+                    # Templates write states either as plain strings or as
+                    # mappings with a description. fsm_state must carry the
+                    # name in both cases: a dict there breaks every tool that
+                    # reads it.
+                    self.assertNotIn("self.fsm_state['arbiter_main'] = {", text)
+                    self.assertNotIn("'description':", text)
+
+        # The command wait point is read from the template, and a peer-requested
+        # *configuration* interface must not be mistaken for the command path.
+        yaml = generator.require_yaml()
+        template = yaml.safe_load((repo_root / "templates" / "completion_ip.template.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(generator.command_accept_wait_points(template), ["accept.ENQUEUE"])
+
     def test_validation_flow_scaffold_check_all_templates(self):
         repo_root = Path(__file__).resolve().parents[1]
         validator_path = repo_root / "tools" / "validate_ip_flow.py"

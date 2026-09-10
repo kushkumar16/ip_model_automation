@@ -30,6 +30,20 @@ def require_yaml():
     return yaml
 
 
+def state_name(state: Any) -> str:
+    """The name of a declared FSM state.
+
+    Templates write states either as plain strings or as mappings carrying a
+    description. Both are valid; the scaffold used to emit whichever it found,
+    so a template using mappings produced `fsm_state[...] = {'name': 'RESET',
+    'description': ...}` -- a dict where every tool that reads `fsm_state`
+    expects the state's name.
+    """
+    if isinstance(state, dict):
+        return str(state.get("name", ""))
+    return str(state)
+
+
 def sanitize_identifier(name: str) -> str:
     cleaned = re.sub(r"\W+", "_", name.strip().lower())
     if not cleaned or cleaned[0].isdigit():
@@ -44,6 +58,29 @@ def inline_repr(values: list[str]) -> str:
 def timing_operations(template: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     delays = template.get("timing_model", {}).get("fsm_process_delays", [])
     return {entry["fsm"]: entry.get("operations", []) for entry in delays if "fsm" in entry}
+
+
+def command_accept_wait_points(template: dict[str, Any]) -> list[str]:
+    """The `<fsm>.<STATE>` points a peer *submitting a command* waits at.
+
+    `submit()` serves one kind of interface: an input whose wait_model names the
+    peer as requester, and whose transactions carry commands. The command test
+    matters -- a configuration interface can be peer-requested and inbound too
+    (qos_config_if is), and its wait point has nothing to do with accepting a
+    command. Carrying `cmd_id` is the behavioural test for "this is the command
+    path", rather than trusting a `type:` spelling.
+    """
+    points: list[str] = []
+    for interface in template.get("interfaces", []) or []:
+        wait_model = interface.get("wait_model") or {}
+        if interface.get("direction") != "input" or wait_model.get("requester") != "peer":
+            continue
+        carries_commands = any(
+            "cmd_id" in (transaction.get("fields") or []) for transaction in (interface.get("transactions") or [])
+        )
+        if carries_commands:
+            points.extend(str(point) for point in (wait_model.get("wait_points") or []))
+    return points
 
 
 def first_operation_cycles(operations: list[dict[str, Any]]) -> int:
@@ -108,9 +145,18 @@ def render_scaffold(template: dict[str, Any]) -> str:
 
     for fsm in fsm_processes:
         method = sanitize_identifier(str(fsm["name"]))
-        first_state = (fsm.get("states") or ["IDLE"])[0]
+        first_state = state_name((fsm.get("states") or ["IDLE"])[0])
         lines.append(f"        self.fsm_state[{fsm['name']!r}] = {first_state!r}")
         lines.append(f"        self.env.process(self.{method}_process())")
+
+    accept_points = command_accept_wait_points(template)
+    if accept_points:
+        wait_point_note = f"        Complete it at the declared wait point: {', '.join(accept_points)}."
+    else:
+        wait_point_note = (
+            "        This template declares no peer wait point on an input interface,"
+            " so choose the state that holds the peer and complete it there."
+        )
 
     lines.extend(
         [
@@ -118,8 +164,27 @@ def render_scaffold(template: dict[str, Any]) -> str:
             "",
             "",
             "    def submit(self, command: Command):",
+            '        """Offer a command, returning the peer\'s accept.',
+            "",
+            "        The returned event must NOT be the `input_q.put`: an unbounded Store",
+            "        completes a put at the instant of submission, so the peer would be",
+            "        acknowledged at t=0 no matter what state this model is in, and a full",
+            "        queue would stall nothing upstream. This scaffold used to emit exactly",
+            "        that, and a generated model shipped with it.",
+            "",
+            wait_point_note,
+            "",
+            "        TODO: in the consuming process, take both halves and complete the",
+            "        accept once the command has actually landed:",
+            "",
+            "            command, accepted = yield self.input_q.get()",
+            "            ...  # hold the declared state across its declared cost",
+            "            accepted.succeed()",
+            '        """',
             '        self.logger.info("submit cmd=%s kind=%s", command.cmd_id, command.kind)',
-            "        return self.input_q.put(command)",
+            "        accepted = self.env.event()",
+            "        self.input_q.put((command, accepted))",
+            "        return accepted",
             "",
         ]
     )
@@ -129,7 +194,7 @@ def render_scaffold(template: dict[str, Any]) -> str:
         method = sanitize_identifier(name)
         operations = timing_by_fsm.get(name, [])
         default_cycles = first_operation_cycles(operations)
-        states = ", ".join(str(state) for state in fsm.get("states", []))
+        states = ", ".join(state_name(state) for state in fsm.get("states", []))
         lines.extend(
             [
                 f"    def {method}_process(self):",

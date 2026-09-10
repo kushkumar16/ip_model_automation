@@ -24,7 +24,7 @@ behavior from the DLD.
 | `reviews/` | **Normalization review findings**, one file per reviewed IP: claims that a reshape changed meaning while preserving tokens. Tracked; each finding must be fixed or dismissed by name in `decisions/`. |
 | `prompt_packs/` | Generated LLM prompt bundles (gitignored). |
 | `docs/proposals/` | Design proposals for stages not yet wired in, or wired in only partly. Each states what it costs as plainly as what it buys. |
-| `docs/` | Project documentation: `project_overview.md` (single consolidated doc, **canonical source**), `project_overview.docx` (hand-maintained Word rendering of the md, kept in sync by `tools/check_overview_sync.py`), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
+| `docs/` | Project documentation: `project_overview.md` (single consolidated doc, **canonical source**), `project_overview.docx` (Word rendering **generated** from the md by `tools/render_overview_docx.py`, guarded by `tools/check_overview_sync.py`), `diagrams/` (standalone SVG flow diagrams, gallery at `diagrams/index.html`). |
 | `tools/` | Pipeline tools: extraction, gates, generators, validation, automation. |
 | `schemas/`, `examples/` | Template contract schema and authoring examples. |
 | `skills/`, `harness/`, `agents/` | LLM generation skill, loop stages/pass criteria, agent contracts (model generation, DLD normalization). |
@@ -482,6 +482,7 @@ resolves to the same default, so nothing breaks in the meantime).
 - `tools/run_code_coverage.py`: line coverage of the models from the unit tests (coverage.py).
 - `tools/run_ci.py` / `.githooks/pre-push`: local CI — every repo-wide gate in one command, read from the harness, and the tracked hook that runs it before a push (`git config core.hooksPath .githooks`).
 - `tools/check_code_style.py`: coding-style gate (ruff lint + format; `--fix` to auto-repair).
+- `tools/render_overview_docx.py`: renders `project_overview.docx` from `project_overview.md` and stamps it. The Word copy is generated output, not a document to edit.
 - `tools/check_overview_sync.py`: provenance guard that the Word overview matches `project_overview.md` (`--stamp` to re-record after a sync).
 - `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).
 - `tools/check_model_provenance.py`: records/checks which template revision each model was last built against (`templates/model_baselines.json`).

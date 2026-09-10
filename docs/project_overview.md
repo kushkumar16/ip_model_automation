@@ -14,7 +14,8 @@ project status is at the [end of this document](#part-5--current-status).
 > **Prefer Word?** This document also exists as
 > [project_overview.docx](project_overview.docx) with all diagrams embedded —
 > same content, shareable outside the repo. This Markdown file is the canonical
-> source; the docx is a hand-maintained rendering of it, kept honest by a
+> source; the docx is **generated** from it by
+> `python tools/render_overview_docx.py`, kept honest by a
 > provenance check (`python tools/check_overview_sync.py`) that fails if the
 > docx drifts from this file.
 >

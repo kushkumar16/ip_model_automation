@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Provenance guard for the hand-maintained Word copy of the project overview.
+"""Provenance guard for the generated Word copy of the project overview.
+
+The docx is produced by ``tools/render_overview_docx.py``; this module only
+answers whether it is current. It records and compares a hash — ``--stamp``
+asserts agreement rather than producing it, so stamping without re-rendering
+makes the file claim a sync that does not exist.
 
 ``docs/project_overview.docx`` is a curated Word rendering of the canonical
 Markdown ``docs/project_overview.md`` (same content, embedded diagram images,

@@ -337,15 +337,28 @@ class ArbitrationIpModel:
         # simulated time and the declared reset behaviour was not modelled.
         self._set_fsm_state("arbiter_main", "RESET")
         yield self.env.timeout(self.latency["reset"])
+        # RESET -> IDLE is declared with clear_state as its action, and IDLE is
+        # the only declared way into a scan. The loop used to start at PORT_SCAN
+        # and enter IDLE only when the bitmaps happened to be dirty -- which
+        # _clear_state() has just made false -- so both declared entries into
+        # IDLE (RESET -> IDLE and GRANT -> IDLE) were never taken and the model
+        # took undeclared RESET -> PORT_SCAN and GRANT -> PORT_SCAN instead.
+        self._set_fsm_state("arbiter_main", "IDLE")
         self._clear_state()
         while True:
-            # bitmap_update is charged only when the bitmaps are actually dirty.
-            # Charging it on every idle spin would invent 3 cycles the timing
-            # model does not price for a scan that had nothing to refresh.
+            # IDLE is held on every pass, so it is occupied rather than merely
+            # assigned, and the loop is re-entered here after a grant -- which is
+            # the declared GRANT -> IDLE. bitmap_update is still charged only
+            # when the bitmaps are actually dirty: charging it on every idle spin
+            # would invent 3 cycles the timing model does not price for a refresh
+            # with nothing to refresh. An idle pass instead costs the 1-cycle
+            # retry the template prices for a poll that found nothing.
+            self._set_fsm_state("arbiter_main", "IDLE")
             if self.bitmap_dirty:
-                self._set_fsm_state("arbiter_main", "IDLE")
                 yield self.env.timeout(self.latency["bitmap"])
                 self._update_pending_bitmaps()
+            else:
+                yield self.env.timeout(self.latency["backpressure_retry"])
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
             # PORT_SCAN -> STALL on no_eligible_port is declared, and was never
@@ -354,6 +367,13 @@ class ArbitrationIpModel:
             if not any(self.port_pending_bitmap.values()):
                 self._set_fsm_state("arbiter_main", "STALL")
                 self.metrics["stalls"] += 1
+                # increment_no_eligible_stall is the declared action on this
+                # transition, and no_port_pending_stalls is the metric the
+                # template names for it. It used to be incremented only inside
+                # select_sq(), which this branch returns before ever reaching --
+                # so the counter recorded a mid-scan race and never the stall it
+                # is named for.
+                self.metrics["no_port_pending_stalls"] += 1
                 self.logger.debug("arbiter stall no eligible port time=%s", self.env.now)
                 yield self.env.timeout(self.latency["backpressure_retry"])
                 continue
@@ -395,15 +415,28 @@ class ArbitrationIpModel:
                 self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
                 yield self.env.timeout(1)
                 continue
-            while not self.output_ready:
-                self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
-                self.metrics["output_stalls"] += 1
-                self.metrics["output_backpressure_cycles"] += 1
-                self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
-                yield self.env.timeout(1)
+            # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
+            # resuming on issue_ready, and the declared invariants are that
+            # commands are popped only when issue_ready is true and that queue
+            # entries remain pending during downstream backpressure. The check
+            # used to run only *before* the request: once ISSUE_REQUEST was
+            # entered, issue_ready dropping during those 3 cycles did nothing and
+            # the commands were popped anyway, with output_backpressure_cycles
+            # left at 0. The request is now re-driven until it completes with
+            # issue_ready still high, so nothing leaves the queue during a stall.
+            while True:
+                while not self.output_ready:
+                    self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                    self.metrics["output_stalls"] += 1
+                    self.metrics["output_backpressure_cycles"] += 1
+                    self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
+                    yield self.env.timeout(1)
 
-            self._set_fsm_state("issue_pipeline", "ISSUE_REQUEST")
-            yield self.env.timeout(self.latency["issue"])
+                self._set_fsm_state("issue_pipeline", "ISSUE_REQUEST")
+                yield self.env.timeout(self.latency["issue"])
+                if self.output_ready:
+                    break
+                self.logger.warning("issue_ready dropped during request selection=%s time=%s", selection, self.env.now)
             issued_cmds = []
             queue = self.queues[selection["port_id"]][selection["tenant_id"]][selection["sq_id"]]
             for _ in range(issue_count):

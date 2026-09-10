@@ -168,30 +168,86 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertEqual(len(model.pending["T0"]), 1, "the held command was never enqueued")
         self.assertEqual(model.fsm_state["accept"], "READY")
 
-    def test_completion_output_port_serialises_emits(self):
-        """completion_output_port is declared capacity 1 and was not modelled.
+    def test_completion_output_port_serialises_competing_requesters(self):
+        """completion_output_port is declared capacity 1, and must enforce it.
 
-        With no resource there was no contention: two ready completions could
-        emit in the same instant. The port now holds for the emit, so the second
-        waits for the first.
+        The previous version of this test submitted two commands and asserted
+        the gap between their completions. It could not fail: the model runs one
+        completion_scheduler process, which emits its commands one after another
+        whatever the port's capacity is. Capacity 1, 1000 and 1,000,000 all gave
+        the same completion times, and so did replacing the port with a no-op --
+        the gap being measured was the scheduler's own loop.
+
+        A capacity is only observable when something contends for it, so this
+        drives a second requester of the declared port and asserts it waits.
+        Raising the capacity makes this test fail, which is the property the old
+        one lacked.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, emit_latency=6, log_level="CRITICAL")
+        holds = []
+
+        def requester(name, hold):
+            with model.completion_output_port.request() as port:
+                yield port
+                holds.append((name, env.now))
+                yield env.timeout(hold)
+
+        env.process(requester("first", 6))
+        env.process(requester("second", 6))
+        env.run(until=100)
+
+        self.assertEqual([name for name, _ in holds], ["first", "second"])
+        self.assertEqual(holds[0][1], 0)
+        self.assertEqual(holds[1][1], 6, "the second requester did not wait for the port")
+
+    def test_completion_scheduler_holds_the_port_across_its_emit(self):
+        """The scheduler must actually take the declared port, not bypass it."""
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=6
+        )
+        model.configure_tenant("T0", read=4, write=4, read_bw=40, write_bw=40)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
+
+        seen = []
+
+        def watcher():
+            while True:
+                seen.append(model.completion_output_port.count)
+                yield env.timeout(1)
+
+        env.process(watcher())
+        env.run(until=40)
+        self.assertEqual(len(model.completed), 1)
+        self.assertIn(1, seen, "the emit never held the completion output port")
+
+    def test_completion_scheduler_takes_the_more_candidates_shortcut(self):
+        """EMIT -> SELECT_TENANT is declared, and was never taken.
+
+        Every command used to re-enter the loop at IDLE, which the template
+        declares no transition into. With a second command already pending the
+        scheduler must go straight back to SELECT_TENANT instead, taking the
+        declared `more_candidates` edge. The select itself is still paid -- that
+        is what SELECT_TENANT costs -- so what this pins is the path, not a
+        saving: tenant_select + token_check + emit, with no idle poll between.
         """
         env = simpy.Environment()
         model = CompletionIpModel(
-            env,
-            service_latency=1,
-            tenant_select_latency=1,
-            token_check_latency=1,
-            emit_latency=6,
-            log_level="CRITICAL",
+            env, service_latency=1, tenant_select_latency=8, token_check_latency=1, emit_latency=1
         )
         model.configure_tenant("T0", read=4, write=4, read_bw=40, write_bw=40)
         model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
         model.submit(Command("r1", "READ", tenant_id="T0", size_kb=4))
-        env.run(until=400)
+        env.run(until=100)
 
         self.assertEqual(len(model.completed), 2)
         first, second = model.completed[0][0], model.completed[1][0]
-        self.assertGreaterEqual(second - first, 6, "the port did not serialise the two emits")
+        self.assertEqual(
+            second - first,
+            8 + 1 + 1,
+            "the second completion did not re-pay a tenant select it should have skipped",
+        )
 
     def test_completion_refill_once_restores_base_tokens_and_snapshots_window(self):
         env = simpy.Environment()

@@ -32,32 +32,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import simpy  # noqa: E402
 
-from ip_model_automation.common import Command, Descriptor  # noqa: E402
-from ip_model_automation.ip import (  # noqa: E402
-    ArbitrationIpModel,
-    AxiInterconnectIpModel,
-    DmaSubsystemModel,
-    MailboxIrqSubsystemModel,
-)
+from ip_model_automation.common import Command  # noqa: E402
+from ip_model_automation.ip import ArbitrationIpModel  # noqa: E402
 
 # Fast member latencies so sweeps finish quickly; relative behavior is what
 # the experiments measure, matching the approach used by the unit tests.
-FAST_GDMA = {
-    "fetch_latency": 2,
-    "read_latency": 2,
-    "write_latency": 2,
-    "completion_latency": 2,
-    "channel_scan_latency": 1,
-    "irq_latency": 1,
-}
-FAST_INTERCONNECT = {
-    "decode_latency": 1,
-    "arbitration_latency": 1,
-    "slave_latency": 1,
-    "response_latency": 1,
-    "write_join_latency": 1,
-    "error_latency": 1,
-}
 FAST_ARBITRATION = {
     "bitmap_latency": 1,
     "port_scan_latency": 1,
@@ -70,24 +49,6 @@ FAST_ARBITRATION = {
     "burst_calc_latency": 1,
     "burst_debit_latency": 1,
     "issue_latency": 1,
-}
-FAST_COMPLETION = {
-    "service_latency": 1,
-    "tenant_select_latency": 1,
-    "token_check_latency": 1,
-    "emit_latency": 1,
-    "retry_latency": 1,
-}
-FAST_CONTROLLER = {
-    "sample_latency": 1,
-    "pending_latency": 1,
-    "filter_latency": 1,
-    "priority_latency": 1,
-    "delivery_latency": 1,
-    "ack_latency": 1,
-    "eoi_latency": 1,
-    "register_latency": 1,
-    "software_latency": 1,
 }
 
 
@@ -104,123 +65,6 @@ class Experiment:
 # --------------------------------------------------------------------------- #
 # Runners: one deterministic workload per experiment, returning a metrics row.
 # --------------------------------------------------------------------------- #
-def run_dma_outstanding_limit(limit: int) -> Dict[str, object]:
-    """8 descriptors through the DMA subsystem vs. fabric outstanding credit."""
-    env = simpy.Environment()
-    subsystem = DmaSubsystemModel(
-        env,
-        gdma_kwargs=dict(FAST_GDMA),
-        interconnect_kwargs={
-            **FAST_INTERCONNECT,
-            "outstanding_limit": limit,
-            "slave_latency": 10,
-            "response_latency": 10,
-        },
-        arbitration_kwargs=dict(FAST_ARBITRATION),
-        completion_kwargs=dict(FAST_COMPLETION),
-    )
-    subsystem.configure_channel(0)
-    for index in range(8):
-        subsystem.submit(
-            Descriptor(
-                f"d{index}",
-                channel_id=0,
-                src_addr=0x1000 * (index + 1),
-                dst_addr=0x2000 * (index + 1),
-                length_bytes=4096,
-            )
-        )
-    env.run(until=6000)
-    return {
-        "descriptors_completed": subsystem.metrics["descriptors_completed"],
-        "last_end_to_end_latency": subsystem.metrics["end_to_end_latency"],
-        "fabric_backpressure_events": subsystem.metrics["fabric_backpressure_events"],
-        "interconnect_outstanding_stalls": subsystem.interconnect.metrics["outstanding_stalls"],
-        "gdma_read_stalls": subsystem.gdma.metrics["read_stalls"],
-    }
-
-
-def run_dma_qos_budget(budget: float) -> Dict[str, object]:
-    """6 descriptors vs. per-tenant completion token budget, refilled every 400 ticks."""
-    env = simpy.Environment()
-    subsystem = DmaSubsystemModel(
-        env,
-        gdma_kwargs=dict(FAST_GDMA),
-        interconnect_kwargs=dict(FAST_INTERCONNECT),
-        arbitration_kwargs=dict(FAST_ARBITRATION),
-        completion_kwargs=dict(FAST_COMPLETION),
-    )
-    subsystem.configure_channel(0)
-    subsystem.configure_qos("T0", token_budget=budget)
-
-    def refill_driver():
-        while True:
-            yield env.timeout(400)
-            subsystem.refill_qos()
-
-    env.process(refill_driver())
-    for index in range(6):
-        subsystem.submit(
-            Descriptor(
-                f"d{index}",
-                channel_id=0,
-                src_addr=0x1000 * (index + 1),
-                dst_addr=0x2000 * (index + 1),
-                length_bytes=4096,
-            )
-        )
-    env.run(until=6000)
-    return {
-        "descriptors_completed": subsystem.metrics["descriptors_completed"],
-        "last_end_to_end_latency": subsystem.metrics["end_to_end_latency"],
-        "completion_token_stalls": subsystem.completion.metrics["token_stalls"],
-        "completion_backlog_events": subsystem.metrics["completion_backlog_events"],
-    }
-
-
-def run_mailbox_storm_window(window: int) -> Dict[str, object]:
-    """6-message flood on one channel vs. storm throttle window (storm_limit=2)."""
-    env = simpy.Environment()
-    subsystem = MailboxIrqSubsystemModel(
-        env,
-        controller_kwargs=dict(FAST_CONTROLLER),
-        storm_limit=2,
-        storm_window=window,
-    )
-    subsystem.configure_channel(0)
-    for index in range(6):
-        subsystem.send(0, f"m{index}")
-    env.run(until=6000)
-    return {
-        "messages_serviced": subsystem.metrics["messages_serviced"],
-        "last_round_trip_latency": subsystem.metrics["round_trip_latency"],
-        "storm_throttle_events": subsystem.metrics["storm_throttle_events"],
-        "storm_mask_releases": subsystem.metrics["storm_mask_releases"],
-        "level_reasserts_used": subsystem.metrics["level_reasserts_used"],
-    }
-
-
-def run_mailbox_storm_limit(limit: int) -> Dict[str, object]:
-    """6-message flood on one channel vs. storm limit (storm_window=40)."""
-    env = simpy.Environment()
-    subsystem = MailboxIrqSubsystemModel(
-        env,
-        controller_kwargs=dict(FAST_CONTROLLER),
-        storm_limit=limit,
-        storm_window=40,
-    )
-    subsystem.configure_channel(0)
-    for index in range(6):
-        subsystem.send(0, f"m{index}")
-    env.run(until=6000)
-    return {
-        "messages_serviced": subsystem.metrics["messages_serviced"],
-        "last_round_trip_latency": subsystem.metrics["round_trip_latency"],
-        "storm_throttle_events": subsystem.metrics["storm_throttle_events"],
-        "delivered_irqs": subsystem.controller.metrics["delivered_irqs"],
-    }
-
-
 def run_arbitration_burst_credit(credit: int) -> Dict[str, object]:
     """12 commands across two tenants vs. device/tenant burst credit."""
     env = simpy.Environment()
@@ -238,59 +82,9 @@ def run_arbitration_burst_credit(credit: int) -> Dict[str, object]:
     }
 
 
-def run_axi_outstanding_limit(limit: int) -> Dict[str, object]:
-    """8 reads through the interconnect vs. outstanding-transaction credit."""
-    env = simpy.Environment()
-    model = AxiInterconnectIpModel(
-        env,
-        **{**FAST_INTERCONNECT, "outstanding_limit": limit, "slave_latency": 8, "response_latency": 8},
-    )
-    model.add_route(0x0, 0x10000, "mem0")
-    for index in range(8):
-        model.submit(Command(f"r{index}", "READ", addr=0x100 * (index + 1)))
-    env.run(until=2000)
-    return {
-        "responses": len(model.responses),
-        "last_read_latency": model.metrics["read_latency"],
-        "outstanding_stalls": model.metrics["outstanding_stalls"],
-        "read_grants": model.metrics["read_grants"],
-    }
-
-
 EXPERIMENTS: Dict[str, Experiment] = {
     exp.name: exp
     for exp in [
-        Experiment(
-            name="dma_outstanding_limit",
-            description="DMA subsystem: descriptor end-to-end latency and engine throttling"
-            " vs. interconnect outstanding limit.",
-            param="outstanding_limit",
-            values=[1, 2, 4, 8],
-            runner=run_dma_outstanding_limit,
-        ),
-        Experiment(
-            name="dma_qos_budget",
-            description="DMA subsystem: completion delay and token stalls vs. per-tenant QoS token budget"
-            " (refill every 400 ticks).",
-            param="token_budget",
-            values=[2, 4, 8, 1_000_000],
-            runner=run_dma_qos_budget,
-        ),
-        Experiment(
-            name="mailbox_storm_window",
-            description="Mailbox IRQ subsystem: message service and round-trip latency vs. storm throttle window"
-            " (flooded channel, storm_limit=2).",
-            param="storm_window",
-            values=[10, 20, 40, 80],
-            runner=run_mailbox_storm_window,
-        ),
-        Experiment(
-            name="mailbox_storm_limit",
-            description="Mailbox IRQ subsystem: throttle behavior vs. storm limit (storm_window=40).",
-            param="storm_limit",
-            values=[1, 2, 4, 8],
-            runner=run_mailbox_storm_limit,
-        ),
         Experiment(
             name="arbitration_burst_credit",
             description="Arbitration IP: issued commands and burst stalls vs. device/tenant burst credit"
@@ -298,14 +92,6 @@ EXPERIMENTS: Dict[str, Experiment] = {
             param="burst_credit",
             values=[1, 2, 4, 16],
             runner=run_arbitration_burst_credit,
-        ),
-        Experiment(
-            name="axi_outstanding_limit",
-            description="AXI interconnect: read latency and stalls vs. outstanding-transaction credit"
-            " (8 reads, slow slave).",
-            param="outstanding_limit",
-            values=[1, 2, 4, 8],
-            runner=run_axi_outstanding_limit,
         ),
     ]
 }

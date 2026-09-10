@@ -29,7 +29,8 @@ with it satisfies all of them.
 The first run of this review on `sram_ctrl_ip` found six real disagreements after
 all of that was green, including a declared capacity never enforced, three
 undeclared FSM transitions, and an assertion that could not fail for any
-implementation. See `decisions/sram_ctrl_ip.md`.
+implementation. That IP has since been retired and its decisions file with it, so
+there is no longer a document to point at — the record survives in git history.
 
 ## Inputs
 

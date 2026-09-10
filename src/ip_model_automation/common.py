@@ -19,26 +19,7 @@ IP_ARTIFACTS: Dict[str, IpArtifact] = {
         "arbitration_ip", "dlds/arbitration_ip_dld.md", "templates/arbitration_ip.template.yaml"
     ),
     "completion_ip": IpArtifact("completion_ip", "dlds/completion_ip_dld.md", "templates/completion_ip.template.yaml"),
-    "gdma_ip": IpArtifact("gdma_ip", "dlds/gdma_ip_dld.md", "templates/gdma_ip.template.yaml"),
     "timer_ip": IpArtifact("timer_ip", "dlds/timer_ip_dld.md", "templates/timer_ip.template.yaml"),
-    "axi_interconnect_ip": IpArtifact(
-        "axi_interconnect_ip", "dlds/axi_interconnect_ip_dld.md", "templates/axi_interconnect_ip.template.yaml"
-    ),
-    "interrupt_controller_ip": IpArtifact(
-        "interrupt_controller_ip",
-        "dlds/interrupt_controller_ip_dld.md",
-        "templates/interrupt_controller_ip.template.yaml",
-    ),
-    "mailbox_ip": IpArtifact("mailbox_ip", "dlds/mailbox_ip_dld.md", "templates/mailbox_ip.template.yaml"),
-    "spi_master_ip": IpArtifact("spi_master_ip", "dlds/spi_master_ip_dld.md", "templates/spi_master_ip.template.yaml"),
-    "i3c_ip": IpArtifact("i3c_ip", "dlds/i3c_ip_dld.md", "templates/i3c_ip.template.yaml"),
-    "dma_subsystem": IpArtifact("dma_subsystem", "dlds/dma_subsystem_dld.md", "templates/dma_subsystem.template.yaml"),
-    "mailbox_irq_subsystem": IpArtifact(
-        "mailbox_irq_subsystem",
-        "dlds/mailbox_irq_subsystem_dld.md",
-        "templates/mailbox_irq_subsystem.template.yaml",
-    ),
-    "sram_ctrl_ip": IpArtifact("sram_ctrl_ip", "dlds/sram_ctrl_ip_dld.md", "templates/sram_ctrl_ip.template.yaml"),
 }
 
 

@@ -10,21 +10,24 @@ Which of the three applies depends on what the DLD left open.
 
 **A value it does not state** — a depth, a channel count, a threshold. Do not
 pick a number. Make it configuration, leave it unset, and record that it is
-unset. There is a way not to choose here, so choosing is inventing. `gdma_ip`'s
-per-channel `outstanding_read_depth` and `timer_ip`'s `channel_count` are both
-left unset for exactly this reason.
+unset. There is a way not to choose here, so choosing is inventing. `timer_ip`'s
+`channel_count` is left unset for exactly this reason — §12 leaves the number of
+channels open, so the model takes it as configuration rather than picking one.
 
 **A behaviour with no null option** — the model reaches that point and has to do
 something, and every branch is a choice. Here, and only here, choose the
 conservative branch: label it, record it, and record the evidence that makes it
-conservative rather than merely convenient. `sram_ctrl_ip` rejecting an invalid
-configuration at accept time is one of these.
+conservative rather than merely convenient. `timer_ip` rejecting an invalid
+register configuration at accept time and entering `ACCESS_ERROR` is one of
+these: the model is handed the write and must do something with it, and refusing
+it is the branch that cannot silently produce wrong numbers.
 
 **A behaviour where even the conservative branch is a guess** — the DLD names a
 state but not the policy that reaches it, or not what happens once it is there.
 Do not model it. Record it under *Declared but not implemented* below, with what
-the model does instead and what a reader must not trust as a result. `gdma_ip`'s
-`CHECK_PRIORITY` and `RESP_ERROR` are both this.
+the model does instead and what a reader must not trust as a result. `timer_ip`'s
+`debug_freeze` gate and its `kick_reload` cost are both this; both are written up
+under *Declared but not implemented* in [`timer_ip.md`](timer_ip.md).
 
 *Never invent silently* survives all three and was never the part in question.
 What was in question is that "choose a conservative default", read on its own,

@@ -32,6 +32,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -97,6 +98,68 @@ def check_all(ips: list[str] | None = None) -> list[str]:
     return errors
 
 
+def unoccupied_wait_points(ips: list[str]) -> list[str]:
+    """Declared wait points that are assigned but never observably occupied.
+
+    ``enters_state`` above is a regex over the model source, so it answers "does
+    this assignment appear in the file?" and not "does the process ever park
+    there?". Those come apart exactly where it matters: a state assigned and
+    overwritten with no ``yield`` between exists at no simulated time, so an
+    interface declared to block there does not observably block anywhere, and
+    this gate passed anyway.
+
+    Answering it properly needs the model run, which ``check_declared_transitions``
+    already does, so its occupancy record is reused rather than rebuilt. These are
+    reported and do **not** fail the gate: the declared wait points that fall in
+    here are a standing question about the models, not a regression introduced by
+    whoever runs this next, and turning them into a hard failure is a decision for
+    a person.
+    """
+    spec = importlib.util.spec_from_file_location("_cdt", REPO_ROOT / "tools" / "check_declared_transitions.py")
+    if spec is None or spec.loader is None:  # pragma: no cover
+        return []
+    cdt = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = cdt
+    spec.loader.exec_module(cdt)
+
+    # check_declared_transitions imports the models and runs their tests, both of
+    # which need src/ and the repo root importable. It does this in its own main();
+    # reusing it as a library means doing it here.
+    for path in (REPO_ROOT / "src", REPO_ROOT):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+    yaml = require_yaml()
+    notes: list[str] = []
+    for ip in ips:
+        template_path = TEMPLATES_DIR / f"{ip}.template.yaml"
+        if not template_path.is_file():
+            continue
+        try:
+            result = cdt.check_ip(ip, template_path)
+        except Exception as exc:  # pragma: no cover - never let a note break the gate
+            notes.append(f"{ip}: could not measure state occupancy ({exc})")
+            continue
+        unobservable = {(f, st) for f, st in result.get("unobservable_states", [])}
+        if not unobservable:
+            continue
+        template: dict[str, Any] = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+        for interface in template.get("interfaces", []):
+            wait_model = interface.get("wait_model") or {}
+            for point in wait_model.get("wait_points", []):
+                point = str(point)
+                if point == TODO or "." not in point:
+                    continue
+                fsm, state = point.split(".", 1)
+                if (fsm, state) in unobservable:
+                    notes.append(
+                        f"{ip}: interface `{interface.get('name')}` declares "
+                        f"{wait_model.get('mode')} at `{point}`, and the model assigns that state but "
+                        f"never holds it for any simulated time - nothing can observe it parked there"
+                    )
+    return notes
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ips", nargs="*", help="IP names to check (default: every promoted template)")
@@ -109,7 +172,15 @@ def main(argv: list[str]) -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print(f"wait model coverage: OK ({len(ips)} models implement every declared wait point)")
+    notes = unoccupied_wait_points(ips)
+    print(f"wait model coverage: OK ({len(ips)} models assign every declared wait point)")
+    if notes:
+        print(
+            f"  NOTE {len(notes)} declared wait point(s) are assigned but never observably occupied. "
+            "This gate checks the assignment, not the occupancy."
+        )
+        for note in notes:
+            print(f"  - {note}")
     return 0
 
 

@@ -29,12 +29,23 @@ Usage::
     python tools/check_declared_transitions.py                 # every IP
     python tools/check_declared_transitions.py sram_ctrl_ip    # one
     python tools/check_declared_transitions.py --strict        # exit 1 on undeclared
+
+A note on what "taken" means here. This tool used to count any assignment to
+``fsm_state`` as a transition taken, which made it blind to the defect it was
+closest to catching: a state assigned and then overwritten with no ``yield``
+between exists at no simulated time, so no test, log or trace can observe it, and
+a scenario naming it in ``fsm_coverage`` claims coverage no assertion could have.
+The transition out of such a state was reported as taken and the state as
+reached. It now records the clock alongside each change and reports those states
+as ``NEVER OCCUPIED``. A state the constructor sets is excluded: it is readable
+before ``env.run()`` and so genuinely assertable.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import importlib
 import inspect
 import io
@@ -68,6 +79,17 @@ def load_template(path: Path) -> dict[str, Any]:
 def state_names(fsm: dict[str, Any]) -> set[str]:
     """A state may be a bare name or a mapping carrying a description."""
     return {str(s.get("name")) if isinstance(s, dict) else str(s) for s in fsm.get("states", [])}
+
+
+def declared_states(template: dict[str, Any]) -> set[tuple[str, str]]:
+    """Every ``(fsm, state)`` the template lists, so an unobservable state the
+    template never declared is not reported against the contract."""
+    out: set[tuple[str, str]] = set()
+    for fsm in template.get("fsm_processes", []):
+        if isinstance(fsm, dict):
+            name = str(fsm.get("name"))
+            out |= {(name, state) for state in state_names(fsm)}
+    return out
 
 
 def states_without_exit(template: dict[str, Any]) -> list[tuple[str, str]]:
@@ -113,10 +135,27 @@ class RecordingState(dict):
     here.
     """
 
-    def __init__(self, initial: dict, sink: list[Transition]):
+    def __init__(self, initial: dict, sink: list[Transition], occupancy: "Occupancy", now=None):
         super().__init__(initial)
         self._sink = sink
         self._entered: set[str] = set()
+        # Recording the transition alone cannot answer whether the state it left
+        # was ever *occupied*. A state assigned and overwritten with no yield in
+        # between exists at no simulated time, so no test, log or trace can ever
+        # see it -- and this tool used to count the resulting transition as taken,
+        # which made the defect invisible to the one check closest to catching it.
+        # The clock is what distinguishes the two, so it is recorded alongside.
+        self._occupancy = occupancy
+        self._now = now or (lambda: None)
+        self._since: dict[str, Any] = {}
+        for fsm, state in initial.items():
+            occupancy.assigned.setdefault(str(fsm), set()).add(str(state))
+            # The constructor's value is assertable before env.run() is ever
+            # called, so it counts as observable even though no time passes while
+            # it holds. Reporting it would repeat the mistake this check exists to
+            # catch: claiming a state cannot be seen when a test can in fact see
+            # it.
+            occupancy.observable.setdefault(str(fsm), set()).add(str(state))
 
     def __setitem__(self, fsm, state) -> None:
         previous = self.get(fsm)
@@ -127,6 +166,18 @@ class RecordingState(dict):
         self._entered.add(fsm)
         if not (first and previous == state):
             self._sink.append((str(fsm), str(previous), str(state)))
+
+        now = self._now()
+        key = str(fsm)
+        if now is not None and previous is not None:
+            entered_at = self._since.get(key, now)
+            if now > entered_at:
+                # Time passed while `previous` was the current state, so somebody
+                # could have observed it.
+                self._occupancy.observable.setdefault(key, set()).add(str(previous))
+        self._since[key] = now
+        self._occupancy.assigned.setdefault(key, set()).add(str(state))
+        self._occupancy.resting[key] = str(state)
         super().__setitem__(fsm, state)
 
 
@@ -137,10 +188,41 @@ def model_classes(ip: str) -> list[type]:
     return [obj for _, obj in inspect.getmembers(module, inspect.isclass) if obj.__module__ == module.__name__]
 
 
+@dataclasses.dataclass
+class Occupancy:
+    """Which declared states were ever actually occupied, and which were not.
+
+    ``assigned`` is every state the model ever wrote. ``observable`` is the
+    subset that was still the current state when the clock advanced. A state in
+    the first and not the second, and not a process's resting state at the end of
+    the run, exists at no simulated time: the assignment is immediately
+    overwritten, so no test, log or trace can observe it, and a scenario naming it
+    in ``fsm_coverage`` is claiming coverage no assertion could ever have.
+    """
+
+    assigned: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    #: States that were assertable: held while the clock advanced, or set by the
+    #: constructor and therefore readable before the simulation starts.
+    observable: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    resting: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def unobservable(self) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for fsm, states in self.assigned.items():
+            seen = self.observable.get(fsm, set())
+            for state in sorted(states - seen):
+                # The state a process rests in when the run ends was occupied
+                # from its assignment to the end of the simulation.
+                if self.resting.get(fsm) != state:
+                    out.append((fsm, state))
+        return sorted(out)
+
+
 @contextlib.contextmanager
 def recording(classes: list[type]):
     """Swap each constructed model's ``fsm_state`` for a recording one."""
     taken: list[Transition] = []
+    occupancy = Occupancy()
     originals = {cls: cls.__init__ for cls in classes}
 
     def make(original):
@@ -148,14 +230,16 @@ def recording(classes: list[type]):
             original(self, *args, **kwargs)
             state = getattr(self, "fsm_state", None)
             if isinstance(state, dict) and not isinstance(state, RecordingState):
-                self.fsm_state = RecordingState(state, taken)
+                env = getattr(self, "env", None)
+                now = (lambda e=env: e.now) if env is not None else None
+                self.fsm_state = RecordingState(state, taken, occupancy, now)
 
         return wrapper
 
     for cls, original in originals.items():
         cls.__init__ = make(original)
     try:
-        yield taken
+        yield taken, occupancy
     finally:
         for cls, original in originals.items():
             cls.__init__ = original
@@ -178,7 +262,7 @@ def check_ip(ip: str, template_path: Path) -> dict[str, Any]:
     declared = declared_transitions(template)
     no_exit = states_without_exit(template)
     classes = model_classes(ip)
-    with recording(classes) as taken:
+    with recording(classes) as (taken, occupancy):
         passed, test_count = run_tests(ip)
     observed = set(taken)
     undeclared = sorted(observed - declared)
@@ -196,6 +280,8 @@ def check_ip(ip: str, template_path: Path) -> dict[str, Any]:
         "never_taken": sorted(declared - observed),
         "declared": sorted(declared),
         "states_without_exit": no_exit,
+        # Declared states the model wrote but never held for any simulated time.
+        "unobservable_states": [t for t in occupancy.unobservable() if t in declared_states(template)],
         "declared_count": len(declared),
         "observed_count": len(observed),
     }
@@ -211,7 +297,8 @@ def format_report(results: list[dict[str, Any]]) -> list[str]:
             f"{len(result['undeclared'])} undeclared "
             f"({len(result['undeclared_from_dead_end'])} from a state with no declared exit), "
             f"{len(result['never_taken'])} never taken, "
-            f"{len(result['states_without_exit'])} states with no declared exit "
+            f"{len(result['states_without_exit'])} states with no declared exit, "
+            f"{len(result['unobservable_states'])} declared states never observably occupied "
             f"({result['test_count']} tests)"
         )
         if not result["tests_passed"]:
@@ -223,6 +310,8 @@ def format_report(results: list[dict[str, Any]]) -> list[str]:
             lines.append(f"  UNDECLARED{marker} {fsm}: {source} -> {target}")
         for fsm, source, target in result["never_taken"]:
             lines.append(f"  NEVER TAKEN {fsm}: {source} -> {target}")
+        for fsm, state in result["unobservable_states"]:
+            lines.append(f"  NEVER OCCUPIED {fsm}: {state}  (assigned, overwritten before the clock moved)")
     lines.append("")
     lines.append("* the state it leaves has no declared exit at all, so the template constrained nothing here")
     return lines

@@ -6,7 +6,7 @@ order:
 1. [What does this system do for me?](#part-1--what-this-system-does-for-you)
 2. [How do I generate a model and unit tests from my DLD?](#part-2--how-to-go-from-a-dld-to-a-model--tests)
 3. [What actually happens in the background?](#part-3--how-it-works-behind-the-scenes)
-4. [Show me one real IP, end to end.](#part-4--worked-example-mailbox_ip-end-to-end)
+4. [Show me one real IP, end to end.](#part-4--worked-example-completion_ip-end-to-end)
 
 The exact CLI command reference lives in the [README](../README.md). Current
 project status is at the [end of this document](#part-5--current-status).
@@ -14,7 +14,8 @@ project status is at the [end of this document](#part-5--current-status).
 > **Prefer Word?** This document also exists as
 > [project_overview.docx](project_overview.docx) with all diagrams embedded —
 > same content, shareable outside the repo. This Markdown file is the canonical
-> source; the docx is a hand-maintained rendering of it, kept honest by a
+> source; the docx is **generated** from it by
+> `python tools/render_overview_docx.py`, kept honest by a
 > provenance check (`python tools/check_overview_sync.py`) that fails if the
 > docx drifts from this file.
 >
@@ -40,7 +41,7 @@ project status is at the [end of this document](#part-5--current-status).
 **You provide:** a DLD (Design-Level Document) — an ordinary markdown (or
 Word) file describing your IP block: what it does, its interfaces, its
 internal state machines (FSMs), and how many cycles each operation takes.
-Examples live in `dlds/` — e.g. [timer_ip_dld.md](../dlds/timer_ip_dld.md).
+Examples live in `dlds/` — e.g. [completion_ip_dld.md](../dlds/completion_ip_dld.md).
 
 **You get back:**
 
@@ -175,8 +176,9 @@ flowchart TD
    python tools\validate_dld_flow.py
    ```
 
-This exact path added `mailbox_ip`, `spi_master_ip`, and `i3c_ip` to the repo:
-brand-new DLDs in, validated models and tests out.
+This exact path added `mailbox_ip`, `spi_master_ip`, and `i3c_ip`: brand-new
+DLDs in, validated models and tests out. (All three have since been retired —
+see Part 5. The path is what this section is about, not the passengers.)
 
 ## What makes a DLD "extract well"
 
@@ -420,7 +422,7 @@ DLD's timing table specified.
 
 Every model also ships with:
 
-- **IP-tagged logging** (`[mailbox_ip] …`) with `log_level` / `log_file`
+- **IP-tagged logging** (`[completion_ip] …`) with `log_level` / `log_file`
   constructor arguments (default `WARNING`; also appends to `run.log`), and
 - a **`metrics` dict** the unit tests assert on (counts, latencies,
   occupancies).
@@ -796,177 +798,234 @@ flowchart TB
 
 ---
 
-# Part 4 — Worked example: `mailbox_ip`, end to end
+# Part 4 — Worked example: `completion_ip`, end to end
 
-`mailbox_ip` was added to this repo through the exact pipeline described in
-Parts 2 and 3 — a brand-new DLD in, a validated model and tests out. Every
-artifact below exists in the repo, so you can open each file and follow along.
+`completion_ip` went through the exact pipeline described in Parts 2 and 3 — a
+DLD in, a validated model and tests out. Every artifact below exists in the
+repo, so you can open each file and follow along.
 
 ## The input: one markdown DLD
 
-[dlds/mailbox_ip_dld.md](../dlds/mailbox_ip_dld.md) describes a multi-channel
-inter-processor mailbox in ordinary prose: purpose and scope, four interfaces,
-five FSMs with their states, a per-FSM timing table, and an honest **Open
-Items** list. The parts the extractor will lean on look like this:
+[dlds/completion_ip_dld.md](../dlds/completion_ip_dld.md) describes command
+completion scheduling with per-tenant QoS in ordinary prose: purpose and scope,
+three interfaces, three FSMs with their states and transitions, QoS rules, a
+per-FSM timing table, and an honest **Open Items** list. The parts the extractor
+leans on look like this:
 
 ```text
-### 6.2 Message Push FSM
-
-Role: Accept sender messages and enqueue them into the channel FIFO.
+### 6.2 Completion Scheduler FSM
 
 States:
-- IDLE
-- ACCEPT_MESSAGE
-- CHECK_SPACE
-- ENQUEUE
-- REJECT_FULL
 
-| FSM/process      | Runs as                      | Delay model                       |
-| ---              | ---                          | ---                               |
-| Message Push FSM | Parallel per-channel process | Accept message: 1 cycle = 2 ns. … |
+- `RESET`: initialize scheduling order.
+- `IDLE`: wait for pending completion candidates.
+- `SELECT_TENANT`: choose next tenant based on weighted order.
+- `CHECK_TOKENS`: verify IOPS/BW tokens.
+- `WAIT_TOKENS`: no sufficient tokens for selected command.
+- `EMIT`: send completion to output interface.
+- `STALL_OUTPUT`: completion output not ready.
+
+| FSM/process              | Runs as                    | Delay model                              |
+| ---                      | ---                        | ---                                      |
+| Completion Scheduler FSM | Parallel scheduler process | Tenant select: 8 cycles = 16 ns. Token check: 5 cycles = 10 ns. … |
 ```
 
-And what the author *didn't* know yet (section 12, Open Items): the number of
-channels, message width, FIFO depth per channel, interrupt target routing, and
-overflow-error behavior. These stay visible through the whole flow instead of
-being silently guessed.
+And what the author didn't know yet (section 11, Open Items): the exact
+completion queue depth, error behavior for inactive tenants, whether service
+latency is supplied externally or generated inside the IP, and whether the
+scheduler shares arbitration policy code with Arbitration IP. These stay visible
+through the whole flow instead of being silently guessed.
 
 ## Step 1 — extract a draft spec + gaps report
 
 ```powershell
-python tools\dld_to_template.py dlds\mailbox_ip_dld.md
+python tools\dld_to_template.py dlds\completion_ip_dld.md
 ```
 
 ```text
-wrote draft:  templates\mailbox_ip.template.draft.yaml
-wrote report: reports\mailbox_ip.gaps.md
-wrote doc:    reports\template_docs\mailbox_ip.template.draft.html
+wrote draft:  templates\completion_ip.template.draft.yaml
+wrote report: reports\completion_ip.gaps.md
+wrote doc:    reports\template_docs\completion_ip.template.draft.html
 Next: resolve TODO_REVIEW markers, lint, check coverage, then promote.
 ```
 
-The extractor found the mechanical facts on its own, and flagged exactly the
-judgment-needing parts (this is the real report):
+The extractor found the mechanical facts on its own, including each interface's
+wait model, and flagged the judgment-needing parts. This is the real report,
+abridged only where it repeats itself:
 
 ```text
 ## Extracted
-- FSMs (5): register_access, message_push, message_pop, doorbell, interrupt_notify
-- Interfaces (4): register_if, sender_message_if, receiver_message_if, interrupt_output_if
-- Declared fsm_count: 5
+
+- FSMs (3): accept, completion_scheduler, refill
+- Interfaces (3): accepted_command_if, qos_configuration_if, completion_queue_if
+- Declared fsm_count: 3
+
+### Interface wait models
+
+- `accepted_command_if`: wait_for_ack_inline (stated in DLD)
+- `qos_configuration_if`: wait_for_ack_inline (stated in DLD)
+- `completion_queue_if`: wait_for_ack_inline (stated in DLD)
 
 ## Missing / To Review
+
+- fsm_processes.accept: no exit stated from `RESET`; TODO_REVIEW transition emitted
+  — state how this state is left, or that it is terminal
+  … (one such line per state, 15 in total)
 - commands: not derivable from DLD; TODO_REVIEW placeholder emitted
 - test_scenarios: author from DLD behavior; TODO_REVIEW placeholder emitted
 - functionality_model.invariants/apis/state_variables: complete from DLD
 
 ## DLD Open Items
-- Number of mailbox channels.
-- Message width.
-- FIFO depth per channel.
-- Interrupt target routing policy.
-- Whether an overflow raises an error interrupt.
+
+- Exact completion queue depth.
+- Error behavior for inactive tenants.
+- Whether command service latency is supplied externally or generated inside
+- Whether completion scheduler shares arbitration policy code with Arbitration
 ```
+
+Two things in that output are worth reading as the extractor being honest about
+its own limits rather than as defects in the DLD. It asks for an exit from all
+fifteen states even though §6 does state transitions — it reads them from a
+separate `Transitions:` block it does not attach per state. And the last two Open
+Items are cut off mid-sentence, because those bullets wrap across lines in the
+source. Both are why a reviewer reads the DLD rather than the report alone.
 
 ## Step 2 — review: resolve every `TODO_REVIEW`
 
 A reviewer (human or LLM under the contract) replaced each marker using only
-DLD-stated behavior. For example, the DLD's Message Flow section ("a message is
-accepted only when the target channel FIFO has space; a full channel applies
-backpressure") became this reviewed command entry:
+DLD-stated behavior. The DLD's QoS rules — a completion needs its tenant alive,
+its tokens available, and the output ready — became this reviewed command entry:
 
 ```yaml
-- name: SEND_MESSAGE
-  description: Sender writes a message into a channel FIFO.
-  fields: [channel_id, message]
-  valid_conditions: [channel_enabled, fifo_has_space]
-  completion_conditions: [message_enqueued]
-  error_conditions: [fifo_full]
-  functional_effects: [enqueue_message, raise_doorbell]
-  timing_effects: [push_delay]
+- name: READ
+  description: Read completion candidate.
+  fields: [tenant_id, cmd_id, size_kb, status]
+  valid_conditions: [service_latency_elapsed, tenant_alive, read_tokens_available, output_ready]
+  completion_conditions: [completion_emitted]
+  error_conditions: [tenant_inactive, read_token_starvation]
 ```
 
-The unresolved Open Items were handled the conservative way: channel count and
-FIFO depth became **model constructor parameters** with bounded defaults
-(`num_channels=4`, `fifo_depth=8`, recorded in the template's `queues:`
-section), so experiments can sweep them and nothing is hard-wired on a guess.
+The Open Items were handled without inventing numbers. "Exact completion queue
+depth" is unanswered by the DLD, so the template does not answer it either — the
+queue is declared `depth: unbounded` and carries a note saying why:
+
+```yaml
+- name: tenant_pending_queues
+  depth: unbounded
+  depth_note: DLD leaves completion queue depth open; the model keeps per-tenant
+    pending queues unbounded — backpressure comes from QoS token gating and
+    output cpl_ready, not queue capacity.
+```
+
+That is the first of the three cases in [decisions/README.md](../decisions/README.md):
+an unstated value is left unset and the backpressure that does exist is named,
+rather than a depth being picked so the field looks filled in.
 
 ## Step 3 — pass the gates, promote to golden
 
 ```powershell
-python tools\check_template_coverage.py templates\mailbox_ip.template.draft.yaml dlds\mailbox_ip_dld.md --strict
-python tools\template_lint.py templates\mailbox_ip.template.yaml
+python tools\check_template_coverage.py templates\completion_ip.template.draft.yaml dlds\completion_ip_dld.md --strict
+python tools\template_lint.py templates\completion_ip.template.yaml
 ```
 
-For `mailbox_ip` these proved: all five DLD FSM names and the declared
-`fsm_count: 5` are captured, every state list matches, zero `TODO_REVIEW`
-markers remain, and the YAML satisfies the schema/contract. The draft was then
-renamed to the golden
-[templates/mailbox_ip.template.yaml](../templates/mailbox_ip.template.yaml) —
-from here on, the DLD is never read again.
+```text
+  DLD-stated wait models: {'accepted_command_if': 'wait_for_ack_inline', …}
+    accepted_cmd_if: wait_for_ack_inline (source=dld)
+    qos_config_if: wait_for_ack_inline (source=dld)
+    completion_queue_if: wait_for_ack_inline (source=dld)
+coverage: OK
+templates/completion_ip.template.yaml: OK
+```
+
+For `completion_ip` these proved: all three DLD FSM names and the declared
+`fsm_count: 3` are captured, every state list matches, each interface's wait
+model is carried through with its provenance (`source=dld`, not an assumed
+default), zero `TODO_REVIEW` markers remain, and the YAML satisfies the
+schema/contract. The draft was then renamed to the golden
+[templates/completion_ip.template.yaml](../templates/completion_ip.template.yaml)
+— from here on, the DLD is never read again.
 
 ## Step 4 — scaffold + implement the model
 
 ```powershell
-python tools\generate_model_scaffold.py templates\mailbox_ip.template.yaml --output-dir src\ip_model_automation
+python tools\generate_model_scaffold.py templates\completion_ip.template.yaml --output-dir src\ip_model_automation
 ```
 
-Each of the five template FSMs became one concurrent SimPy process in
-[src/ip_model_automation/mailbox_ip.py](../src/ip_model_automation/mailbox_ip.py)
-(the process/queue picture is in Part 3, "What a generated model looks like" —
-also standalone at [diagrams/07_example_mailbox_model.svg](diagrams/07_example_mailbox_model.svg)).
-Here is the real
-`message_push` process — note how every line traces back to the template: the
-state names, the `message_fifo` bounded queue, the doorbell hand-off, and the
-`REJECT_FULL` drop path:
+Each of the three template FSMs became one concurrent SimPy process in
+[src/ip_model_automation/completion_ip.py](../src/ip_model_automation/completion_ip.py).
+Here is the real scheduler loop — every line traces back to the template: the
+state names, the per-operation timeouts from `timing_model`, and one branch per
+declared stall condition:
 
 ```python
-def message_push_process(self):
+def completion_scheduler(self):
     while True:
-        self.fsm_state["message_push"] = "IDLE"
-        channel_id, message = yield self.sender_if.get()
-        self.fsm_state["message_push"] = "ACCEPT_MESSAGE"
-        yield self.env.timeout(self.lat["push"])
-        self.fsm_state["message_push"] = "CHECK_SPACE"
-        fifo = self.message_fifos[channel_id]
-        if len(fifo) < self.fifo_depth:
-            fifo.append(message)
-            self.fsm_state["message_push"] = "ENQUEUE"
-            self.metrics["enqueued_messages"] += 1
-            yield self.doorbell_queue.put(channel_id)
-        else:
-            self.fsm_state["message_push"] = "REJECT_FULL"
-            self.metrics["dropped_on_full"] += 1
-            self.logger.warning("channel fifo full channel=%s message dropped", channel_id)
+        self.fsm_state["completion_scheduler"] = "IDLE"
+        yield self.env.timeout(self.tenant_select_latency)
+        self.fsm_state["completion_scheduler"] = "SELECT_TENANT"
+        tenant_id = self._select_tenant()
+        if tenant_id is None:
+            self.metrics["stalls"] += 1
+            yield self.env.timeout(self.retry_latency)
+            continue
+
+        command = self.pending[tenant_id][0]
+        self.fsm_state["completion_scheduler"] = "CHECK_TOKENS"
+        yield self.env.timeout(self.token_check_latency)
+        …
+        if not self.output_ready:
+            # completion_queue_if is wait_for_ack_inline: while cpl_ready is
+            # low the completion is held here rather than emitted.
+            self.fsm_state["completion_scheduler"] = "STALL_OUTPUT"
+            self.metrics["output_stalls"] += 1
+            yield self.env.timeout(self.retry_latency)
+            continue
 ```
+
+The comment on `STALL_OUTPUT` is the point of the wait-model machinery: the
+template said where this interface blocks, and `check_wait_model_coverage.py`
+is a hard gate that the process actually parks in that state and publishes it
+through `fsm_state`.
 
 ## Step 5 — unit tests from the template's scenarios
 
-The template's `test_scenarios:` section is the test plan. Its second scenario:
+The template's `test_scenarios:` section is the test plan. Its third scenario:
 
 ```yaml
-- name: full_fifo_applies_backpressure
-  description: Sending beyond FIFO depth drops or stalls messages on a full channel.
-  input_sequence: [CONFIG_CHANNEL_0, SEND_MESSAGE_BURST]
-  expected_functional_behavior: [dropped_on_full_counted]
-  fsm_coverage: [message_push.CHECK_SPACE, message_push.REJECT_FULL]
+- name: output_backpressure_holds_completion
+  description: Ready completion remains pending while completion output is blocked.
+  input_sequence: [T0_READ_4K, cpl_ready_low]
+  expected_functional_behavior: [completion_not_popped_until_ready]
+  expected_performance_properties: [output_stall_incremented]
+  fsm_coverage: [completion_scheduler.STALL_OUTPUT]
 ```
 
-became this test in [tests/test_mailbox_ip.py](../tests/test_mailbox_ip.py):
+became this test in [tests/test_completion_ip.py](../tests/test_completion_ip.py):
 
 ```python
-def test_full_fifo_applies_backpressure(self):
+def test_completion_output_backpressure_holds_ready_command(self):
     env = simpy.Environment()
-    model = MailboxIpModel(env, fifo_depth=4)
-    model.set_receiver_enabled(False)
-    model.configure_channel(0)
-    for index in range(6):
-        model.send_message(0, f"m{index}")
-    env.run(until=20)
-    self.assertEqual(model.metrics["enqueued_messages"], 4)
-    self.assertEqual(model.metrics["dropped_on_full"], 2)
+    model = CompletionIpModel(
+        env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+    )
+    model.configure_tenant("T0", read=1, write=1, read_bw=4, write_bw=4)
+    model.set_completion_ready(False)
+    model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
+    env.run(until=8)
+    self.assertEqual(model.completed, [])
+    self.assertEqual(len(model.pending["T0"]), 1)
+    self.assertGreater(model.metrics["output_stalls"], 0)
+    # completion_queue_if is wait_for_ack_inline: the scheduler holds the
+    # completion at its wait point instead of emitting it.
+    self.assertEqual(model.fsm_state["completion_scheduler"], "STALL_OUTPUT")
+    model.set_completion_ready(True)
+    env.run(until=14)
 ```
 
-Six sends into a depth-4 FIFO with the receiver stalled: exactly 4 enqueue,
-exactly 2 hit `REJECT_FULL` — the DLD's backpressure statement, now executable.
+A command with tokens to spare and nowhere to go: nothing completes, the command
+stays pending, the stall is counted, and the FSM is observably parked in the
+state the template named — then the output opens and it drains. The scenario's
+`fsm_coverage` is checked, not just asserted.
 
 ## Step 6 — the repo-wide gate
 
@@ -974,27 +1033,25 @@ exactly 2 hit `REJECT_FULL` — the DLD's backpressure statement, now executable
 python tools\validate_dld_flow.py
 ```
 
-Green means, for `mailbox_ip` specifically: its template lints and covers its
+Green means, for `completion_ip` specifically: its template lints and covers its
 DLD, the scaffold check finds the model class with one process per FSM, every
-FSM appears in a test scenario, and its unit tests pass alongside the rest of
-the suite. From that point `mailbox_ip` is a first-class citizen — it was later
-reused unchanged as the doorbell source inside the `mailbox_irq_subsystem`.
+FSM appears in a test scenario, each declared wait point is a state the model
+actually enters, and its unit tests pass alongside the rest of the suite.
 
 ## Where each DLD statement ended up
 
 | DLD says | Template captures it as | Model implements it | Test proves it |
 | --- | --- | --- | --- |
-| "A full channel applies backpressure to the sender" (§4.2) | `SEND_MESSAGE.error_conditions: [fifo_full]`; `queues.message_fifo.blocking_behavior: backpressure` | `message_push_process` `REJECT_FULL` branch | `test_full_fifo_applies_backpressure` |
-| "Enqueue precedes doorbell; doorbell precedes interrupt" (§11) | `sequential_paths: message_to_interrupt_path` | `doorbell_queue` → `interrupt_pending_queue` hand-offs | `test_message_enqueue_delivers_and_interrupts` |
-| "Doorbell interrupt is level, asserted until software clears" (§4.4) | `interrupt_output_if.wait_model: wait_for_ack_before_next_request`, `outstanding_limit: 1`, waiting in `interrupt_notify.WAIT_SW_CLEAR` | `interrupt_notify` parks in `WAIT_SW_CLEAR` after asserting; `clear_interrupt()` releases it | `test_interrupt_waits_for_software_clear_before_next_assertion` |
-| Per-FSM cycle counts (§11 timing table) | `timing_model.fsm_process_delays` | latency constructor parameters (`self.lat`) | timing assertions in per-IP tests |
-| Open Items: channel count, FIFO depth (§12) | gaps report + `queues.message_fifo.depth` | `num_channels` / `fifo_depth` constructor parameters | swept by `run_experiments.py` scenarios |
+| "Completion output not ready" holds the completion (§4.3, §6.2) | `completion_queue_if.wait_model.mode: wait_for_ack_inline`; `completion_scheduler.STALL_OUTPUT` | `completion_scheduler` parks in `STALL_OUTPUT` while `output_ready` is false | `test_completion_output_backpressure_holds_ready_command` |
+| "Accept must complete before the scheduler can select" (§10) | `sequential_paths.command_completion_path` | `accept_process` → `pending[tenant]` → `completion_scheduler` | `test_completion_emits_read` |
+| "Insufficient tokens leave the command pending until refill" (§7) | `qos.insufficient_token_behavior: command_remains_pending_until_refill`; `completion_scheduler.WAIT_TOKENS` | token check debits only on success; otherwise retry | `test_completion_token_starvation_blocks_until_refill` |
+| Per-FSM cycle counts (§10 timing table) | `timing_model.fsm_process_delays` | `tenant_select_latency`, `token_check_latency`, `emit_latency` constructor parameters | timing assertions in the per-IP tests |
+| Open Item: completion queue depth (§11) | gaps report + `queues.tenant_pending_queues.depth: unbounded` with `depth_note` | per-tenant deques, unbounded; backpressure via tokens and `cpl_ready` | `test_completion_output_backpressure_holds_ready_command` |
+| Open Item: error behavior for inactive tenants (§11) | `error_conditions: [tenant_inactive, …]` on every command | command parked at accept; scheduler stalls if the tenant dies later | `test_completion_inactive_tenant_parks_command_at_accept`, `test_completion_scheduler_stalls_when_tenant_goes_inactive` |
 
 One footnote: this walkthrough shows the manual, stage-by-stage path so each
-artifact is visible. Today the automated runner does all of it from the DLD
-drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
-
----
+artifact is visible. Today the automated runner does all of it from the DLD drop
+onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
@@ -1002,39 +1059,50 @@ drop onward — `python tools\auto_ip_pipeline.py` (Part 3).
 them in about a minute, and the pre-push hook runs it before anything leaves the
 machine.*
 
-## Modeled IPs (10)
+## Modeled IPs (2)
 
 | IP | What it models |
 | --- | --- |
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. |
 | `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. |
-| `gdma_ip` | Descriptor-driven DMA with multiple parallel/sequential FSMs. |
-| `timer_ip` | Register, tick, compare, watchdog, debug-freeze, and interrupt timer behavior. |
-| `axi_interconnect_ip` | AXI read/write routing, arbitration, response routing, decode-error handling. |
-| `interrupt_controller_ip` | Source sampling, pending/filter/priority, delivery, ACK, EOI, software interrupts. |
-| `mailbox_ip` | Multi-channel inter-processor messaging: per-channel FIFOs, doorbells, masked interrupt aggregation. |
-| `spi_master_ip` | SPI master with TX/RX byte FIFOs, bit-shift transfer engine, chip-select framing, masked interrupts. |
-| `i3c_ip` | I3C master with queued command engine, bit-level SDR transfer engine, IBI detection/arbitration, masked interrupts. |
-| `sram_ctrl_ip` | Banked on-chip buffer SRAM: request accept and bank decode, round-robin bank scheduling with ECC check and read-modify-write, background ECC scrub. The first IP whose DLD arrived off-shape and was normalized into the pipeline. |
 
-## Modeled subsystems (2)
+## Retired IPs
 
-| Subsystem | What it composes |
-| --- | --- |
-| `dma_subsystem` | Connected data-mover composing `gdma_ip`, `axi_interconnect_ip`, `arbitration_ip`, `completion_ip`. Descriptors fan out to an engine leg and a fabric leg; the subsystem IRQ fires when both legs complete. A backpressure monitor couples fabric congestion to GDMA memory readiness and completion backlog to arbitration issue readiness. |
-| `mailbox_irq_subsystem` | Interrupt-delivery cluster composing `mailbox_ip` (doorbell source) and `interrupt_controller_ip` (delivery fabric) with a modeled software service loop (ack, read, level deassert, EOI). The bridge acknowledges each mailbox doorbell as it hands the level to the controller, satisfying the mailbox's one-outstanding-interrupt wait model. True level-triggered semantics (EOI re-pends while unserviced messages remain) and duty-cycle interrupt-storm throttling. |
+Ten IPs were retired on 2026-09-10: `gdma_ip`, `timer_ip`, `sram_ctrl_ip`,
+`axi_interconnect_ip`, `interrupt_controller_ip`, `mailbox_ip`, `spi_master_ip`,
+`i3c_ip`, and both subsystems (`dma_subsystem`, `mailbox_irq_subsystem`). Their
+DLDs, templates, models, tests and recorded decisions are in git history.
+
+Two artifacts survive as **test fixtures** rather than as IPs, because the test
+suite depended on them for reasons unrelated to their being IPs:
+`tests/fixtures/normalization/mailbox_ip_dld.md` feeds the normalization
+tokenizer tests a structurally rich document to damage in specific ways, and
+`tests/fixtures/templates/mailbox_ip.template.yaml` is the template two tests
+mutate by queue and FSM name. Neither is in the registry and neither is
+processed by any pipeline stage.
+
+**What that costs the gates, stated plainly.** Several now pass by having no
+subjects: `dld_normalization` checks zero documents (`sram_ctrl_ip` was the only
+IP with an author source), the subsystem wiring stage inside
+`validate_dld_flow.py` checks zero subsystems, and `review_findings` checks zero
+reviews. `decisions/` and `reviews/` hold only their READMEs. A green run
+currently certifies much less than it did, and an empty `reviews/` is not a claim
+that the two surviving models are faithful — only that nobody has looked.
 
 ## Pipeline maturity
 
-- `mailbox_ip`, `spi_master_ip`, and `i3c_ip` were added **end-to-end through
-  the pipeline**: brand-new DLDs went through extraction, review, modeling,
-  and testing, and the whole suite validated. The same path carries both
-  subsystems.
+*The first two bullets are the pipeline's track record, not a description of
+what the repo currently holds — every IP they name has since been retired. They
+are kept because they are the evidence that the path works.*
+
+- `mailbox_ip`, `spi_master_ip`, and `i3c_ip` **were** added end-to-end through
+  the pipeline: brand-new DLDs went through extraction, review, modeling, and
+  testing, and the whole suite validated. The same path carried both subsystems.
 - `sram_ctrl_ip` went further: its DLD arrived **in another house style**, with
   no FSM or interface the extractor could read, and was normalized into shape
   before any of the above ran. Both agent stages passed on the first attempt.
-  It is the proof that the pipeline accepts documents as engineers write them,
-  not only documents written to its conventions.
+  It remains the proof that the pipeline accepts documents as engineers write
+  them, not only documents written to its conventions.
 - **Every gate runs in one command, locally.** `python tools/run_ci.py` runs the
   repo-wide gates — read from the harness, so adding a stage adds it to CI — and
   `.githooks/pre-push` runs them before a push. There is no hosted CI by choice,

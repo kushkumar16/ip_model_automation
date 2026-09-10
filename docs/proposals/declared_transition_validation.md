@@ -1,5 +1,12 @@
 # Proposal: check declared transitions at runtime, and gate what is left over
 
+**Note added 2026-09-10:** every IP this proposal measures — `sram_ctrl_ip`,
+`axi_interconnect_ip`, `gdma_ip`, `timer_ip` — has since been retired. The counts
+and findings below are a record of an analysis run against the repo as it stood,
+and are deliberately left as they were rather than restated against a repo that
+no longer contains its subjects. `tools/check_declared_transitions.py` still
+exists and still works on whatever IPs are present.
+
 **Status:** step 1 done, steps 2–3 **deferred by decision on 2026-08-09** — see
 §7. `tools/check_declared_transitions.py` exists and reports; it is not a gate,
 and no gate is planned for now. `--emit-findings` can file an IP's disagreements

@@ -18,7 +18,7 @@ from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, li
 
 class TestIpRegistryAndLayout(unittest.TestCase):
     def test_registry_has_all_ips_and_artifacts(self):
-        self.assertEqual(len(tuple(list_ips())), 12)
+        self.assertEqual(len(tuple(list_ips())), 2)
         repo_root = Path(__file__).resolve().parents[1]
         for ip_name in IP_ARTIFACTS:
             paths = resolve_artifacts(repo_root, ip_name)
@@ -31,19 +31,9 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         expected = {
             "__init__.py",
             "arbitration_ip.py",
-            "axi_interconnect_ip.py",
             "common.py",
             "completion_ip.py",
-            "dma_subsystem.py",
-            "gdma_ip.py",
-            "i3c_ip.py",
-            "interrupt_controller_ip.py",
             "ip.py",
-            "mailbox_ip.py",
-            "mailbox_irq_subsystem.py",
-            "spi_master_ip.py",
-            "sram_ctrl_ip.py",
-            "timer_ip.py",
         }
         self.assertEqual({path.name for path in package_dir.glob("*.py")}, expected)
         self.assertFalse(any(path.is_dir() and path.name.endswith("_ip") for path in package_dir.iterdir()))
@@ -78,7 +68,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
 
         templates = validator.discover_templates(repo_root)
-        self.assertEqual(len(templates), 12)
+        self.assertEqual(len(templates), 2)
         validator.validate_scaffolds(repo_root, templates)
 
     def test_prompt_pack_generator_emits_model_request(self):
@@ -113,7 +103,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
-        self.assertIn("templates: 12", text)
+        self.assertIn("templates: 2", text)
 
         # Every contract an agent stage is told to follow must be a file that
         # exists. A stage pointing at a missing contract is an agent invoked with
@@ -179,7 +169,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         import yaml
 
-        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+        base = yaml.safe_load((repo_root / "templates" / "completion_ip.template.yaml").read_text(encoding="utf-8"))
 
         # Layer 1 (schema) catches a structural violation: an unbounded queue
         # with no depth_note.
@@ -290,7 +280,14 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         import yaml
 
         jsonschema = importlib.import_module("jsonschema")
-        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+        base = yaml.safe_load(
+            # A fixture template, not a live IP: this test mutates specific
+            # queues and FSMs by name, so it needs a document whose shape is
+            # fixed independently of which IPs the repo currently ships.
+            (Path(__file__).resolve().parent / "fixtures" / "templates" / "mailbox_ip.template.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
 
         # Layer 1 (schema): a missing wait model, a mode-3 interface with no
         # outstanding limit, and an assumed default that is not approach 2.
@@ -394,8 +391,8 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         # amend_prompt exercises `git show HEAD:...`; with the working tree in sync
         # it finds no delta and falls back to the full implementation prompt.
-        prompt = pipeline.amend_prompt("mailbox_ip")
-        self.assertIn("mailbox_ip", prompt)
+        prompt = pipeline.amend_prompt("completion_ip")
+        self.assertIn("completion_ip", prompt)
 
     def test_review_decisions_have_a_durable_tracked_home(self):
         """Decisions must not live in a file the tooling regenerates.
@@ -444,7 +441,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         pipeline = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
-        self.assertIn("decisions/mailbox_ip.md", pipeline.complete_template_prompt("mailbox_ip"))
+        self.assertIn("decisions/completion_ip.md", pipeline.complete_template_prompt("completion_ip"))
 
         # The extractor prints the same instruction into every gaps report it
         # generates, so it is a carrier too -- and the one that reaches a reader
@@ -746,9 +743,9 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         # An in-shape DLD has no .src.md, so its context skips both stages — the
         # pipeline it runs is exactly the one it ran before the stage existed.
-        ctx = pipeline.stage_context(harness, "mailbox_ip", repo_root / "dlds" / "mailbox_ip_dld.md")
+        ctx = pipeline.stage_context(harness, "completion_ip", repo_root / "dlds" / "completion_ip_dld.md")
         self.assertEqual(ctx["src_dld_exists"], "")
-        self.assertTrue(ctx["src_dld"].endswith("mailbox_ip_dld.src.md"))
+        self.assertTrue(ctx["src_dld"].endswith("completion_ip_dld.src.md"))
 
         # Discovery may return an author source — that is how an off-shape IP
         # enters at all — but it is never routed as the DLD itself.
@@ -756,8 +753,8 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertFalse(pipeline.ensure_markdown_dld(source).name.endswith(".src.md"), source)
 
         # An agent is told to normalize, and told not to sign its own work.
-        prompt = pipeline.normalize_prompt("mailbox_ip")
-        self.assertIn("dlds/mailbox_ip_dld.src.md", prompt)
+        prompt = pipeline.normalize_prompt("completion_ip")
+        self.assertIn("dlds/completion_ip_dld.src.md", prompt)
         self.assertIn("agents/dld_normalization_agent.md", prompt)
         self.assertIn("Do not run --stamp", prompt)
 
@@ -937,7 +934,9 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 self.assertIn(f"--require {kind}", command, f"{name} is not gated on a review of its own kind")
 
                 # The question that gate asks: an IP with no review owes one.
-                unreviewed = next(ip for ip in ("timer_ip", "mailbox_ip") if not gate.findings_path(ip, kind).is_file())
+                unreviewed = next(
+                    ip for ip in ("completion_ip", "arbitration_ip") if not gate.findings_path(ip, kind).is_file()
+                )
                 self.assertIsNotNone(
                     gate.review_owed(unreviewed, kind),
                     "a missing review must be owed, or the reviewer stage is skipped forever",
@@ -1020,7 +1019,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         checker, gate = load("check_declared_transitions"), load("check_review_findings")
 
-        ip = "sram_ctrl_ip"
+        ip = "completion_ip"
         result = {
             "ip": ip,
             "undeclared": [("bank_scheduler", "RETURN_DATA", "SCHED_IDLE")],
@@ -1106,16 +1105,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
 
-        src = repo_root / "dlds" / "mailbox_ip_dld.src.md"
+        src = repo_root / "dlds" / "completion_ip_dld.src.md"
         self.assertFalse(src.exists())
         try:
-            src.write_text("# Mailbox\n\nAuthor's original.\n", encoding="utf-8")
+            src.write_text("# Completion\n\nAuthor's original.\n", encoding="utf-8")
             discovered = pipeline.discover_dld_sources()
             stems = [pipeline.ip_stem(p) for p in discovered]
             self.assertEqual(len(stems), len(set(stems)), "an IP was queued more than once")
             # The author source outranks the file derived from it.
             self.assertIn(src, discovered)
-            self.assertNotIn(repo_root / "dlds" / "mailbox_ip_dld.md", discovered)
+            self.assertNotIn(repo_root / "dlds" / "completion_ip_dld.md", discovered)
         finally:
             src.unlink(missing_ok=True)
 
@@ -1128,7 +1127,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         sys.modules[spec.name] = pipeline
         spec.loader.exec_module(pipeline)
 
-        dld = repo_root / "dlds" / "mailbox_ip_dld.md"
+        dld = repo_root / "dlds" / "completion_ip_dld.md"
         src = pipeline.src_dld_path(dld)
         self.assertFalse(src.exists(), f"{src.name} is not expected in the repo")
 
@@ -1155,7 +1154,14 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
         import yaml
 
-        base = yaml.safe_load((repo_root / "templates" / "mailbox_ip.template.yaml").read_text(encoding="utf-8"))
+        base = yaml.safe_load(
+            # A fixture template, not a live IP: this test mutates specific
+            # queues and FSMs by name, so it needs a document whose shape is
+            # fixed independently of which IPs the repo currently ships.
+            (Path(__file__).resolve().parent / "fixtures" / "templates" / "mailbox_ip.template.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
         after = copy.deepcopy(base)
         for q in after["queues"]:
             if q["name"] == "message_fifo":
@@ -1210,45 +1216,91 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # Markdown edit that forgets to re-sync the Word copy fails here.
         self.assertEqual(tool.check(), [], "project_overview.docx has drifted from project_overview.md")
 
-    def test_subsystem_wiring_check_passes_for_repo(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        checker_path = repo_root / "tools" / "check_subsystem_wiring.py"
-        spec = importlib.util.spec_from_file_location("check_subsystem_wiring", checker_path)
-        checker = importlib.util.module_from_spec(spec)
-        self.assertIsNotNone(spec.loader)
-        spec.loader.exec_module(checker)
+    @staticmethod
+    def _synthetic_subsystem(members: str, connections: str) -> str:
+        """A subsystem template built from whole cloth, not seeded from a live one.
 
-        templates = checker.discover_subsystem_templates(repo_root)
-        self.assertEqual(
-            {path.name for path in templates},
-            {"dma_subsystem.template.yaml", "mailbox_irq_subsystem.template.yaml"},
+        These two tests used to read templates/dma_subsystem.template.yaml. That
+        made the checker's proof depend on a particular IP existing, and when
+        dma_subsystem and mailbox_irq_subsystem were retired the proof went with
+        them -- leaving a wiring checker that validate_dld_flow.py still runs
+        against whatever subsystems exist, which is now none.
+
+        The subsystem is named completion_ip so that profile.model_file() resolves to a
+        real model file. That is what lets the "does not instantiate member model"
+        branch fire at all; without an existing subsystem model the checker stops
+        at "no subsystem model file" and never reaches it.
+        """
+        return (
+            "ip:\n  name: completion_ip\n  description: synthetic wiring fixture\n"
+            "subsystem:\n  members:\n"
+            + members
+            + "  connections:\n"
+            + connections
+            + "fsm_processes:\n  - name: real_glue_fsm\n"
         )
-        for template in templates:
-            self.assertEqual(checker.check_file(repo_root, template), [])
 
-    def test_subsystem_wiring_check_detects_bad_wiring(self):
+    def _wiring_checker(self):
         repo_root = Path(__file__).resolve().parents[1]
         checker_path = repo_root / "tools" / "check_subsystem_wiring.py"
         spec = importlib.util.spec_from_file_location("check_subsystem_wiring", checker_path)
         checker = importlib.util.module_from_spec(spec)
         self.assertIsNotNone(spec.loader)
         spec.loader.exec_module(checker)
+        return repo_root, checker
 
-        text = (repo_root / "templates" / "dma_subsystem.template.yaml").read_text(encoding="utf-8")
-        broken = text.replace("ip: gdma_ip, model: GdmaIpModel", "ip: ghost_ip, model: GhostIpModel")
-        broken = broken.replace("to: arbitration_ip.enqueue", "to: arbitration_ip.enqueue_nonexistent")
-        broken = broken.replace(
-            "from: backpressure_monitor, to: gdma_ip.set_memory_ready",
-            "from: bogus_fsm, to: gdma_ip.set_memory_ready",
+    def test_subsystem_wiring_check_accepts_well_formed_wiring(self):
+        """The checker must not false-positive, which is the half that can rot silently.
+
+        The repo currently contains no subsystem templates at all, so
+        discover_subsystem_templates returns nothing and validate_dld_flow.py's
+        wiring stage checks nothing. A test that walked the repo's subsystems
+        would now pass by having no work to do; this one gives it work.
+        """
+        repo_root, checker = self._wiring_checker()
+
+        self.assertEqual(
+            checker.discover_subsystem_templates(repo_root),
+            [],
+            "a subsystem template was added -- give it a real wiring test rather than relying on this one",
+        )
+
+        good = self._synthetic_subsystem(
+            members="    - {ip: arbitration_ip, model: ArbitrationIpModel, role: scheduler}\n",
+            connections="    - {from: real_glue_fsm, to: arbitration_ip.enqueue, payload: command, ack: none}\n",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            target = Path(tmpdir) / "dma_subsystem.template.yaml"
+            target = Path(tmpdir) / "completion_ip.template.yaml"
+            target.write_text(good, encoding="utf-8")
+            errors = checker.check_file(repo_root, target)
+        self.assertEqual(
+            [e for e in errors if "does not instantiate" not in e],
+            [],
+            "the checker rejects wiring that is actually well formed",
+        )
+
+    def test_subsystem_wiring_check_detects_bad_wiring(self):
+        repo_root, checker = self._wiring_checker()
+
+        broken = self._synthetic_subsystem(
+            members=(
+                "    - {ip: ghost_ip, model: GhostIpModel, role: missing}\n"
+                "    - {ip: arbitration_ip, model: ArbitrationIpModel, role: scheduler}\n"
+            ),
+            connections=(
+                "    - {from: real_glue_fsm, to: arbitration_ip.enqueue_nonexistent, payload: command, ack: none}\n"
+                "    - {from: bogus_fsm, to: arbitration_ip.enqueue, payload: command, ack: none}\n"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "completion_ip.template.yaml"
             target.write_text(broken, encoding="utf-8")
             errors = "\n".join(checker.check_file(repo_root, target))
+
         self.assertIn("member `ghost_ip`: no promoted template", errors)
         self.assertIn("does not instantiate member model `GhostIpModel`", errors)
         self.assertIn("`enqueue_nonexistent` not found in arbitration_ip.py", errors)
-        self.assertIn("`bogus_fsm`: not a glue FSM of dma_subsystem", errors)
+        self.assertIn("`bogus_fsm`: not a glue FSM of completion_ip", errors)
 
     def test_ip_logging_writes_ip_tagged_run_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1298,8 +1350,16 @@ class TestDldNormalizationGate(unittest.TestCase):
         return gate
 
     @staticmethod
-    def _mailbox_dld():
-        return (Path(__file__).resolve().parents[1] / "dlds" / "mailbox_ip_dld.md").read_text(encoding="utf-8")
+    def _real_dld():
+        # A fixture, not a live IP. These tests feed the tokenizers a real,
+        # structurally rich DLD and then damage it in specific ways, so they are
+        # coupled to its prose -- its FSM names, its state names, its headings.
+        # Pointing them at whichever IP the repo happens to ship made them break
+        # when mailbox_ip was retired. The document is kept here for the same
+        # reason completion_ip's normalization pair is: the tokenizers need real
+        # input, and that input should not be at the mercy of the IP roster.
+        fixtures = Path(__file__).resolve().parent / "fixtures" / "normalization"
+        return (fixtures / "mailbox_ip_dld.md").read_text(encoding="utf-8")
 
     @staticmethod
     def _fixture_pair():
@@ -1331,7 +1391,7 @@ class TestDldNormalizationGate(unittest.TestCase):
     def test_tokenizers_read_real_dld_content(self):
         """A gate that parses nothing would also pass calibration trivially."""
         gate = self._gate()
-        text = self._mailbox_dld()
+        text = self._real_dld()
 
         self.assertIn("2 ns", gate.measurements(text))
         self.assertIn("500 mhz", gate.measurements(text))
@@ -1354,7 +1414,7 @@ class TestDldNormalizationGate(unittest.TestCase):
         other direction — a value that appears from nowhere — catches it.
         """
         gate = self._gate()
-        source = self._mailbox_dld()
+        source = self._real_dld()
         mutated = source.replace("Accept message: 1 cycle = 2 ns.", "Accept message: 1 cycle = 3 ns.", 1)
 
         self.assertNotEqual(source, mutated)
@@ -1364,7 +1424,7 @@ class TestDldNormalizationGate(unittest.TestCase):
 
     def test_gate_catches_dropped_and_invented_identifiers(self):
         gate = self._gate()
-        source = self._mailbox_dld()
+        source = self._real_dld()
 
         dropped = source.replace("- `REJECT_FULL`\n", "", 1)
         self.assertTrue(any("dropped" in e and "REJECT_FULL" in e for e in gate.check_identifiers(source, dropped)))
@@ -1376,7 +1436,7 @@ class TestDldNormalizationGate(unittest.TestCase):
 
     def test_gate_catches_fsm_topology_and_count_drift(self):
         gate = self._gate()
-        source = self._mailbox_dld()
+        source = self._real_dld()
 
         recounted = source.replace("Total FSM/processes: 5.", "Total FSM/processes: 6.", 1)
         self.assertTrue(any("count" in e for e in gate.check_fsm_parity(source, recounted)))
@@ -1414,7 +1474,7 @@ Wait model:
 
     def test_gate_catches_silently_dropped_prose(self):
         gate = self._gate()
-        source = self._mailbox_dld()
+        source = self._real_dld()
         start, end = source.index("Some mailbox processes are naturally parallel"), source.index("## 4. Interfaces")
         truncated = source[:start] + source[end:]
 
@@ -1427,7 +1487,7 @@ Wait model:
     def test_gate_allows_a_structure_only_reshape(self):
         """The gate must not simply fail everything: renumbering is legal."""
         gate = self._gate()
-        source = self._mailbox_dld()
+        source = self._real_dld()
         reshaped = re.sub(r"^### 6\.(\d) ", lambda m: f"### 7.{m.group(1)} ", source, flags=re.MULTILINE)
         reshaped = re.sub(r"^- `([A-Z_]+)`$", r"* `\1`", reshaped, flags=re.MULTILINE)
 
@@ -1537,7 +1597,7 @@ Wait model:
         the source at all, which is what "hallucinated" actually means.
         """
         gate = self._gate()
-        dld = self._mailbox_dld()
+        dld = self._real_dld()
 
         self.assertEqual(gate.check_identifiers(dld.replace("`", ""), dld), [])
         self.assertEqual(gate.check_identifiers(dld, dld.replace("`", "")), [])
@@ -1637,7 +1697,7 @@ Wait model:
         is now caught, because the state sets are compared per FSM.
         """
         gate = self._gate()
-        dld = self._mailbox_dld()
+        dld = self._real_dld()
         # REJECT_FULL belongs to message_push; hang it on register_access instead.
         moved = dld.replace("- `REJECT_FULL`\n", "", 1).replace(
             "- `ACCESS_ERROR`", "- `ACCESS_ERROR`\n- `REJECT_FULL`", 1
@@ -1652,7 +1712,7 @@ Wait model:
     def test_retitling_a_heading_is_not_content_loss(self):
         """Renumbering and retitling headings is the first permitted operation."""
         gate = self._gate()
-        dld = self._mailbox_dld()
+        dld = self._real_dld()
         retitled = dld.replace("## 4. Interfaces", "## 5 Signal Interfaces", 1)
 
         self.assertEqual(gate.check_unplaced_accounting(dld, retitled), [])
@@ -1663,7 +1723,7 @@ Wait model:
     def test_unstamped_normalization_is_not_trusted(self):
         """Mechanical checks cannot prove meaning survived; a human signs that."""
         gate = self._gate()
-        text = self._mailbox_dld()
+        text = self._real_dld()
         errors = gate.check_ip("no_such_ip", text, text, require_stamp=True)
         self.assertTrue(any("stamp" in e for e in errors), errors)
 

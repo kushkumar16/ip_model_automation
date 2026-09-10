@@ -18,7 +18,7 @@ from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, li
 
 class TestIpRegistryAndLayout(unittest.TestCase):
     def test_registry_has_all_ips_and_artifacts(self):
-        self.assertEqual(len(tuple(list_ips())), 3)
+        self.assertEqual(len(tuple(list_ips())), 2)
         repo_root = Path(__file__).resolve().parents[1]
         for ip_name in IP_ARTIFACTS:
             paths = resolve_artifacts(repo_root, ip_name)
@@ -34,7 +34,6 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             "common.py",
             "completion_ip.py",
             "ip.py",
-            "timer_ip.py",
         }
         self.assertEqual({path.name for path in package_dir.glob("*.py")}, expected)
         self.assertFalse(any(path.is_dir() and path.name.endswith("_ip") for path in package_dir.iterdir()))
@@ -69,7 +68,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
 
         templates = validator.discover_templates(repo_root)
-        self.assertEqual(len(templates), 3)
+        self.assertEqual(len(templates), 2)
         validator.validate_scaffolds(repo_root, templates)
 
     def test_prompt_pack_generator_emits_model_request(self):
@@ -104,7 +103,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
-        self.assertIn("templates: 3", text)
+        self.assertIn("templates: 2", text)
 
         # Every contract an agent stage is told to follow must be a file that
         # exists. A stage pointing at a missing contract is an agent invoked with
@@ -936,7 +935,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
                 # The question that gate asks: an IP with no review owes one.
                 unreviewed = next(
-                    ip for ip in ("timer_ip", "completion_ip") if not gate.findings_path(ip, kind).is_file()
+                    ip for ip in ("completion_ip", "arbitration_ip") if not gate.findings_path(ip, kind).is_file()
                 )
                 self.assertIsNotNone(
                     gate.review_owed(unreviewed, kind),
@@ -1227,13 +1226,13 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         them -- leaving a wiring checker that validate_dld_flow.py still runs
         against whatever subsystems exist, which is now none.
 
-        The subsystem is named timer_ip so that profile.model_file() resolves to a
+        The subsystem is named completion_ip so that profile.model_file() resolves to a
         real model file. That is what lets the "does not instantiate member model"
         branch fire at all; without an existing subsystem model the checker stops
         at "no subsystem model file" and never reaches it.
         """
         return (
-            "ip:\n  name: timer_ip\n  description: synthetic wiring fixture\n"
+            "ip:\n  name: completion_ip\n  description: synthetic wiring fixture\n"
             "subsystem:\n  members:\n"
             + members
             + "  connections:\n"
@@ -1271,7 +1270,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             connections="    - {from: real_glue_fsm, to: arbitration_ip.enqueue, payload: command, ack: none}\n",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            target = Path(tmpdir) / "timer_ip.template.yaml"
+            target = Path(tmpdir) / "completion_ip.template.yaml"
             target.write_text(good, encoding="utf-8")
             errors = checker.check_file(repo_root, target)
         self.assertEqual(
@@ -1294,14 +1293,14 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             ),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            target = Path(tmpdir) / "timer_ip.template.yaml"
+            target = Path(tmpdir) / "completion_ip.template.yaml"
             target.write_text(broken, encoding="utf-8")
             errors = "\n".join(checker.check_file(repo_root, target))
 
         self.assertIn("member `ghost_ip`: no promoted template", errors)
         self.assertIn("does not instantiate member model `GhostIpModel`", errors)
         self.assertIn("`enqueue_nonexistent` not found in arbitration_ip.py", errors)
-        self.assertIn("`bogus_fsm`: not a glue FSM of timer_ip", errors)
+        self.assertIn("`bogus_fsm`: not a glue FSM of completion_ip", errors)
 
     def test_ip_logging_writes_ip_tagged_run_log(self):
         with tempfile.TemporaryDirectory() as tmpdir:

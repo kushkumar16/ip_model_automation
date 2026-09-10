@@ -5,7 +5,6 @@ from __future__ import annotations
 from .arbitration_ip import ArbitrationIpModel
 from .common import IP_ARTIFACTS, Command, Descriptor, IpArtifact, list_ips, resolve_artifacts
 from .completion_ip import CompletionIpModel
-from .timer_ip import TimerIpModel
 
 __all__ = [
     "ArbitrationIpModel",
@@ -14,7 +13,6 @@ __all__ = [
     "Descriptor",
     "IP_ARTIFACTS",
     "IpArtifact",
-    "TimerIpModel",
     "list_ips",
     "resolve_artifacts",
 ]

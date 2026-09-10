@@ -10,24 +10,25 @@ Which of the three applies depends on what the DLD left open.
 
 **A value it does not state** — a depth, a channel count, a threshold. Do not
 pick a number. Make it configuration, leave it unset, and record that it is
-unset. There is a way not to choose here, so choosing is inventing. `timer_ip`'s
-`channel_count` is left unset for exactly this reason — §12 leaves the number of
-channels open, so the model takes it as configuration rather than picking one.
+unset. There is a way not to choose here, so choosing is inventing. A DLD that
+lists *"number of channels"* under Open Items has not given you a channel count;
+taking an optional bound that defaults to unset keeps the model honest and still
+lets a later document decide.
 
 **A behaviour with no null option** — the model reaches that point and has to do
 something, and every branch is a choice. Here, and only here, choose the
 conservative branch: label it, record it, and record the evidence that makes it
-conservative rather than merely convenient. `timer_ip` rejecting an invalid
-register configuration at accept time and entering `ACCESS_ERROR` is one of
-these: the model is handed the write and must do something with it, and refusing
-it is the branch that cannot silently produce wrong numbers.
+conservative rather than merely convenient. An invalid register write is one of
+these: the model is handed it and must do *something*, and rejecting it at the
+access is the branch that cannot silently produce wrong numbers — accepting it
+quietly configures a working peripheral of the wrong kind.
 
 **A behaviour where even the conservative branch is a guess** — the DLD names a
 state but not the policy that reaches it, or not what happens once it is there.
 Do not model it. Record it under *Declared but not implemented* below, with what
-the model does instead and what a reader must not trust as a result. `timer_ip`'s
-`debug_freeze` gate and its `kick_reload` cost are both this; both are written up
-under *Declared but not implemented* in [`timer_ip.md`](timer_ip.md).
+the model does instead and what a reader must not trust as a result. A gate the
+template attaches to one FSM node while the model enforces it a stage upstream is
+this; so is a declared operation the model charges nothing for.
 
 *Never invent silently* survives all three and was never the part in question.
 What was in question is that "choose a conservative default", read on its own,
@@ -74,10 +75,11 @@ to do, and the requirement is lost rather than deferred.
 
 So the claim stays in both documents and the gap is written down here, under a
 heading of its own, saying what the model does instead and what a reader must not
-trust as a result. A `timer_ip` example: the template declares `debug_freeze`
-gates `counter.COUNT`, the model enforces the freeze one stage upstream, and
-`fsm_state["counter"]` therefore reports `COUNT` throughout a freeze. Counting
-does stop; the gate is simply not visible where the contract says to look.
+trust as a result. The example this convention was written from: a template
+declared `debug_freeze` gates `counter.COUNT`, the model enforced the freeze one
+stage upstream, and `fsm_state["counter"]` therefore reported `COUNT` throughout a
+freeze. Counting did stop; the gate was simply not visible where the contract said
+to look.
 
 Where the gap was raised as a review finding, dismiss it by name in the same
 entry so the gate clears:
@@ -116,3 +118,8 @@ template field or test scenario that carries it.
 An IP with no decisions file has none recorded. That is only correct if its DLD
 left nothing open, which is rare — treat a missing file as a question, not as a
 clean bill of health.
+
+**This directory currently holds no IP files at all.** The IPs whose decisions it
+carried have been retired, and the examples above are stated in the abstract for
+that reason rather than pointing at documents a reader cannot open. The worked
+originals are in git history; the conventions do not depend on them.

@@ -64,11 +64,11 @@ ip:
 #   none                 -> fire-and-forget; only queue backpressure applies.
 #   completion_event     -> a completion record must come back; `ack_via`
 #                          names the return path that carries it. Example:
-#                          dma_subsystem fires its IRQ only after BOTH the
+#                          A fan-out subsystem fires its IRQ only after BOTH the
 #                          engine leg and the fabric leg ack their work.
 #   level_until_serviced -> a level signal stays asserted until the consumer
 #                          services and clears it (re-pends if cleared early).
-#                          Example: mailbox_irq_subsystem's doorbell path.
+#                          Example: a doorbell path through a delivery fabric.
 # Annotate at least the connections where the answer is not `none` — they are
 # what the glue FSMs and the subsystem tests must observe.
 
@@ -84,7 +84,7 @@ ip:
 #     indefinitely (no timeout). IP1 needs the returned result to decide what
 #     it does next, so the response is on the critical path of IP1's own flow.
 #     Must state `response_used_for:` — what the returned result drives.
-#     Example: gdma descriptor fetch — the fetched descriptor selects the
+#     Example: a DMA descriptor fetch — the fetched descriptor selects the
 #     next transition.
 #
 #   wait_for_ack_inline                             <-- THE DEFAULT

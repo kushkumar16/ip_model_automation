@@ -35,40 +35,10 @@ behavior from the DLD.
   bitmaps, RR/WRR policy, and burst-limited issue pipeline.
 - `completion_ip`: command completion scheduling with per-tenant QoS tokens,
   window-based refill, and output backpressure.
-- `gdma_ip`: descriptor-driven DMA with multiple parallel/sequential FSMs.
-- `timer_ip`: register, tick, compare, watchdog, debug-freeze, and interrupt
-  timer behavior.
-- `axi_interconnect_ip`: AXI read/write routing, arbitration, response routing,
-  and decode-error handling.
-- `interrupt_controller_ip`: source sampling, pending/filter/priority,
-  delivery, ACK, EOI, and software interrupt behavior.
-- `mailbox_ip`: multi-channel inter-processor messaging with per-channel
-  FIFOs, doorbell generation, and masked interrupt aggregation.
-- `spi_master_ip`: SPI master with TX/RX byte FIFOs, a bit-shift transfer
-  engine, chip-select framing, and masked interrupts.
-- `i3c_ip`: I3C master with a queued command engine, bit-level SDR transfer
-  engine, in-band-interrupt (IBI) detection/arbitration, and masked
-  interrupts.
 
-## Subsystems
-
-A subsystem is modeled as "just another IP" whose FSM processes are the glue
-between member IP models; the member models are its resources. It rides the
-same DLD -> template -> model -> tests pipeline and gates.
-
-- `dma_subsystem`: connected data-mover composing `gdma_ip`,
-  `axi_interconnect_ip`, `arbitration_ip`, and `completion_ip`. Descriptors
-  fan out to an engine leg and a fabric leg (read+write commands routed,
-  arbitrated, and QoS-accounted); the subsystem IRQ fires when both legs
-  complete. A backpressure monitor couples fabric congestion to GDMA memory
-  readiness and completion backlog to arbitration issue readiness.
-- `mailbox_irq_subsystem`: interrupt-delivery cluster composing `mailbox_ip`
-  (doorbell source) and `interrupt_controller_ip` (delivery fabric) with a
-  modeled software service loop (ack, read, clear, EOI). Uses true
-  level-triggered semantics — the doorbell level stays asserted while
-  unserviced messages remain, so EOI re-pends the source — and duty-cycle
-  interrupt-storm throttling that masks a flooding channel for a throttle
-  window.
+Ten further IPs — including both subsystems — were retired on 2026-09-10; their
+artifacts are in git history. `docs/project_overview.md` Part 5 lists them and
+says what their removal costs the gates.
 
 ## Flow
 
@@ -355,7 +325,7 @@ terminal):
 python tools\render_template_doc.py                                  # all reviewed templates (Markdown)
 python tools\render_template_doc.py --format html                    # styled HTML pages
 python tools\render_template_doc.py --format both                    # both formats
-python tools\render_template_doc.py templates\timer_ip.template.yaml --stdout
+python tools\render_template_doc.py templates\completion_ip.template.yaml --stdout
 ```
 
 Inspect the generation harness:

@@ -195,6 +195,111 @@ class TestArbitrationIpModel(unittest.TestCase):
         grant_completes = entered["GRANT"] + model.latency["grant"]
         self.assertEqual(grant_completes - entered["IDLE"], 23)
 
+    def test_arbitration_issue_pipeline_charges_its_declared_latencies(self):
+        """The burst_min_issue_count scenario's declared timing, which nothing pinned.
+
+        That scenario declares pending_count_read_latency, burst_read_latency and
+        min_calculation_latency as expected performance properties over five
+        issue_pipeline states. The test named for it set every one of those
+        latencies to 1 and asserted counts only, so the whole issue-pipeline half
+        of the timing model was unheld: pending_count 3->9, burst_read 4->9,
+        burst_calc 2->9 and burst_debit 2->9 each left the suite green. Verified
+        by mutation, before and after.
+
+        selection_accept is charged inside READ_PENDING_COUNT rather than on the
+        transition into it. The template prices it as its own 1-cycle operation,
+        so that state holds 1 + 3; the end-to-end total is unaffected, and this
+        pins the shape actually implemented rather than asserting one it does
+        not have.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.enqueue(Command("c", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        entered = {}
+        previous = None
+        while env.peek() < 300:
+            env.step()
+            state = model.fsm_state["issue_pipeline"]
+            if state != previous:
+                entered.setdefault(state, env.now)
+                previous = state
+            if model.downstream_requests and state == "UPDATE_BURST":
+                break
+
+        self.assertEqual(model.downstream_requests[0]["time"] - entered["UPDATE_BURST"], model.latency["burst_debit"])
+        spans = {
+            "READ_PENDING_COUNT": entered["READ_BURST"] - entered["READ_PENDING_COUNT"],
+            "READ_BURST": entered["CALC_ISSUE_COUNT"] - entered["READ_BURST"],
+            "CALC_ISSUE_COUNT": entered["ISSUE_REQUEST"] - entered["CALC_ISSUE_COUNT"],
+            "ISSUE_REQUEST": entered["UPDATE_BURST"] - entered["ISSUE_REQUEST"],
+        }
+        self.assertEqual(
+            spans,
+            {
+                "READ_PENDING_COUNT": 1 + 3,  # selection_accept + pending_count_read
+                "READ_BURST": 4,  # burst_read
+                "CALC_ISSUE_COUNT": 2,  # min_burst_calculation
+                "ISSUE_REQUEST": 3,  # downstream_issue_request
+            },
+        )
+        # The declared new_command_to_issue path totals 38 cycles; the issue
+        # pipeline's own share of it is these six operations.
+        self.assertEqual(model.downstream_requests[0]["time"] - entered["READ_PENDING_COUNT"], 1 + 3 + 4 + 2 + 3 + 2)
+
+    def _sq_selection_sequence(self, sq_weights, until=400):
+        """Selections at the SQ level, under load that keeps all four SQs pending.
+
+        A single command per SQ is not enough: one selection issues everything
+        pending in that SQ, so four SQs drain in four selections and no weighting
+        is observable. The feeder keeps each SQ topped up, which is the sustained
+        load the declared SQ weights describe.
+        """
+        env = simpy.Environment()
+        topology = {"port0": {"tenants": {"T1": ["SQ0", "SQ1", "SQ2", "SQ3"]}}}
+        model = ArbitrationIpModel(
+            env,
+            topology=topology,
+            weights={"ports": {"port0": 1}, "tenants": {"T1": 1}, "sqs": sq_weights},
+            log_level="CRITICAL",
+        )
+
+        def feeder():
+            index = 0
+            while True:
+                for sq_id in ("SQ0", "SQ1", "SQ2", "SQ3"):
+                    if not model.queues["port0"]["T1"][sq_id]:
+                        model.enqueue(
+                            Command(f"c{index}_{sq_id}", "READ", port_id="port0", tenant_id="T1", sq_id=sq_id)
+                        )
+                        index += 1
+                yield env.timeout(1)
+
+        env.process(feeder())
+        env.run(until=until)
+        return [entry["sq_id"] for entry in model.selection_trace]
+
+    def test_arbitration_weighted_order_at_the_sq_level(self):
+        """The SQ level of the declared [port, tenant, sq] hierarchy.
+
+        Every weighting test projected the selection trace onto tenant_id and
+        discarded sq_id, so one of the three declared levels had no test that
+        could fail for it. Neutering the SQ pointer advance left the whole suite
+        green while starving SQ1..SQ3 whenever SQ0 stayed pending -- verified by
+        mutation, before and after.
+        """
+        weighted = self._sq_selection_sequence({"SQ0": 4, "SQ1": 2, "SQ2": 1, "SQ3": 1})
+        equal = self._sq_selection_sequence({"SQ0": 1, "SQ1": 1, "SQ2": 1, "SQ3": 1})
+        inverted = self._sq_selection_sequence({"SQ0": 1, "SQ1": 1, "SQ2": 2, "SQ3": 4})
+
+        self.assertEqual(
+            weighted[:8], ["SQ0", "SQ0", "SQ0", "SQ0", "SQ1", "SQ1", "SQ2", "SQ3"], "SQ weights were not respected"
+        )
+        self.assertEqual(equal[:8], ["SQ0", "SQ1", "SQ2", "SQ3", "SQ0", "SQ1", "SQ2", "SQ3"])
+        self.assertEqual(inverted[:8], ["SQ0", "SQ1", "SQ2", "SQ2", "SQ3", "SQ3", "SQ3", "SQ3"])
+        self.assertNotEqual(weighted, equal, "SQ weighting made no difference to the order")
+        self.assertNotEqual(weighted, inverted, "inverting the SQ weights made no difference")
+
     def test_arbitration_scan_latency_does_not_silently_zero_the_others(self):
         """scan_latency sets the three scans and nothing else.
 

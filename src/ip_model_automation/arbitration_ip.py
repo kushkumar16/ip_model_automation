@@ -295,22 +295,19 @@ class ArbitrationIpModel:
                 return sq_id
         return None
 
-    def select_sq(self) -> Optional[Dict[str, str]]:
-        port_id = self._select_port()
-        if port_id is None:
-            self.metrics["no_port_pending_stalls"] += 1
-            return None
+    def _commit_selection(self, port_id: str, tenant_id: str, sq_id: str) -> Dict[str, str]:
+        """Record a completed three-level selection.
 
-        tenant_id = self._select_tenant(port_id)
-        if tenant_id is None:
-            self.metrics["no_tenant_pending_stalls"] += 1
-            return None
-
-        sq_id = self._select_sq(tenant_id)
-        if sq_id is None:
-            self.metrics["no_sq_pending_stalls"] += 1
-            return None
-
+        This used to be the tail of a `select_sq()` that ran all three levels
+        back to back, after arbiter_main had already charged port_scan,
+        tenant_scan and sq_scan. That put every decision -- including the
+        qos_credit_if eligibility sample, whose declared wait point is
+        arbiter_main.TENANT_SCAN -- in SQ_SCAN, eight cycles after TENANT_SCAN
+        had been left, and made TENANT_SCAN -> SQ_SCAN a transition taken with
+        its declared condition `eligible_tenant_found` not yet evaluated. Each
+        level is now decided in the state declared to decide it; only the
+        bookkeeping is shared.
+        """
         self.inflight_sqs.add((tenant_id, sq_id))
         selection = {"port_id": port_id, "tenant_id": tenant_id, "sq_id": sq_id}
         self.selection_trace.append(selection)
@@ -329,6 +326,22 @@ class ArbitrationIpModel:
             self.tenant_burst_available[tenant_id],
             self.sq_burst_available[tenant_id][sq_id],
         )
+
+    def _stall(self, reason: str, metric: str):
+        """Hold STALL for the declared retry, recording the reason's own metric.
+
+        Only PORT_SCAN -> STALL is declared, so the tenant- and SQ-level stalls
+        leave their scan by an edge the template does not describe. That is a gap
+        in the contract rather than a choice this model can make correctly: the
+        template gives TENANT_SCAN and SQ_SCAN no exit but forward, and a
+        candidate blocked on credit or already in flight has to go somewhere.
+        Recorded in decisions/arbitration_ip.md.
+        """
+        self._set_fsm_state("arbiter_main", "STALL")
+        self.metrics["stalls"] += 1
+        self.metrics[metric] += 1
+        self.logger.debug("arbiter stall %s time=%s", reason, self.env.now)
+        yield self.env.timeout(self.latency["backpressure_retry"])
 
     def arbiter_main(self):
         # RESET -> IDLE is declared with reset_deasserted and a 1-cycle cost. It
@@ -359,35 +372,37 @@ class ArbitrationIpModel:
                 self._update_pending_bitmaps()
             else:
                 yield self.env.timeout(self.latency["backpressure_retry"])
+            # Each scan decides its own level, in the state the template
+            # declares that decision on: the port at the end of PORT_SCAN, the
+            # tenant -- and with it the qos_credit_if eligibility sample, whose
+            # declared wait point is TENANT_SCAN -- at the end of TENANT_SCAN,
+            # the SQ at the end of SQ_SCAN. All three used to run together after
+            # SQ_SCAN's timeout, which sampled credit eight cycles late and made
+            # a credit-blocked candidate pay all three scans before stalling.
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
-            # PORT_SCAN -> STALL on no_eligible_port is declared, and was never
-            # taken: the tenant and SQ scans ran unconditionally, so a stall was
-            # always reached from SQ_SCAN having charged all three scans first.
-            if not any(self.port_pending_bitmap.values()):
-                self._set_fsm_state("arbiter_main", "STALL")
-                self.metrics["stalls"] += 1
-                # increment_no_eligible_stall is the declared action on this
-                # transition, and no_port_pending_stalls is the metric the
-                # template names for it. It used to be incremented only inside
-                # select_sq(), which this branch returns before ever reaching --
-                # so the counter recorded a mid-scan race and never the stall it
-                # is named for.
-                self.metrics["no_port_pending_stalls"] += 1
-                self.logger.debug("arbiter stall no eligible port time=%s", self.env.now)
-                yield self.env.timeout(self.latency["backpressure_retry"])
+            port_id = self._select_port()
+            # PORT_SCAN -> STALL on no_eligible_port, with its declared
+            # increment_no_eligible_stall action.
+            if port_id is None:
+                yield from self._stall("no eligible port", "no_port_pending_stalls")
                 continue
+
             self._set_fsm_state("arbiter_main", "TENANT_SCAN")
             yield self.env.timeout(self.latency["tenant_scan"])
+            tenant_id = self._select_tenant(port_id)
+            if tenant_id is None:
+                yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                continue
+
             self._set_fsm_state("arbiter_main", "SQ_SCAN")
             yield self.env.timeout(self.latency["sq_scan"])
-            selection = self.select_sq()
-            if selection is None:
-                self._set_fsm_state("arbiter_main", "STALL")
-                self.metrics["stalls"] += 1
-                self.logger.debug("arbiter stall time=%s", self.env.now)
-                yield self.env.timeout(self.latency["backpressure_retry"])
+            sq_id = self._select_sq(tenant_id)
+            if sq_id is None:
+                yield from self._stall("no eligible sq", "no_sq_pending_stalls")
                 continue
+
+            selection = self._commit_selection(port_id, tenant_id, sq_id)
             self._set_fsm_state("arbiter_main", "GRANT")
             yield self.env.timeout(self.latency["grant"])
             yield self.selected_sq_q.put(selection)

@@ -128,6 +128,71 @@ class TestCompletionIpModel(unittest.TestCase):
         issued = model.step_functional()
         self.assertEqual(issued.cmd_id, "f0")
 
+    def test_completion_backpressure_is_queue_full_not_tenant_inactive(self):
+        """READY -> BACKPRESSURE is declared for incoming_valid_and_queue_full.
+
+        The model used to enter BACKPRESSURE when the tenant was not alive -- a
+        different condition the template does not name at accept -- and in that
+        branch it appended the command to pending anyway, so it was an enqueue
+        wearing the label of a stall. Nothing ever drove the declared condition,
+        because tenant_pending_queues is declared unbounded and an unbounded
+        queue cannot be full. pending_depth leaves it unbounded by default and
+        lets a caller bound it, which is what makes the declared transition
+        reachable at all.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env,
+            service_latency=1,
+            tenant_select_latency=1,
+            token_check_latency=1,
+            emit_latency=1,
+            pending_depth=1,
+            log_level="CRITICAL",
+        )
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+        model.submit(Command("a", "READ", tenant_id="T0", size_kb=4))
+        model.submit(Command("b", "READ", tenant_id="T0", size_kb=4))
+        env.run(until=40)
+
+        # The tenant has no tokens, so nothing drains and the second command
+        # meets a full queue.
+        self.assertEqual(len(model.pending["T0"]), 1)
+        self.assertGreater(model.metrics["queue_full_stalls"], 0)
+        self.assertEqual(model.fsm_state["accept"], "BACKPRESSURE")
+        self.assertEqual(model.metrics["tenant_inactive_stalls"], 0, "this is not a liveness stall")
+
+        # Space appears, and accept resumes -- BACKPRESSURE -> READY.
+        model.pending["T0"].clear()
+        env.run(until=80)
+        self.assertEqual(len(model.pending["T0"]), 1, "the held command was never enqueued")
+        self.assertEqual(model.fsm_state["accept"], "READY")
+
+    def test_completion_output_port_serialises_emits(self):
+        """completion_output_port is declared capacity 1 and was not modelled.
+
+        With no resource there was no contention: two ready completions could
+        emit in the same instant. The port now holds for the emit, so the second
+        waits for the first.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env,
+            service_latency=1,
+            tenant_select_latency=1,
+            token_check_latency=1,
+            emit_latency=6,
+            log_level="CRITICAL",
+        )
+        model.configure_tenant("T0", read=4, write=4, read_bw=40, write_bw=40)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
+        model.submit(Command("r1", "READ", tenant_id="T0", size_kb=4))
+        env.run(until=400)
+
+        self.assertEqual(len(model.completed), 2)
+        first, second = model.completed[0][0], model.completed[1][0]
+        self.assertGreaterEqual(second - first, 6, "the port did not serialise the two emits")
+
     def test_completion_refill_once_restores_base_tokens_and_snapshots_window(self):
         env = simpy.Environment()
         model = CompletionIpModel(

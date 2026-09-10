@@ -212,7 +212,12 @@ fsm_relationships:
   sequential_paths:
     - name: command_completion_path
       path: [accept.ENQUEUE, completion_scheduler.SELECT_TENANT, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
-      description: Command must be accepted before scheduler can check tokens and emit completion.
+      description: >-
+        Command must be accepted before the scheduler can check tokens and emit its
+        completion. An ordering constraint, not a serial timing chain: accept and
+        completion_scheduler run as parallel_processes, so the enqueue overlaps the
+        scheduler's tenant select rather than running before it. See
+        timing_model.end_to_end_paths.no_stall_completion.
     - name: token_refill_path
       path: [refill.ASSESS_USAGE, refill.REFILL_BASE, refill.PUBLISH_METRICS]
       description: Refill updates token state observed by scheduler.
@@ -250,9 +255,21 @@ timing_model:
         - {name: metrics_publish, cycles: 10, ns: 20}
   end_to_end_paths:
     - name: no_stall_completion
-      cycles: 21
-      ns: 42
-      path: [enqueue, tenant_select, token_check, completion_emit]
+      cycles: 17
+      ns: 34
+      path: [tenant_select, token_check, completion_emit]
+      note: >-
+        Corrected from 21 cycles / 42 ns, which summed enqueue + tenant_select +
+        token_check + completion_emit as if the four ran in series. They do not:
+        accept and completion_scheduler are declared parallel_processes, and the
+        scheduler pays tenant_select from the top of its loop, before it has a
+        candidate. A command's 4-cycle enqueue therefore overlaps that 8-cycle
+        select instead of preceding it, and the path costs 8 + 5 + 4 = 17.
+        Measured at model defaults: a single READ completes at t=17. enqueue is
+        left out of the path for that reason -- it is real, it is charged, and it
+        is not on the critical path for a command arriving into an idle
+        scheduler. See sequential_paths.command_completion_path, which states the
+        ordering constraint this figure must not be read as a sum of.
 
 functionality_model:
   implemented_in_simpy: true

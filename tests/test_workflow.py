@@ -934,8 +934,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 self.assertIn(f"--require {kind}", command, f"{name} is not gated on a review of its own kind")
 
                 # The question that gate asks: an IP with no review owes one.
-                unreviewed = next(
-                    ip for ip in ("completion_ip", "arbitration_ip") if not gate.findings_path(ip, kind).is_file()
+                # The subject is synthetic on purpose. This used to pick whichever
+                # real IP happened to have no findings file, which meant the test
+                # broke the moment every IP had been reviewed -- exactly the state
+                # a working reviewer stage produces. review_owed() answers from the
+                # path alone, so a name that was never registered is a valid and
+                # permanently unreviewed subject.
+                unreviewed = "never_reviewed_probe_ip"
+                self.assertFalse(
+                    gate.findings_path(unreviewed, kind).is_file(),
+                    "the synthetic subject must have no review, or this proves nothing",
                 )
                 self.assertIsNotNone(
                     gate.review_owed(unreviewed, kind),
@@ -1030,6 +1038,14 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         path = repo_root / "reviews" / f"{ip}.model.findings.yaml"
         original = path.read_text(encoding="utf-8") if path.is_file() else None
         try:
+            # A real IP is needed so the subject hashes resolve, but this test is
+            # about the two tools agreeing on a file they round-trip -- not about
+            # whether that IP has been reviewed. Once it had a real review,
+            # emit_findings correctly refused to overwrite it and the test failed
+            # on the tool being right. So the file is moved out of the way for the
+            # duration and restored in `finally`.
+            path.unlink(missing_ok=True)
+
             _, count, error = checker.emit_findings(result, ip)
             self.assertIsNone(error)
             self.assertEqual(count, 2)

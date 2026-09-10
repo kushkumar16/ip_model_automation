@@ -30,13 +30,16 @@ findings:
   class: fsm_structure
   severity: medium
   claim: >-
-    arbiter_main.RESET and arbiter_main.IDLE are occupied at no simulated time, and the reset
-    behaviour the template declares is not modelled by any of the three FSMs. AMENDED after filing:
-    the original claim said RESET was unobservable for all three FSMs, which is wrong for two of
-    them - issue_pipeline and policy_update are readable in RESET before env.run() is called, so a
-    test can assert them, and only arbiter_main overwrites it from inside its own process. The
-    original claim also omitted arbiter_main.IDLE, which is assigned twice and held at no simulated
-    time either.
+    The reset behaviour the template declares - RESET -> IDLE on reset_deasserted, actions
+    [clear_state], 1 cycle - is not modelled by any of the three FSMs: the constructor sets RESET
+    and each process overwrites it with its first line before any yield, so no clear_state action
+    runs and no reset cost is charged. AMENDED TWICE, and the second amendment was also wrong.
+    Both the original claim and the first amendment asserted that RESET, and later IDLE, are
+    occupied at no simulated time. Measured against the unmodified model: fsm_state reads RESET for
+    all three FSMs before env.run() is called, so a test can assert it for every one of them
+    including arbiter_main; and arbiter_main.IDLE holds for bitmap_update's three cycles whenever
+    the bitmaps are dirty, so it was observable too. The observability half of this finding was
+    never true. What is true, and what remains, is that the declared reset behaviour is absent.
   template: 'templates/arbitration_ip.template.yaml:100-101 declares arbiter_main state RESET (`Initialize
     pointers and counters`) with :115-119 `RESET -> IDLE, condition: reset_deasserted, actions: [clear_state]`;
     :156 and :199 declare RESET for issue_pipeline and policy_update; :8-10 declares `reset: {type: sync,

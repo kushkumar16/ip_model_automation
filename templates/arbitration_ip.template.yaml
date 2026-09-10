@@ -371,8 +371,16 @@ performance_model:
 
 test_scenarios:
   - name: weighted_order_four_tenants
-    description: Weights 1,4,2,1 select T0,T1,T1,T1,T1,T2,T2,T3 when all queues are non-empty.
-    input_sequence: [port0_T0_SQ0_READ, port0_T1_SQ0_READ, port1_T2_SQ0_READ, port1_T3_SQ0_READ]
+    description: >-
+      With one command in every SQ, tenant weights 1,4,2,1 select
+      T0,T2,T1,T2,T1,T3,T1,T1,T0 - port alternation first, tenant weighting within a port.
+      Equal tenant weights give T0,T2,T1,T3,T0,T2,T1,T1,T1 instead, which is what makes this
+      scenario able to fail. The previous description claimed T0,T1,T1,T1,T1,T2,T2,T3 and was
+      wrong twice: it ignored the port level of this template's own
+      arbitration.hierarchy [port, tenant, sq] with equal port weights, and it declared eight
+      selections from an input_sequence of four commands, which can only produce four.
+    input_sequence: [port0_T0_SQ0_READ, port0_T0_SQ1_READ, port0_T1_SQ0_READ, port0_T1_SQ1_READ,
+      port0_T1_SQ2_READ, port0_T1_SQ3_READ, port1_T2_SQ0_READ, port1_T2_SQ1_READ, port1_T3_SQ0_READ]
     expected_functional_behavior: [weighted_order_respected]
     expected_performance_properties: [no_output_stall]
     fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]

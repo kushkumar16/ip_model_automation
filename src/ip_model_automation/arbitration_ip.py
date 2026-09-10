@@ -48,6 +48,8 @@ class ArbitrationIpModel:
         burst_read_latency: int = 4,
         burst_calc_latency: int = 2,
         burst_debit_latency: int = 2,
+        weighted_order_rebuild_latency: int = 8,
+        reset_latency: int = 1,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
@@ -56,6 +58,22 @@ class ArbitrationIpModel:
         self.topology = topology or DEFAULT_TOPOLOGY
         self.port_mode = port_mode
         self.output_ready = True
+        # qos_credit_if: a sampled `credit_status` input, declared
+        # wait_for_response at arbiter_main.TENANT_SCAN, whose eligibility result
+        # decides whether a candidate may be granted. There was no credit or
+        # liveness state at all, so the sample had nothing to read and the grant
+        # ignored it. arbitration.eligibility_owner is arbitration_ip_check_only,
+        # so this IP CHECKS the credit and never debits it -- token_debit_owner
+        # names completion_ip or the QoS service for that.
+        self.tenant_credit: Dict[str, Dict[str, object]] = defaultdict(
+            lambda: {
+                "tenant_alive": True,
+                "read_iops_credit": True,
+                "write_iops_credit": True,
+                "read_bw_credit": True,
+                "write_bw_credit": True,
+            }
+        )
         self.device_burst_available = 1024
         self.tenant_burst_available = defaultdict(lambda: 1024)
         self.sq_burst_available = defaultdict(lambda: defaultdict(lambda: 1024))
@@ -79,10 +97,16 @@ class ArbitrationIpModel:
         }
 
         if scan_latency is not None:
+            # One value for the three scan stages, and only those. This used to
+            # set port_scan to the value and then silently zero tenant_scan,
+            # sq_scan and grant -- so a caller reaching for it as a convenience
+            # opted out of three of the four declared arbiter_main latencies
+            # without saying so, and every test in this IP does reach for it.
+            # `grant` is not a scan and is left alone; a caller who wants it
+            # short passes grant_latency.
             port_scan_latency = scan_latency
-            tenant_scan_latency = 0
-            sq_scan_latency = 0
-            grant_latency = 0
+            tenant_scan_latency = scan_latency
+            sq_scan_latency = scan_latency
 
         self.latency = {
             "bitmap": bitmap_latency,
@@ -96,8 +120,11 @@ class ArbitrationIpModel:
             "burst_read": burst_read_latency,
             "burst_calc": burst_calc_latency,
             "burst_debit": burst_debit_latency,
+            "backpressure_retry": 1,
             "pointer_update": 1,
             "age_update": 2,
+            "weighted_order_rebuild": weighted_order_rebuild_latency,
+            "reset": reset_latency,
         }
 
         self.selected_sq_q = simpy.Store(env, capacity=1)
@@ -172,6 +199,29 @@ class ArbitrationIpModel:
                 self.sq_burst_available[tenant_id][sq_id] = int(value)
         self.logger.info("configured burst device=%s tenants=%s sqs=%s", device, tenants or {}, sqs or {})
 
+    def set_tenant_credit(self, tenant_id: str, **fields: object) -> None:
+        """Drive qos_credit_if's eligibility_check fields for one tenant.
+
+        The five fields the transaction declares: tenant_alive, read_iops_credit,
+        write_iops_credit, read_bw_credit, write_bw_credit. Unnamed fields keep
+        their current value, so a caller can make a tenant ineligible on one axis
+        without restating the rest.
+        """
+        unknown = set(fields) - set(self.tenant_credit[tenant_id])
+        if unknown:
+            raise ValueError(f"qos_credit_if declares no field(s) {sorted(unknown)}")
+        self.tenant_credit[tenant_id].update(fields)
+        self.logger.debug("credit status tenant=%s %s", tenant_id, dict(self.tenant_credit[tenant_id]))
+
+    def sample_eligibility(self, tenant_id: str) -> bool:
+        """The eligibility_check sample taken during candidate evaluation.
+
+        A candidate is eligible only while its tenant is alive and holds credit
+        on every declared axis; the sample is read, never debited.
+        """
+        status = self.tenant_credit[tenant_id]
+        return all(bool(status[field]) for field in status)
+
     def set_issue_ready(self, ready: bool) -> None:
         self.output_ready = ready
         self.logger.info("issue_ready=%s", ready)
@@ -195,6 +245,11 @@ class ArbitrationIpModel:
         self.fsm_state[fsm] = state
         self.transition_counts[f"{fsm}.{state}"] += 1
         self.logger.debug("fsm=%s state=%s time=%s", fsm, state, self.env.now)
+
+    def _clear_state(self) -> None:
+        """The clear_state action the template declares on RESET -> IDLE."""
+        self.metrics["resets"] += 1
+        self._update_pending_bitmaps()
 
     def _update_pending_bitmaps(self) -> None:
         for port_id, port_cfg in self.topology.items():
@@ -222,8 +277,16 @@ class ArbitrationIpModel:
 
     def _select_tenant(self, port_id: str) -> Optional[str]:
         for tenant_id in self.tenant_policies[port_id].scan():
-            if self.tenant_pending_bitmap[port_id].get(tenant_id, False):
-                return tenant_id
+            if not self.tenant_pending_bitmap[port_id].get(tenant_id, False):
+                continue
+            # The sample taken at TENANT_SCAN. An ineligible tenant is passed
+            # over for this scan rather than granted; it becomes selectable again
+            # as soon as the credit status says so.
+            if not self.sample_eligibility(tenant_id):
+                self.metrics["eligibility_rejections"] += 1
+                self.logger.debug("tenant ineligible tenant=%s time=%s", tenant_id, self.env.now)
+                continue
+            return tenant_id
         return None
 
     def _select_sq(self, tenant_id: str) -> Optional[str]:
@@ -268,14 +331,32 @@ class ArbitrationIpModel:
         )
 
     def arbiter_main(self):
-        self._set_fsm_state("arbiter_main", "IDLE")
+        # RESET -> IDLE is declared with reset_deasserted and a 1-cycle cost. It
+        # used to be neither held nor charged: the constructor set RESET and this
+        # line overwrote it before any yield, so neither state existed at any
+        # simulated time and the declared reset behaviour was not modelled.
+        self._set_fsm_state("arbiter_main", "RESET")
+        yield self.env.timeout(self.latency["reset"])
+        self._clear_state()
         while True:
+            # bitmap_update is charged only when the bitmaps are actually dirty.
+            # Charging it on every idle spin would invent 3 cycles the timing
+            # model does not price for a scan that had nothing to refresh.
             if self.bitmap_dirty:
                 self._set_fsm_state("arbiter_main", "IDLE")
                 yield self.env.timeout(self.latency["bitmap"])
                 self._update_pending_bitmaps()
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
+            # PORT_SCAN -> STALL on no_eligible_port is declared, and was never
+            # taken: the tenant and SQ scans ran unconditionally, so a stall was
+            # always reached from SQ_SCAN having charged all three scans first.
+            if not any(self.port_pending_bitmap.values()):
+                self._set_fsm_state("arbiter_main", "STALL")
+                self.metrics["stalls"] += 1
+                self.logger.debug("arbiter stall no eligible port time=%s", self.env.now)
+                yield self.env.timeout(self.latency["backpressure_retry"])
+                continue
             self._set_fsm_state("arbiter_main", "TENANT_SCAN")
             yield self.env.timeout(self.latency["tenant_scan"])
             self._set_fsm_state("arbiter_main", "SQ_SCAN")
@@ -285,7 +366,7 @@ class ArbitrationIpModel:
                 self._set_fsm_state("arbiter_main", "STALL")
                 self.metrics["stalls"] += 1
                 self.logger.debug("arbiter stall time=%s", self.env.now)
-                yield self.env.timeout(1)
+                yield self.env.timeout(self.latency["backpressure_retry"])
                 continue
             self._set_fsm_state("arbiter_main", "GRANT")
             yield self.env.timeout(self.latency["grant"])
@@ -365,9 +446,13 @@ class ArbitrationIpModel:
             selection = yield self.policy_update_q.get()
             self._set_fsm_state("policy_update", "UPDATE_POINTER")
             yield self.env.timeout(self.latency["pointer_update"])
+            # Advancing all three weighted pointers is the weighted_order_rebuild
+            # the timing model prices at 8 cycles; it was performed but never
+            # charged, so policy_update spanned 3 cycles against a declared 11.
             self.port_policy.advance_to_after(selection["port_id"])
             self.tenant_policies[selection["port_id"]].advance_to_after(selection["tenant_id"])
             self.sq_policies[selection["tenant_id"]].advance_to_after(selection["sq_id"])
+            yield self.env.timeout(self.latency["weighted_order_rebuild"])
             self.metrics["policy_updates"] += 1
             self.logger.debug("policy update selection=%s", selection)
             self._set_fsm_state("policy_update", "UPDATE_AGE")

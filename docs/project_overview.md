@@ -673,7 +673,9 @@ Three pieces make this work, and they reuse what already exists:
   the DLD → template → model chain.
 
 A real delta for `mailbox_ip` (message FIFO deepened, an enqueue op re-timed, a
-scenario added, and a state added to the doorbell FSM) prints as:
+scenario added, and a state added to the doorbell FSM) prints as — the IP has
+since been retired and its template kept only as a test fixture, but the delta
+was real and the output shape is unchanged:
 
 ```text
 4 change(s), overall blast radius: STRUCTURAL
@@ -710,7 +712,8 @@ paths: {model_dir: sim/models, tests_dir: sim/tests, templates_dir: specs}
 naming: {model_file: "{ip}_model.py", model_class: "Sim{camel}"}
 ```
 
-With that profile, `profile.model_file("mailbox_ip")` resolves to
+With that profile — `mailbox_ip` here is just an identifier being transformed,
+not a claim the IP is present — `profile.model_file("mailbox_ip")` resolves to
 `sim/models/mailbox_ip_model.py` and `profile.model_class("mailbox_ip")` to
 `SimMailboxIp` — no tool-code change. This is the seam that turns the pipeline
 from "builds this repo's models" into "an engine you can point at another
@@ -731,9 +734,17 @@ exist, the member APIs and glue FSMs referenced by `connections:` exist, and
 the model actually instantiates its members. Connections can also declare
 **ack semantics** — whether the source waits for the destination's done
 signal (`ack: none | completion_event | level_until_serviced`, with `ack_via`
-naming the return path): the DMA subsystem's IRQ waits for completion events
-from both legs, and the mailbox IRQ subsystem's doorbell is the
-level-until-serviced example.
+naming the return path).
+
+**The repository currently contains no subsystems.** Both that existed —
+`dma_subsystem`, whose IRQ waited on completion events from two legs, and
+`mailbox_irq_subsystem`, whose doorbell was the `level_until_serviced` example —
+were retired (Part 5). The template section, the schema and the wiring checker
+are all still here and still work; what is gone is anything for the checker to
+examine, so the wiring stage inside `validate_dld_flow.py` currently passes by
+having no subjects. Its ability to *reject* bad wiring is kept honest by a
+synthetic subsystem built in a temporary directory by the test suite, precisely
+so that proof does not depend on a particular IP existing.
 
 ## Map of the repository
 

@@ -41,7 +41,7 @@ python tools\check_code_style.py --fix    # auto-fix lint findings and reformat
 ## Model class conventions
 
 - Class name is the CamelCase of the IP name plus `Model`
-  (`mailbox_ip` -> `MailboxIpModel`), with a short docstring stating what the
+  (`completion_ip` -> `CompletionIpModel`), with a short docstring stating what the
   model represents and where its timing comes from.
 - Constructor signature order: `env` first; per-operation latency parameters
   (named `<operation>_latency`, defaulted from the template's timing model);

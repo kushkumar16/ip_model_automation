@@ -64,6 +64,12 @@ documents every section, the rules each gate enforces, and the optional
 `subsystem:` section. It is kept lint-clean by the test suite but is named so
 template discovery never treats it as a real IP.
 
+Note that **no subsystem currently ships** — both were retired — so
+`check_subsystem_wiring.py` and the wiring stage inside `validate_dld_flow.py`
+presently have nothing to examine. Both still work; the test suite proves the
+checker still rejects bad wiring using a synthetic subsystem rather than a real
+one.
+
 DLDs vary in format and often omit details. Extract a draft template plus a gaps
 report from a DLD:
 

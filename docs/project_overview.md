@@ -176,9 +176,8 @@ flowchart TD
    python tools\validate_dld_flow.py
    ```
 
-This exact path added `mailbox_ip`, `spi_master_ip`, and `i3c_ip`: brand-new
-DLDs in, validated models and tests out. (All three have since been retired —
-see Part 5. The path is what this section is about, not the passengers.)
+This exact path is how an IP joins the repo: a brand-new DLD in, a validated
+model and tests out.
 
 ## What makes a DLD "extract well"
 
@@ -672,18 +671,16 @@ Three pieces make this work, and they reuse what already exists:
   sync. This is the same provenance discipline the docx guard uses, applied to
   the DLD → template → model chain.
 
-A real delta for `mailbox_ip` (message FIFO deepened, an enqueue op re-timed, a
-scenario added, and a state added to the doorbell FSM) prints as — the IP has
-since been retired and its template kept only as a test fixture, but the delta
-was real and the output shape is unchanged:
+A delta for `completion_ip` — the per-tenant queue bounded, an enqueue op
+re-timed, a scenario added, and a state added to the scheduler — prints as:
 
 ```text
 4 change(s), overall blast radius: STRUCTURAL
 
-  [STRUCTURAL] FSM `doorbell` states: +['COALESCE'] -[]
-  [SURGICAL  ] queue `message_fifo`.depth: 8 -> 16
-  [SURGICAL  ] timing op `message_push.enqueue`: 1cyc/2ns -> 2cyc/4ns
-  [SURGICAL  ] test_scenario `fifo_high_watermark_backpressure` added
+  [STRUCTURAL] FSM `completion_scheduler` states: +['DRAIN_ON_QUIESCE'] -[]
+  [SURGICAL  ] queue `tenant_pending_queues`.depth: 'unbounded' -> 32
+  [SURGICAL  ] timing op `accept.enqueue`: 4cyc/8ns -> 6cyc/12ns
+  [SURGICAL  ] test_scenario `pending_queue_high_watermark_backpressure` added
 ```
 
 The agent that applies this is the same agent-agnostic step as first-time
@@ -712,10 +709,9 @@ paths: {model_dir: sim/models, tests_dir: sim/tests, templates_dir: specs}
 naming: {model_file: "{ip}_model.py", model_class: "Sim{camel}"}
 ```
 
-With that profile — `mailbox_ip` here is just an identifier being transformed,
-not a claim the IP is present — `profile.model_file("mailbox_ip")` resolves to
-`sim/models/mailbox_ip_model.py` and `profile.model_class("mailbox_ip")` to
-`SimMailboxIp` — no tool-code change. This is the seam that turns the pipeline
+With that profile, `profile.model_file("completion_ip")` resolves to
+`sim/models/completion_ip_model.py` and `profile.model_class("completion_ip")` to
+`SimCompletionIp` — no tool-code change. This is the seam that turns the pipeline
 from "builds this repo's models" into "an engine you can point at another
 codebase." It is being introduced incrementally: the per-IP artifact paths and
 the model-class convention already route through the profile (the previously
@@ -736,15 +732,13 @@ the model actually instantiates its members. Connections can also declare
 signal (`ack: none | completion_event | level_until_serviced`, with `ack_via`
 naming the return path).
 
-**The repository currently contains no subsystems.** Both that existed —
-`dma_subsystem`, whose IRQ waited on completion events from two legs, and
-`mailbox_irq_subsystem`, whose doorbell was the `level_until_serviced` example —
-were retired (Part 5). The template section, the schema and the wiring checker
-are all still here and still work; what is gone is anything for the checker to
-examine, so the wiring stage inside `validate_dld_flow.py` currently passes by
-having no subjects. Its ability to *reject* bad wiring is kept honest by a
-synthetic subsystem built in a temporary directory by the test suite, precisely
-so that proof does not depend on a particular IP existing.
+**The repository currently contains no subsystems.** The template section, the
+schema and the wiring checker are all here and all work; what is missing is
+anything for the checker to examine, so the wiring stage inside
+`validate_dld_flow.py` passes by having no subjects. Its ability to *reject* bad
+wiring is kept honest by a synthetic subsystem the test suite builds in a
+temporary directory, precisely so that proof does not depend on a particular IP
+existing.
 
 ## Map of the repository
 
@@ -1077,43 +1071,25 @@ machine.*
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. |
 | `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. |
 
-## Retired IPs
+## What the gates currently cover
 
-Ten IPs were retired on 2026-09-10: `gdma_ip`, `timer_ip`, `sram_ctrl_ip`,
-`axi_interconnect_ip`, `interrupt_controller_ip`, `mailbox_ip`, `spi_master_ip`,
-`i3c_ip`, and both subsystems (`dma_subsystem`, `mailbox_irq_subsystem`). Their
-DLDs, templates, models, tests and recorded decisions are in git history.
-
-Two artifacts survive as **test fixtures** rather than as IPs, because the test
-suite depended on them for reasons unrelated to their being IPs:
-`tests/fixtures/normalization/mailbox_ip_dld.md` feeds the normalization
-tokenizer tests a structurally rich document to damage in specific ways, and
-`tests/fixtures/templates/mailbox_ip.template.yaml` is the template two tests
-mutate by queue and FSM name. Neither is in the registry and neither is
-processed by any pipeline stage.
-
-**What that costs the gates, stated plainly.** Several now pass by having no
-subjects: `dld_normalization` checks zero documents (`sram_ctrl_ip` was the only
-IP with an author source), the subsystem wiring stage inside
-`validate_dld_flow.py` checks zero subsystems, and `review_findings` checks zero
-reviews. `decisions/` and `reviews/` hold only their READMEs. A green run
-currently certifies much less than it did, and an empty `reviews/` is not a claim
-that the two surviving models are faithful — only that nobody has looked.
+Worth reading before a green run is taken for more than it says. Several gates
+pass by having no subjects: `dld_normalization` checks zero documents, because
+neither IP carries an author source; the subsystem wiring stage inside
+`validate_dld_flow.py` checks zero subsystems; and `decisions/` and `reviews/`
+hold only their READMEs. An empty `reviews/` is not a claim that these two models
+are faithful — only that nobody has looked.
 
 ## Pipeline maturity
 
-*The first two bullets are the pipeline's track record, not a description of
-what the repo currently holds — every IP they name has since been retired. They
-are kept because they are the evidence that the path works.*
-
-- `mailbox_ip`, `spi_master_ip`, and `i3c_ip` **were** added end-to-end through
-  the pipeline: brand-new DLDs went through extraction, review, modeling, and
-  testing, and the whole suite validated. The same path carried both subsystems.
-- `sram_ctrl_ip` went further: its DLD arrived **in another house style**, with
-  no FSM or interface the extractor could read, and was normalized into shape
-  before any of the above ran. Both agent stages passed on the first attempt.
-  It remains the proof that the pipeline accepts documents as engineers write
-  them, not only documents written to its conventions.
+- **IPs have been carried end to end through this pipeline**: a brand-new DLD
+  goes through extraction, review, modeling and testing, and the whole suite
+  validates. Subsystems ride the same path.
+- **A DLD arriving in another house style is handled too** — one with no FSM or
+  interface section the extractor could read is normalized into shape by the
+  `normalize_dld` stage before any of the above runs, with a fidelity gate and a
+  human stamp behind it. The pipeline accepts documents as engineers write them,
+  not only documents written to its conventions.
 - **Every gate runs in one command, locally.** `python tools/run_ci.py` runs the
   repo-wide gates — read from the harness, so adding a stage adds it to CI — and
   `.githooks/pre-push` runs them before a push. There is no hosted CI by choice,

@@ -328,6 +328,46 @@ class TestCompletionIpModel(unittest.TestCase):
         env.run(until=330)
         self.assertEqual(model.metrics["refill_windows"], 2)
 
+    def test_completion_refill_performs_each_action_on_its_declared_transition(self):
+        """The refill_restores_token_window scenario, which nothing exercised.
+
+        Its fsm_coverage names ASSESS_USAGE, REFILL_BASE and PUBLISH_METRICS.
+        One refill test called refill_once() directly, entering none of them; the
+        other ran the process but asserted only a counter. Between them the three
+        declared actions could be moved back off their transitions -- restoring
+        tokens 20 cycles late and timestamping the window snapshot 40 cycles late
+        -- with the whole suite green.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env,
+            service_latency=1,
+            tenant_select_latency=1,
+            token_check_latency=1,
+            emit_latency=1,
+            refill_window=100,
+            start_refill_process=True,
+            log_level="CRITICAL",
+        )
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        model.tokens["T0"].update({"read": 0.0, "write": 0.0, "read_bw": 0.0, "write_bw": 0.0})
+
+        # restore_base_tokens is declared on ASSESS_USAGE -> REFILL_BASE, which
+        # completes at window + usage_assessment = 120.
+        env.run(until=119)
+        self.assertEqual(model.tokens["T0"]["read"], 0.0, "tokens came back before REFILL_BASE was reached")
+        env.run(until=121)
+        self.assertEqual(model.tokens["T0"]["read"], 2.0, "tokens were not restored on entering REFILL_BASE")
+
+        # write_window_metrics is declared on REFILL_BASE -> PUBLISH_METRICS, and
+        # the snapshot it writes was taken at the window boundary, not when it is
+        # published.
+        env.run(until=129)
+        self.assertEqual(model.window_metrics, [], "the window metric was published before PUBLISH_METRICS")
+        env.run(until=131)
+        self.assertEqual(len(model.window_metrics), 1)
+        self.assertEqual(model.window_metrics[0]["time"], 100.0, "the snapshot did not carry the window boundary")
+
     def test_completion_output_backpressure_holds_ready_command(self):
         env = simpy.Environment()
         model = CompletionIpModel(

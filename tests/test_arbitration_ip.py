@@ -206,11 +206,15 @@ class TestArbitrationIpModel(unittest.TestCase):
         burst_calc 2->9 and burst_debit 2->9 each left the suite green. Verified
         by mutation, before and after.
 
-        selection_accept is charged inside READ_PENDING_COUNT rather than on the
-        transition into it. The template prices it as its own 1-cycle operation,
-        so that state holds 1 + 3; the end-to-end total is unaffected, and this
-        pins the shape actually implemented rather than asserting one it does
-        not have.
+        The spans below are the template's own placement: each operation is
+        priced on a transition, so a state holds whatever its exit edge carries.
+        READ_PENDING_COUNT's exit carries 3; the 1-cycle selection_accept sits on
+        the edge *into* it, leaving WAIT_SELECTION.
+
+        This assertion used to read `1 + 3` for READ_PENDING_COUNT, matching a
+        model that charged both inside the state -- a 4 the template states
+        nowhere. Pinning it made the test reject the placement the template does
+        state, which is the opposite of what a test for declared timing is for.
         """
         env = simpy.Environment()
         model = ArbitrationIpModel(env, log_level="CRITICAL")
@@ -237,15 +241,48 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(
             spans,
             {
-                "READ_PENDING_COUNT": 1 + 3,  # selection_accept + pending_count_read
+                "READ_PENDING_COUNT": 3,  # pending_count_read, on its exit edge
                 "READ_BURST": 4,  # burst_read
                 "CALC_ISSUE_COUNT": 2,  # min_burst_calculation
                 "ISSUE_REQUEST": 3,  # downstream_issue_request
             },
         )
-        # The declared new_command_to_issue path totals 38 cycles; the issue
-        # pipeline's own share of it is these six operations.
-        self.assertEqual(model.downstream_requests[0]["time"] - entered["READ_PENDING_COUNT"], 1 + 3 + 4 + 2 + 3 + 2)
+        # The declared new_command_to_issue path totals 38 cycles. Measured from
+        # READ_PENDING_COUNT the pipeline's remaining share is five operations:
+        # selection_accept is already paid by then, on the edge in.
+        self.assertEqual(model.downstream_requests[0]["time"] - entered["READ_PENDING_COUNT"], 3 + 4 + 2 + 3 + 2)
+
+    def test_arbitration_issue_ready_dropping_during_the_request_holds_the_command(self):
+        """issue_ready lowered after ISSUE_REQUEST is entered, which no test drove.
+
+        The declared invariants are that commands are popped only when
+        issue_ready is true and that queue entries remain pending during
+        downstream backpressure. The existing backpressure test lowers
+        issue_ready *before* the selection is made, so it never exercises the
+        re-drive that makes those invariants hold mid-request -- deleting that
+        re-drive entirely left the whole suite green.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        def drop_once_inside_the_request():
+            while model.fsm_state["issue_pipeline"] != "ISSUE_REQUEST":
+                yield env.timeout(1)
+            model.set_issue_ready(False)
+            yield env.timeout(20)
+            model.set_issue_ready(True)
+
+        env.process(drop_once_inside_the_request())
+        env.run(until=40)
+
+        self.assertEqual(model.issued, [], "a command was popped while issue_ready was low")
+        self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 1, "the queue entry did not remain pending")
+        self.assertGreater(model.metrics["output_backpressure_cycles"], 0, "the stall went unrecorded")
+        self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
+
+        env.run(until=200)
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"], "the command never issued")
 
     def _sq_selection_sequence(self, sq_weights, until=400):
         """Selections at the SQ level, under load that keeps all four SQs pending.

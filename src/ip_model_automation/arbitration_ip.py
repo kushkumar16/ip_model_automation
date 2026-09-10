@@ -414,8 +414,15 @@ class ArbitrationIpModel:
         while True:
             self._set_fsm_state("issue_pipeline", "WAIT_SELECTION")
             selection = yield self.selected_sq_q.get()
-            self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
+            # selection_accept is priced on the WAIT_SELECTION ->
+            # READ_PENDING_COUNT transition (latency_cycles: 1), not inside
+            # READ_PENDING_COUNT, whose own exit edge carries 3. Charging both
+            # inside the state made it span 4 -- a figure the template states
+            # nowhere -- and a test then pinned that 4 as if it were the
+            # contract. The end-to-end total is the same either way; the
+            # placement is what the template actually declares.
             yield self.env.timeout(self.latency["selection_accept"])
+            self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
             yield self.env.timeout(self.latency["pending_count"])
             pending_count = self._pending_count(selection)
             self._set_fsm_state("issue_pipeline", "READ_BURST")

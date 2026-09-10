@@ -29,8 +29,14 @@ findings:
 - id: M2
   class: fsm_structure
   severity: medium
-  claim: The RESET state declared for all three FSMs is occupied at no simulated time, and the reset behaviour
-    the template declares is not modelled at all.
+  claim: >-
+    arbiter_main.RESET and arbiter_main.IDLE are occupied at no simulated time, and the reset
+    behaviour the template declares is not modelled by any of the three FSMs. AMENDED after filing:
+    the original claim said RESET was unobservable for all three FSMs, which is wrong for two of
+    them - issue_pipeline and policy_update are readable in RESET before env.run() is called, so a
+    test can assert them, and only arbiter_main overwrites it from inside its own process. The
+    original claim also omitted arbiter_main.IDLE, which is assigned twice and held at no simulated
+    time either.
   template: 'templates/arbitration_ip.template.yaml:100-101 declares arbiter_main state RESET (`Initialize
     pointers and counters`) with :115-119 `RESET -> IDLE, condition: reset_deasserted, actions: [clear_state]`;
     :156 and :199 declare RESET for issue_pipeline and policy_update; :8-10 declares `reset: {type: sync,
@@ -145,3 +151,32 @@ findings:
     and any regression in bitmap_update, tenant_scan, sq_scan, grant, pending_count_read, burst_read or
     min_burst_calculation would pass every test. It is also why M4''s uncharged operation left no failing
     test behind.'
+- id: M8
+  class: timing_mismatch
+  severity: high
+  claim: >-
+    The scan_latency constructor argument silently sets tenant_scan, sq_scan and grant to 0, and
+    every one of this IP's seven tests passes it - so three of the four declared arbiter_main
+    latencies are zero in every test that exists, and the timing model is unexercised by
+    construction rather than by omission.
+  template: >-
+    templates/arbitration_ip.template.yaml timing_model.fsm_process_delays fsm arbiter_main declares
+    port_scan 4, tenant_scan 6, sq_scan 8 and grant 2 cycles as four separate priced operations.
+    Nothing in the template offers or describes a mode in which three of them are zero.
+  model: >-
+    src/ip_model_automation/arbitration_ip.py:81-85 - `if scan_latency is not None:` assigns
+    port_scan_latency = scan_latency and then tenant_scan_latency = 0, sq_scan_latency = 0,
+    grant_latency = 0. tests/test_arbitration_ip.py passes scan_latency=1 at lines 14, 33, 54, 67,
+    88, 115 and 141, which is every test in the file. Measured: at model defaults arbiter_main holds
+    TENANT_SCAN, SQ_SCAN and GRANT across their timeouts and all three are observable; under the
+    test suite none of them is, and `python tools/check_declared_transitions.py arbitration_ip`
+    reports all three as NEVER OCCUPIED.
+  why: >-
+    It is the common cause beneath three findings already filed here and should be ruled on before
+    them. M4 (weighted_order_rebuild charged nowhere) and M7 (declared latency properties exercised
+    by no test) are both symptoms, and the unobservability of TENANT_SCAN, SQ_SCAN and GRANT is an
+    artifact of the tests rather than a property of the model - at defaults those states are
+    occupied. The parameter's name is the defect: it reads as "set the scan latency" and in fact
+    discards three declared timing values, so a test author choosing it for brevity silently opts
+    out of most of the timing model. Filed by hand rather than by the reviewer, which found the
+    symptoms but not this cause.

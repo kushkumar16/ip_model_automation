@@ -154,8 +154,9 @@ def unoccupied_wait_points(ips: list[str]) -> list[str]:
                 if (fsm, state) in unobservable:
                     notes.append(
                         f"{ip}: interface `{interface.get('name')}` declares "
-                        f"{wait_model.get('mode')} at `{point}`, and the model assigns that state but "
-                        f"never holds it for any simulated time - nothing can observe it parked there"
+                        f"{wait_model.get('mode')} at `{point}`, and under this IP's own tests the model "
+                        f"assigns that state without ever holding it - no current test observes it parked "
+                        f"there. Check the model's default latencies before reading this as a model defect"
                     )
     return notes
 

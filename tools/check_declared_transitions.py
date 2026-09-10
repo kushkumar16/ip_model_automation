@@ -195,9 +195,17 @@ class Occupancy:
     ``assigned`` is every state the model ever wrote. ``observable`` is the
     subset that was still the current state when the clock advanced. A state in
     the first and not the second, and not a process's resting state at the end of
-    the run, exists at no simulated time: the assignment is immediately
-    overwritten, so no test, log or trace can observe it, and a scenario naming it
-    in ``fsm_coverage`` is claiming coverage no assertion could ever have.
+    the run, held for no simulated time, so no assertion in this run could have
+    seen it, and a scenario naming it in ``fsm_coverage`` claims coverage no test
+    could have.
+
+    **This is measured under the IP's own test suite, which makes it a statement
+    about the model as exercised, not about the model.** A state can be
+    unoccupied here purely because the tests zero the latency that would have held
+    it -- `arbitration_ip` is exactly that case, where passing `scan_latency`
+    silently sets three other latencies to 0. Read a result here as "no current
+    test could observe this", and check the defaults before concluding the model
+    can never occupy it.
     """
 
     assigned: dict[str, set[str]] = dataclasses.field(default_factory=dict)
@@ -311,7 +319,9 @@ def format_report(results: list[dict[str, Any]]) -> list[str]:
         for fsm, source, target in result["never_taken"]:
             lines.append(f"  NEVER TAKEN {fsm}: {source} -> {target}")
         for fsm, state in result["unobservable_states"]:
-            lines.append(f"  NEVER OCCUPIED {fsm}: {state}  (assigned, overwritten before the clock moved)")
+            lines.append(
+                f"  NEVER OCCUPIED {fsm}: {state}  (under this IP's own tests, the clock never moved while it held)"
+            )
     lines.append("")
     lines.append("* the state it leaves has no declared exit at all, so the template constrained nothing here")
     return lines

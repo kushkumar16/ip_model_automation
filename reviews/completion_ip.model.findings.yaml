@@ -1,204 +1,260 @@
 ip: completion_ip
 kind: model
-template_sha256: 7b00a3e0a5caf9ae6be83fb1cf84a580b3c3640776f362835545f833784da671
-model_sha256: 34046eaf11340dabef4fea2a65b3bef8328fa7e6f81efdaba2d617a4a78cb47f
-tests_sha256: 96fec3e4016fab320b124fbc29ec3db33aa6581efecec1cc579c164e48e9285e
+template_sha256: cced5c1c3e896d35f39f68211f6f493b76966431e514fcc718ed7e0d189e329b
+model_sha256: d25105843b984a3fff68af7894cc911e81735589ddd144344aa06048d8011b6b
+tests_sha256: cc355f01efe4b2d4d54c68db6f5a219e9f29d65ee33ce5dab9204425ad4e27e9
 findings:
-  - id: M1
+  - id: M8
     class: wait_model_impl
     severity: high
     claim: >-
-      The declared wait point of `accepted_cmd_if` exists at no simulated time — `accept`
-      is assigned `ENQUEUE` and overwritten with `READY` before the next yield — and the
-      producer's put never blocks, so nothing about this interface's wait model is
-      observable or enforced.
+      The producer on `accepted_cmd_if` never waits for anything: `submit()` puts into an
+      undeclared unbounded `simpy.Store` that is not `tenant_pending_queues`, so the peer's
+      accept is acknowledged at the instant of submission — before `ENQUEUE` is charged, and
+      whether or not `accept` is sitting in `BACKPRESSURE`.
     template: >-
       interfaces[accepted_cmd_if].wait_model: mode `wait_for_ack_inline`, requester `peer`,
-      wait_points `[accept.ENQUEUE]`, resumes_on `accept_ready`; notes "a full pending queue
-      holds the FSM in `BACKPRESSURE` and deasserts `ready`".
+      wait_points `[accept.ENQUEUE]`, resumes_on `accept_ready`; notes "the producer needs no
+      result, only the accept; a full pending queue holds the FSM in `BACKPRESSURE` and
+      deasserts `ready`". queues[tenant_pending_queues].blocking_behavior `stall`;
+      fsm_processes[accept].transitions `READY -> BACKPRESSURE` / `BACKPRESSURE -> READY`.
     model: >-
-      src/ip_model_automation/completion_ip.py:111 sets fsm_state["accept"] = "ENQUEUE";
-      the next statement that touches it is line 100 (`fsm_state["accept"] = "READY"`, loop
-      top) with no yield in between. src/ip_model_automation/completion_ip.py:37 and :96 —
-      `simpy.Store(env)` with no capacity, so `submit()`'s put event is triggered at once.
+      src/ip_model_automation/completion_ip.py:57 `self.input_q = simpy.Store(env)` (no
+      capacity); :113-116 `submit()` returns `self.input_q.put(command)`;
+      :121 `command = yield self.input_q.get()` dequeues before the queue-full test at
+      :128-132, so the command is already taken from the peer when BACKPRESSURE is entered.
     why: >-
-      Measured by stepping the environment: over 646 step boundaries covering 50 accepted
-      commands (clock 0..2001), `fsm_state["accept"]` was `READY` at every boundary and
-      `ENQUEUE` at none, so the state the wait model names cannot be observed by any test,
-      log or trace at any simulated time. Measured separately: 1000 concurrent submits all
-      completed their put immediately (store capacity `inf`), so the peer never waits for an
-      accept and `ready` never deasserts. `tools/check_wait_model_coverage.py` reports
-      "OK (1 models implement every declared wait point)" for this IP because it reads the
-      assignment in the source, so this interface passes its gate while modelling none of
-      the declared blocking behaviour.
-  - id: M2
+      Measured on a model built with `pending_depth=1` and a tenant with zero tokens, so the
+      pending queue is full and never drains: five `submit()` calls all returned put events
+      with `triggered == True` at t=0 (`input_q.capacity` is `inf`). At t=50 `accept` was
+      observably in `BACKPRESSURE` with 46 `queue_full_stalls` recorded, one command in
+      `pending`, and **three commands still sitting in `input_q`** — an unbounded buffer the
+      template does not declare, holding backlog that no declared queue depth bounds and no
+      `queue_depth` metric reports. So `ready` never deasserts to the producer, the peer is
+      acked at t=0 rather than at the wait point `accept.ENQUEUE` (which completes at t=4),
+      and `queues[tenant_pending_queues].blocking_behavior: stall` stalls nothing upstream.
+      `tools/check_wait_model_coverage.py` reports "OK (1 models assign every declared wait
+      point)" because it reads the `fsm_state` assignment, not the blocking behaviour, so
+      this interface passes its gate while modelling none of it.
+  - id: M9
     class: fsm_structure
     severity: high
     claim: >-
-      Three of the four declared `refill` states are entered and left with no yield between
-      them, so the `refill` FSM is observably in `WAIT_WINDOW` for the whole simulation and
-      `ASSESS_USAGE`, `REFILL_BASE` and `PUBLISH_METRICS` exist at no simulated time.
+      Tokens are debited before `output_ready` is tested, so the model takes
+      `CHECK_TOKENS -> EMIT` on half its declared condition; the debit is then stranded for as
+      long as `cpl_ready` stays low, and a refill arriving during the stall credits it back so
+      the completion is finally emitted having spent no tokens at all.
     template: >-
-      fsm_processes[refill].states `[WAIT_WINDOW, ASSESS_USAGE, REFILL_BASE, PUBLISH_METRICS]`
-      with all four transitions declared; timing_model.fsm_process_delays[refill] operations
-      `usage_assessment` 20 cycles, `base_refill` 10 cycles, `metrics_publish` 10 cycles;
-      interfaces[qos_config_if].wait_model.wait_points `[refill.REFILL_BASE]`.
+      fsm_processes[completion_scheduler].transitions: `CHECK_TOKENS -> EMIT` condition
+      `required_tokens_available_and_output_ready`, actions `[debit_tokens]`; `EMIT ->
+      STALL_OUTPUT` condition `output_not_ready`, actions `[hold_completion,
+      increment_output_stall]`. fsm_relationships.gating_relationships: `token_availability`
+      gates `completion_scheduler.EMIT` and `completion_queue_if.cpl_ready` gates
+      `completion_scheduler.EMIT`. functionality_model.invariants: "A completion is emitted
+      only after required tokens are debited."
     model: >-
-      src/ip_model_automation/completion_ip.py:209-220 (`refill_once`) assigns
-      `ASSESS_USAGE` (:211), `REFILL_BASE` (:214) and `PUBLISH_METRICS` (:217) back to back
-      with no yield anywhere in the function, and :224 reassigns `WAIT_WINDOW` on re-entry to
-      the loop. The 20/10/10 cycles are charged at :226-228, before `refill_once()` is called
-      and while fsm_state["refill"] still reads `WAIT_WINDOW`.
+      src/ip_model_automation/completion_ip.py:243 `self._debit(tenant_id, costs)` runs
+      unconditionally after the token test at :231, before the output test at :245; the
+      `while not self.output_ready` loop at :245-252 then holds without re-checking or
+      restoring tokens, and the emit at :253-259 proceeds with no second token test.
+      `EMIT` set at :244 and again at :252 is overwritten by `STALL_OUTPUT` at :248 with no
+      yield between.
     why: >-
-      Measured by stepping the environment with `start_refill_process=True` and
-      `refill_window=50`: across 646 step boundaries and 22 completed refill windows,
-      `fsm_state["refill"]` was `WAIT_WINDOW` at every boundary and never anything else. Three
-      quarters of the declared FSM is therefore unobservable, and the 40 cycles of declared
-      refill work are charged in the wrong state. This also makes `qos_config_if`'s declared
-      wait point `refill.REFILL_BASE` unobservable, and makes the
-      `refill_restores_token_window` scenario's `fsm_coverage`
-      `[refill.ASSESS_USAGE, refill.REFILL_BASE, refill.PUBLISH_METRICS]` impossible for any
-      test to check. `tools/check_declared_transitions.py` counts all four transitions as
-      taken, because it sees the assignments.
-  - id: M3
+      Measured with template latencies (4/8/5/4) and `cpl_ready` low from t=0: at t=13 the
+      tenant's budget dropped from read 5 / read_bw 100 to read 4 / read_bw 96 while the
+      scheduler sat in `STALL_OUTPUT` and no completion existed. Run for 500 cycles with
+      `cpl_ready` never returning, a tenant with read 1 / read_bw 4 ended at read 0.0 /
+      read_bw 0.0 with two commands still pending, zero completions and 487 output stalls —
+      the tokens are debited and stranded, and nothing ever credits them back. In the
+      opposite direction, with `refill_window=20` and `start_refill_process=True`, the debit
+      taken at t=13 was wiped by the refill at t=60; when `cpl_ready` returned, `r0` completed
+      at t=104 having spent **0.0 net read tokens** against a base budget of 1.0, so a
+      completion was emitted whose debit had been undone — the stated invariant holds only in
+      the source order, not in the resulting token accounting. Separately, stepping the
+      environment shows that under backpressure `EMIT` is occupied at no simulated time
+      (states observed from t=13 onward: `['STALL_OUTPUT']` only), so the node both declared
+      gates hang off cannot be observed in the case where either gate fires.
+  - id: M10
+    class: fsm_structure
+    severity: medium
+    claim: >-
+      The scheduler takes `CHECK_TOKENS -> WAIT_TOKENS` when the tenant is not alive — a
+      condition the template does not declare anywhere in this FSM — and records it in an
+      undeclared counter instead of the declared `increment_token_stall`.
+    template: >-
+      fsm_processes[completion_scheduler].transitions declares exactly one entry to
+      WAIT_TOKENS: `CHECK_TOKENS -> WAIT_TOKENS`, condition `required_tokens_unavailable`,
+      actions `[increment_token_stall]`. `tenant_inactive` is declared only as a command
+      error_condition (commands[READ].error_conditions, commands[WRITE].error_conditions),
+      not as a scheduler condition; performance_model.metrics lists `token_stalls`, and no
+      inactive-tenant metric.
+    model: >-
+      src/ip_model_automation/completion_ip.py:224-229 — `if not self.tenant_alive[tenant_id]:`
+      sets `fsm_state["completion_scheduler"] = "WAIT_TOKENS"` (:225) and increments
+      `metrics["tenant_inactive_stalls"]` (:226). Asserted as correct by
+      tests/test_completion_ip.py:71-84
+      (`test_completion_scheduler_stalls_when_tenant_goes_inactive`, :83).
+    why: >-
+      Measured by stepping the environment with a fully funded tenant marked dead at t=5:
+      over 200 cycles the observed scheduler states were `['CHECK_TOKENS', 'SELECT_TENANT',
+      'WAIT_TOKENS']`, `tenant_inactive_stalls` reached 14, `token_stalls` stayed 0 and the
+      token budget was untouched (read 5 / read_bw 100). So a trace reads `WAIT_TOKENS` —
+      the state whose only declared meaning is "the tenant cannot pay" — while the tenant can
+      pay in full, and the stall is invisible in the one stall metric the template declares
+      for that node. Two different failures (`read_token_starvation` and `tenant_inactive`,
+      which the template keeps as separate command error_conditions) are merged into one
+      state and separated only by an undeclared counter.
+  - id: M11
+    class: fsm_structure
+    severity: medium
+    claim: >-
+      All three of `refill`'s declared actions are performed after the last of its four states
+      has finished, so base tokens are restored 20 cycles after the model has left
+      `REFILL_BASE` and the window snapshot is taken 40 cycles after the window boundary it
+      claims to describe.
+    template: >-
+      fsm_processes[refill].transitions: `WAIT_WINDOW -> ASSESS_USAGE` actions
+      `[snapshot_window_usage]`; `ASSESS_USAGE -> REFILL_BASE` actions `[restore_base_tokens]`;
+      `REFILL_BASE -> PUBLISH_METRICS` actions `[write_window_metrics]`.
+      interfaces[qos_config_if].wait_model wait_points `[refill.REFILL_BASE]`, resumes_on
+      `config_applied`. timing_model.fsm_process_delays[refill]: usage_assessment 20,
+      base_refill 10, metrics_publish 10.
+    model: >-
+      src/ip_model_automation/completion_ip.py:282-294 (`refill_process`) charges all four
+      timeouts (:285, :287, :291, :293) and only then calls `self.refill_once()` at :294;
+      `refill_once` (:266-280) takes the snapshot at :275, restores tokens at :276-277 and
+      appends the window metric at :278 — every one of them while `fsm_state["refill"]` still
+      reads `PUBLISH_METRICS`.
+    why: >-
+      Measured by stepping the environment with `refill_window=100`, `start_refill_process=True`
+      and a tenant drained to zero: t=100 `ASSESS_USAGE`, t=120 `REFILL_BASE`, t=130
+      `PUBLISH_METRICS` — with `T0.read` still 0.0 at every one of them — and the tokens only
+      became 1 at t=140, together with the first `window_metrics` entry, whose recorded
+      `time` is `140.0` rather than the window boundary at 100. A concurrently starved
+      scheduler therefore stays starved for 20 cycles past the point the contract says the
+      base tokens are back, `qos_config_if`'s `config_applied` does not happen at its declared
+      wait point `refill.REFILL_BASE`, and the metric snapshot attributes 40 cycles of the
+      next window's completions to the window it labels. Neither test named for the
+      `refill_restores_token_window` scenario catches this:
+      tests/test_completion_ip.py:196-210 calls `refill_once()` directly, entering none of the
+      three states in that scenario's `fsm_coverage`, and tests/test_completion_ip.py:212-227
+      runs the process but asserts only `metrics["refill_windows"]`.
+  - id: M12
+    class: test_asserts_wrong_thing
+    severity: medium
+    claim: >-
+      `test_completion_output_port_serialises_emits` cannot fail. Its assertion holds
+      identically with the declared capacity-1 port replaced by one of capacity 1,000,000, or
+      removed entirely, because a single scheduler process already serialises its own emits.
+    template: >-
+      resources[completion_output_port]: capacity 1, bandwidth
+      `one_completion_per_dispatch_tick`, arbitration `weighted_round_robin`, sharing_scope
+      `global`; declared in fsm_processes[completion_scheduler].resources_used.
+    model: >-
+      tests/test_completion_ip.py:171-194 — `assertGreaterEqual(second - first, 6, "the port
+      did not serialise the two emits")` with `emit_latency=6`. The port it claims to test is
+      src/ip_model_automation/completion_ip.py:55 and :256-258, requested and released inside
+      the one `completion_scheduler` process (:206) — the only process that ever requests it.
+    why: >-
+      Measured by running the test's exact body against three models identical but for the
+      port: capacity 1, capacity 1000 and capacity 1,000,000 all produced completions at
+      t=[10, 18], gap 8, assertion passing in every case; substituting a no-op context manager
+      for the port gave the same [10, 18]. Instrumented over the same run, the port's request
+      queue never exceeded 0 entries — there is never a second requester, so contention at
+      this resource cannot occur and the 8-cycle gap is just the scheduler's own loop
+      (`tenant_select` 1 + `token_check` 1 + `emit` 6). The test therefore reports the
+      declared capacity as enforced while measuring only that one process runs one command at
+      a time, and no change to the resource can make it fail.
+  - id: M13
+    class: fsm_structure
+    severity: medium
+    claim: >-
+      `IDLE` is occupied at no simulated time after construction and the scheduler reaches it
+      by three transitions the template does not declare, while the two declared transitions
+      back to `SELECT_TENANT` are never taken; the declared entry condition
+      `any_pending_command` is not implemented at all, so the scheduler charges its 8-cycle
+      tenant select even with nothing pending.
+    template: >-
+      fsm_processes[completion_scheduler]: `IDLE -> SELECT_TENANT` condition
+      `any_pending_command`, actions `[load_weighted_tenant_order]`; `EMIT -> SELECT_TENANT`
+      condition `more_candidates`; `WAIT_TOKENS -> SELECT_TENANT` condition
+      `next_dispatch_tick_or_refill`. No transition into `IDLE` is declared from any state.
+      timing_model.fsm_process_delays[completion_scheduler] operation `tenant_select` 8 cycles.
+    model: >-
+      src/ip_model_automation/completion_ip.py:207-214 — the loop top sets
+      `fsm_state["completion_scheduler"] = "IDLE"` (:208) and then `"SELECT_TENANT"` (:213)
+      with no yield between, and the `yield self.env.timeout(self.tenant_select_latency)` at
+      :214 runs unconditionally before `_select_tenant()` at :215 is ever consulted. Every
+      `continue` (:219, :229, :236) and the fall-through after :264 re-enter the loop at :208.
+    why: >-
+      Measured by stepping the environment. In a 30-command mixed-tenant run over 350 step
+      boundaries, `IDLE` was observed at exactly one boundary — t=0, the value the constructor
+      wrote — and at none thereafter; the same holds in the single-command trace, which goes
+      t=0 `SELECT_TENANT`, t=8 `CHECK_TOKENS`, t=13 `EMIT`, t=17 `SELECT_TENANT` with no
+      observable `IDLE` between commands. In a run with nothing ever submitted the scheduler
+      still burned 8 + 1 cycles per pass and recorded 22 `stalls` in 200 cycles, so it is never
+      observably idle even when idle. `tools/check_declared_transitions.py` independently
+      reports `UNDECLARED completion_scheduler: EMIT -> IDLE`, `SELECT_TENANT -> IDLE` and
+      `WAIT_TOKENS -> IDLE`, and `NEVER TAKEN completion_scheduler: EMIT -> SELECT_TENANT` and
+      `WAIT_TOKENS -> SELECT_TENANT` — I confirmed each by trace. The declared `more_candidates`
+      shortcut out of `EMIT` does not exist: every command re-pays the full tenant select.
+  - id: M14
     class: timing_mismatch
-    severity: high
+    severity: low
     claim: >-
-      The declared no-stall completion path costs 21 cycles / 42 ns, but the model charges
-      17 cycles / 34 ns, because `enqueue` runs concurrently with `tenant_select` in a
-      separate process and is entirely hidden inside it.
+      The `completion_output_port`'s declared `latency_cycles: 1` is charged nowhere;
+      acquiring the port costs zero simulated time.
     template: >-
-      timing_model.end_to_end_paths[no_stall_completion]: cycles 21, ns 42, path
-      `[enqueue, tenant_select, token_check, completion_emit]` (4 + 8 + 5 + 4 = 21);
-      timing_model.cycle_time_ns 2.
+      resources[completion_output_port].latency_cycles: 1 (with capacity 1, bandwidth
+      `one_completion_per_dispatch_tick`); timing_model.cycle_time_ns 2.
     model: >-
-      src/ip_model_automation/completion_ip.py:102 charges `service_latency` (enqueue, 4) in
-      `accept_process`, while :164 charges `tenant_select_latency` (8) concurrently in
-      `completion_scheduler`; :174 charges `token_check_latency` (5) and :201
-      `emit_latency` (4).
+      src/ip_model_automation/completion_ip.py:256-258 — `with self.completion_output_port.request()
+      as port: yield port; yield self.env.timeout(self.emit_latency)`. The only cost inside the
+      hold is `emit_latency`, which is the separate `completion_emit` operation
+      (timing_model.fsm_process_delays[completion_scheduler]); no timeout corresponds to the
+      port's own latency.
     why: >-
-      Measured with the template's own latencies (4/8/5/4): a command submitted at t=0
-      completes at t=17, with the traced sequence t=0 IDLE, t=8 CHECK_TOKENS, t=13 EMIT,
-      t=17 completed — the 4-cycle enqueue finishes at t=4, inside the scheduler's 8-cycle
-      select, and costs nothing. Raising `service_latency` by 20 moves the completion by only
-      18 cycles, confirming the overlap; raising each of the other three moves it by the full
-      20. Across submit times 0..59 the end-to-end latency measured 14 to 22 cycles depending
-      on where the arrival falls in the scheduler's polling period, and steady-state
-      completions were spaced 17 cycles apart. Any latency figure taken from this model is
-      ~19% below the contract's, and is not even a constant.
-  - id: M4
-    class: fsm_structure
-    severity: high
-    claim: >-
-      The scheduler enters `STALL_OUTPUT` from `CHECK_TOKENS`, before tokens are checked or
-      debited; the template declares that stall only out of `EMIT`, after `debit_tokens`, so
-      `EMIT` is never entered under output backpressure and a token-starved command records
-      no token stall while `cpl_ready` is low.
-    template: >-
-      fsm_processes[completion_scheduler].transitions declares `EMIT -> STALL_OUTPUT`
-      (condition `output_not_ready`, actions `[hold_completion, increment_output_stall]`) and
-      `CHECK_TOKENS -> EMIT` (condition `required_tokens_available_and_output_ready`, actions
-      `[debit_tokens]`); there is no `CHECK_TOKENS -> STALL_OUTPUT`. fsm_relationships.
-      gating_relationships: `completion_queue_if.cpl_ready` gates
-      `completion_scheduler.EMIT`.
-    model: >-
-      src/ip_model_automation/completion_ip.py:181-188 tests `self.output_ready` and sets
-      `fsm_state["completion_scheduler"] = "STALL_OUTPUT"` at :184, before the token check at
-      :191 and the debit at :198.
-    why: >-
-      Measured with `cpl_ready` low: the states observed at step boundaries were
-      `['CHECK_TOKENS', 'IDLE', 'STALL_OUTPUT']` and `EMIT` was never among them, so the gate
-      the template attaches to `EMIT` is not visible where the contract says to look, and
-      token budgets stay untouched (read 5/read_bw 100 unchanged after 200 cycles of stall)
-      where the template debits them before stalling. Because the output check precedes the
-      token check, a tenant with zero tokens and `cpl_ready` low recorded
-      `output_stalls: 14, token_stalls: 0` — the token starvation is invisible in the
-      declared `token_stalls` metric, and stall attribution between the two declared
-      `gating_relationships` is decided by the model's ordering rather than the contract's.
-  - id: M5
-    class: fsm_structure
+      Measured by construction with every other latency at 0 and one at a time: `tenant_select`
+      alone gives t=8, `token_check` alone t=6 (5 + the 1-cycle empty-scan retry),
+      `emit` alone t=5, and template defaults give exactly t=17 = 8 + 5 + 4. There is no
+      residue for a port latency at any setting, and with all latencies at 0 a command
+      completes at t=1. A reader taking `resources.completion_output_port.latency_cycles` as a
+      modelled cost is wrong by one cycle per completion. **Flagged as needing a template
+      decision, not necessarily a model change:** the template's own
+      `end_to_end_paths.no_stall_completion` enumerates `[tenant_select, token_check,
+      completion_emit]` and states 17 cycles, which the model matches exactly — charging the
+      declared port latency would make it 18 and break that figure. The same
+      `resources` block also declares `one_completion_per_dispatch_tick`
+      (qos.dispatch_tick_ms 1 = 500,000 cycles at 500 MHz) against a measured back-to-back
+      spacing of 17 cycles, which no reading of the 17-cycle path can satisfy either. Which
+      side is wrong is a person's call.
+  - id: M15
+    class: timing_mismatch
     severity: medium
     claim: >-
-      `accept.BACKPRESSURE` is entered on an undeclared condition (tenant not alive) and
-      never on the declared one (incoming valid and queue full), and like `ENQUEUE` it is
-      assigned and overwritten with no yield, so it exists at no simulated time either.
+      A token-starved command retries once per cycle rather than once per dispatch tick, so
+      `WAIT_TOKENS -> SELECT_TENANT` is taken about 500,000 times more often than declared and
+      the `token_stalls` metric is inflated by the same factor.
     template: >-
-      fsm_processes[accept].transitions: `READY -> BACKPRESSURE` condition
-      `incoming_valid_and_queue_full`, actions `[increment_queue_full_stall]`, and
-      `BACKPRESSURE -> READY` condition `queue_space_available`;
-      timing_model.fsm_process_delays[accept] operation `queue_full_retry` 1 cycle.
-      `tenant_inactive` is declared only as a command error_condition (commands[READ],
-      commands[WRITE].error_conditions), not as an `accept` transition.
+      fsm_processes[completion_scheduler].transitions `WAIT_TOKENS -> SELECT_TENANT`,
+      condition `next_dispatch_tick_or_refill`; qos.dispatch_tick_ms 1 with
+      timing_model.clock_mhz 500 (= 500,000 cycles per tick); qos.insufficient_token_behavior
+      `command_remains_pending_until_refill`; performance_model.metrics includes
+      `token_stalls`. The template gives `output_stall_retry` its own 1-cycle entry in
+      fsm_process_delays and deliberately gives the token-stall retry none.
     model: >-
-      src/ip_model_automation/completion_ip.py:103-108: `if not self.tenant_alive[...]` sets
-      `fsm_state["accept"] = "BACKPRESSURE"` (:104) and increments
-      `metrics["tenant_inactive_stalls"]` (:105), then falls to the loop top at :100 which
-      overwrites the state with `READY`. Asserted as correct by
-      tests/test_completion_ip.py:59-69
-      (`test_completion_inactive_tenant_parks_command_at_accept`).
+      src/ip_model_automation/completion_ip.py:235 `yield self.env.timeout(self.retry_latency)`
+      — the same `retry_latency` (default 1, :38) used for the output-stall retry at :251 and
+      the queue-full retry at :132, with no dispatch-tick or refill event involved.
     why: >-
-      Measured with an inactive tenant: `BACKPRESSURE` was assigned but observed at no step
-      boundary, and the declared condition cannot occur at all because the pending queues are
-      unbounded (queues[tenant_pending_queues].depth `unbounded`) — 5000 submits were all
-      accepted with no put ever blocking and no queue-full metric incremented, and the
-      declared `queue_full_retry` cycle is never charged. A reader who sees `BACKPRESSURE` in
-      this model's source will read it as the queue-full backpressure the template and the
-      `accepted_cmd_if` notes describe, when it in fact reports a dead tenant; the command is
-      still appended to the pending queue at :106 either way.
-  - id: M6
-    class: capacity_mismatch
-    severity: medium
-    claim: >-
-      The declared `completion_output_port` resource is not modelled at all — there is no
-      SimPy resource in the model — so neither its capacity, its `latency_cycles: 1`, nor its
-      one-completion-per-dispatch-tick bandwidth is enforced.
-    template: >-
-      resources[completion_output_port]: type `completion_port`, capacity 1, bandwidth
-      `one_completion_per_dispatch_tick`, latency_cycles 1, arbitration
-      `weighted_round_robin`, sharing_scope `global`; declared in
-      fsm_processes[completion_scheduler].resources_used; qos.dispatch_tick_ms 1.
-    model: >-
-      src/ip_model_automation/completion_ip.py:28-61 — the only SimPy object constructed is
-      `self.input_q = simpy.Store(env)` (:37); the model holds no `simpy.Resource` or
-      `Container`. `completion_scheduler` (:161-207) emits by appending to `self.completed`
-      (:202) after `emit_latency`, requesting nothing.
-    why: >-
-      Measured on the constructed model: the set of SimPy Resource/Container attributes is
-      empty, and back-to-back completions were spaced 17 cycles apart — about 29,000
-      completions per dispatch tick (qos.dispatch_tick_ms 1 = 500,000 cycles at 500 MHz),
-      against a declared bandwidth of one. The port's 1-cycle latency is charged nowhere: the
-      measured no-stall path is exactly tenant_select + token_check + emit with no port cost.
-      Nothing in the model can ever produce output-port contention or a weighted_round_robin
-      arbitration decision at the port, so any utilization figure for
-      `completion_output_port` is unbacked. Note for whoever resolves this: the template's own
-      21-cycle `no_stall_completion` path is not reconcilable with a one-per-dispatch-tick
-      port either, so the question of which rate the contract means may need settling before
-      the model can be judged against it.
-  - id: M7
-    class: fsm_structure
-    severity: medium
-    claim: >-
-      `completion_scheduler.SELECT_TENANT` exists at no simulated time on the completion
-      path — it is assigned and overwritten with no yield whenever a candidate is found — so
-      the only time the state is observable is when selection fails.
-    template: >-
-      fsm_processes[completion_scheduler].states includes `SELECT_TENANT`, reached by
-      `IDLE -> SELECT_TENANT` (condition `any_pending_command`, actions
-      `[load_weighted_tenant_order]`) and left by `SELECT_TENANT -> CHECK_TOKENS` (condition
-      `candidate_found`, actions `[peek_candidate]`); fsm_relationships.sequential_paths
-      [command_completion_path] lists `completion_scheduler.SELECT_TENANT` as a step of the
-      completion path.
-    model: >-
-      src/ip_model_automation/completion_ip.py:165 sets
-      `fsm_state["completion_scheduler"] = "SELECT_TENANT"`; when `_select_tenant()` at :166
-      returns a tenant, the next assignment is `CHECK_TOKENS` at :173 with no yield between
-      them. Only the empty branch at :167-170 yields while the state reads `SELECT_TENANT`.
-    why: >-
-      Measured by stepping the environment: in the token-starvation, output-backpressure and
-      inactive-tenant runs — every run in which a candidate was found on the first scan —
-      `SELECT_TENANT` was assigned but observed at no step boundary; the traced completion of
-      a single command goes t=0 IDLE, t=8 CHECK_TOKENS with nothing in between. In the
-      mixed-traffic run it was observed only during the polls that found nothing pending. So
-      the state is observable exactly when the model is *not* selecting a tenant, which
-      inverts its meaning for anyone reading a trace, and a coverage test written against the
-      declared `command_completion_path` cannot check this step.
+      Measured with template latencies and a tenant holding zero tokens: 71 `token_stalls` were
+      recorded in the first 1,000 cycles, i.e. one every ~14 cycles, where one dispatch tick is
+      500,000 cycles — so a single starved command would record roughly 35,000 token stalls per
+      declared tick. Any `token_stalls` figure taken from this model is a count of scheduler
+      polls, not of dispatch opportunities missed, and is not comparable across runs with
+      different latencies. Functional behaviour is unaffected (the command does remain pending
+      until refill, as declared), which is why this is timing and metrics rather than
+      behaviour. **Flagged as interpretive:** the template names the condition
+      (`next_dispatch_tick_or_refill`) and supplies `dispatch_tick_ms` but never writes the
+      retry as a cycle count in `fsm_process_delays`, so reading 500,000 cycles into it is my
+      inference from two fields rather than a single stated number.

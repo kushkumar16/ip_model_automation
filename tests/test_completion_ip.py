@@ -249,10 +249,16 @@ class TestCompletionIpModel(unittest.TestCase):
 
         self.assertEqual(len(model.completed), 1)
         completed_at = model.completed[0][0]
-        # The declared path is measured from the command becoming pending, which
-        # is the end of ENQUEUE -- the scheduler cannot select what has not
-        # arrived. tenant_select 8 + token_check 5 + emit 4 = 17.
-        self.assertEqual(completed_at - model.service_latency, 8 + 5 + 4)
+        # tenant_select 8 + token_check 5 + emit 4 = 17, measured from submission
+        # and not from the end of ENQUEUE. This assertion used to subtract
+        # service_latency, on the reasoning that the scheduler cannot select what
+        # has not arrived -- which sounds right and is not what the template
+        # says. The scheduler pays tenant_select from the top of its loop, so the
+        # 4-cycle enqueue overlaps the 8-cycle select; the template's own note
+        # records having corrected 21 to 17 for exactly this reason. Subtracting
+        # made the test pass on a model that had regressed to 21 and fail on one
+        # that hits the declared 17.
+        self.assertEqual(completed_at, 8 + 5 + 4)
 
         held = [now for now, count in busy if count]
         self.assertEqual(

@@ -216,10 +216,6 @@ class CompletionIpModel:
                 return tenant_id
         return None
 
-    def _any_pending_command(self) -> bool:
-        """The declared IDLE -> SELECT_TENANT condition."""
-        return any(queue for queue in self.pending.values())
-
     def _can_pay(self, tenant_id: str, costs: Dict[str, float]) -> bool:
         return all(self.tokens[tenant_id][name] >= cost for name, cost in costs.items())
 
@@ -250,27 +246,27 @@ class CompletionIpModel:
 
     def completion_scheduler(self):
         while True:
-            # IDLE is held until any_pending_command, the declared condition on
-            # IDLE -> SELECT_TENANT. It used to be assigned at the loop top and
-            # overwritten by SELECT_TENANT with no yield between, so it existed
-            # at no simulated time, was reached by three undeclared transitions,
-            # and the 8-cycle tenant select was charged on every pass even with
-            # nothing pending.
-            self.fsm_state["completion_scheduler"] = "IDLE"
-            while not self._any_pending_command():
-                self.metrics["stalls"] += 1
-                yield self.env.timeout(self.retry_latency)
-
             while True:
-                # SELECT_TENANT is entered before its cost is charged, so it is
-                # held for the whole selection.
+                # The scheduler pays tenant_select from the top of its loop,
+                # before it has a candidate. That is not an oversight: the
+                # template's no_stall_completion note says so in as many words,
+                # and the 17-cycle figure depends on it -- a command's 4-cycle
+                # enqueue overlaps the 8-cycle select rather than preceding it,
+                # because accept and completion_scheduler are declared parallel.
+                #
+                # Waiting in IDLE for any_pending_command before selecting makes
+                # those two serial and puts a single READ at 21, which is the
+                # figure the template records having already corrected away. So
+                # IDLE is where a select that found nothing waits, and it is held
+                # there for the retry so it occupies real time.
                 self.fsm_state["completion_scheduler"] = "SELECT_TENANT"
                 yield self.env.timeout(self.tenant_select_latency)
                 tenant_id = self._select_tenant(skip_inactive=True)
                 if tenant_id is None:
+                    self.fsm_state["completion_scheduler"] = "IDLE"
                     self.metrics["stalls"] += 1
                     yield self.env.timeout(self.retry_latency)
-                    break
+                    continue
 
                 command = self.pending[tenant_id][0]
                 self.fsm_state["completion_scheduler"] = "CHECK_TOKENS"
@@ -335,11 +331,9 @@ class CompletionIpModel:
                     tenant_id,
                     self.env.now,
                 )
-                # EMIT -> SELECT_TENANT on more_candidates. Without it every
-                # command re-paid the full tenant select through IDLE, and the
-                # declared shortcut was never taken.
-                if not self._any_pending_command():
-                    break
+                # EMIT -> SELECT_TENANT on more_candidates, which the loop now
+                # takes unconditionally: the next pass re-enters SELECT_TENANT,
+                # and a pass that finds nothing waits in IDLE.
 
     def _release_output_port(self, port):
         """Let the port's declared latency elapse, then release it.

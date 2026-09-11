@@ -114,14 +114,23 @@ class TestArbitrationIpModel(unittest.TestCase):
         inverted = self._weighted_selection_sequence({"T0": 4, "T1": 1})
 
         # These sequences are measured, not derived, and the equal-weight one is
-        # phase-sensitive: it moved from T0,T1,T1,T0,T1,T1 when the arbiter
-        # stopped spinning IDLE -> PORT_SCAN -> STALL while idle, which changed
-        # when a scan lands relative to the issue pipeline's bitmap updates. The
-        # weighted and inverted sequences did not move. What this test pins is
-        # the contrast below, which no round-robin can satisfy; the exact orders
-        # are the strongest available form of that, not a separate claim about
-        # scheduling phase.
-        self.assertEqual(equal, ["T0", "T1", "T1", "T1", "T0", "T1"])
+        # phase-sensitive. It has now moved twice -- once when the arbiter
+        # stopped spinning IDLE -> PORT_SCAN -> STALL while idle, and once when
+        # policy_update's 2-cycle UPDATE_AGE was removed -- because both changed
+        # when a scan lands relative to the issue pipeline's bitmap updates.
+        # Neither time did the weighted or inverted order move, and all three
+        # stayed distinct, which is what says the weighting logic is intact and
+        # only the equal-weight interleaving is phase-coupled.
+        #
+        # It is pinned exactly anyway: per-tenant counts are 2 and 4 for all
+        # three weightings, so only the order distinguishes weighted round-robin
+        # from plain round-robin, and a looser assertion would not be able to
+        # fail for the thing this test exists to catch. If it moves again on an
+        # unrelated timing change, that is this assertion doing its secondary
+        # job -- telling you the change had a scheduling consequence -- and the
+        # check to make is that weighted and inverted are still distinct from it
+        # before updating the value.
+        self.assertEqual(equal, ["T0", "T1", "T1", "T0", "T1", "T1"])
         self.assertEqual(inverted, ["T0", "T0", "T1", "T1", "T1", "T1"])
         self.assertNotEqual(weighted, equal, "weighting made no difference to the order")
         self.assertNotEqual(weighted, inverted, "inverting the weights made no difference")

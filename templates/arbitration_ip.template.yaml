@@ -231,9 +231,9 @@ fsm_processes:
     queues_used: [sq_ingress_queues]
     resources_used: [issue_slots]
   - name: policy_update
-    purpose: Maintains round-robin, weighted order, and age metadata.
+    purpose: Maintains round-robin and weighted order.
     simpy_process: true
-    states: [RESET, WAIT_GRANT, UPDATE_POINTER, UPDATE_AGE]
+    states: [RESET, WAIT_GRANT, UPDATE_POINTER]
     transitions:
       - from: WAIT_GRANT
         to: UPDATE_POINTER
@@ -241,13 +241,8 @@ fsm_processes:
         actions: [advance_port_tenant_sq_pointers]
         latency_cycles: 0
       - from: UPDATE_POINTER
-        to: UPDATE_AGE
-        condition: pointer_updated
-        actions: [age_unselected_queues]
-        latency_cycles: 0
-      - from: UPDATE_AGE
         to: WAIT_GRANT
-        condition: age_updated
+        condition: pointer_updated
         actions: []
         latency_cycles: 0
     interfaces_touched: []
@@ -333,7 +328,7 @@ fsm_relationships:
       path: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, issue_pipeline.READ_PENDING_COUNT, issue_pipeline.READ_BURST, issue_pipeline.CALC_ISSUE_COUNT, issue_pipeline.ISSUE_REQUEST]
       description: Pipeline 1 selects one SQ; pipeline 2 computes issue_count and sends downstream request.
     - name: policy_update_path
-      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER, policy_update.UPDATE_AGE]
+      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER]
       description: Accepted grant updates policy state for the next scan.
   gating_relationships:
     - source: issue_if.issue_ready
@@ -371,7 +366,6 @@ timing_model:
       mode: parallel_helper
       operations:
         - {name: pointer_update, cycles: 1, ns: 2}
-        - {name: age_update, cycles: 2, ns: 4}
         - {name: weighted_order_rebuild, cycles: 8, ns: 16}
     - fsm: issue_pipeline
       mode: parallel_process

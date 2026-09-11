@@ -289,7 +289,6 @@ States:
 - `RESET`: initialize policy state.
 - `WAIT_GRANT`: wait for a successful grant.
 - `UPDATE_POINTER`: update round-robin pointer or weighted deficit.
-- `UPDATE_AGE`: update age/starvation metadata.
 
 ### 6.3 Issue Pipeline FSM
 
@@ -520,7 +519,7 @@ Per-process timing:
 | FSM/process | Runs as | Delay model |
 | --- | --- | --- |
 | Arbiter Main FSM | Pipeline 1 process | Bitmap update visibility: 3 cycles = 6 ns. Port scan: 4 cycles = 8 ns. Tenant scan: 6 cycles = 12 ns. SQ scan: 8 cycles = 16 ns. Grant selected SQ: 2 cycles = 4 ns. Credit refill on exhaustion: 10 cycles = 20 ns (starter value, see Open Items). |
-| Policy Update FSM | Parallel helper process triggered by grant | Pointer update: 1 cycle = 2 ns. Age metadata update: 2 cycles = 4 ns. Weighted-order rebuild after config change: 8 cycles = 16 ns. |
+| Policy Update FSM | Parallel helper process triggered by grant | Pointer update: 1 cycle = 2 ns. Weighted-order rebuild after config change: 8 cycles = 16 ns. |
 | Issue Pipeline FSM | Pipeline 2 process | Selection accept: 1 cycle = 2 ns. Pending count read: 3 cycles = 6 ns. Burst read: 4 cycles = 8 ns. Min burst calculation: 2 cycles = 4 ns. Downstream issue request: 3 cycles = 6 ns. Burst debit: 2 cycles = 4 ns. Downstream backpressure retry interval: 1 cycle = 2 ns. |
 
 End-to-end command issue delay:
@@ -534,7 +533,7 @@ End-to-end command issue delay:
 - End-to-end no-stall selected SQ to downstream request:
   `pipeline 1 20 + pipeline 2 15 = 35 cycles = 70 ns`.
 - With policy update included for next selection readiness:
-  `20 + max(1, 2) = 22 cycles = 44 ns`.
+  `20 + 1 = 21 cycles = 42 ns`.
 - If downstream is not ready, add `1 cycle = 2 ns` per retry tick.
 
 Sequential/parallel relationship:
@@ -558,7 +557,12 @@ Sequential dependency:
 - Whether credit consumption happens in Arbitration IP or Completion IP.
 - Flush/admin ordering rules.
 - Per-clock issue width.
-- Starvation guard threshold.
+- Starvation guard threshold, and the mechanism that would feed it. An
+  `UPDATE_AGE` state and an `age_unselected_queues` action were declared here
+  with a 2-cycle cost and no ageing policy -- nothing said what aged, by how
+  much, or what an aged queue gained. They are removed rather than carried as a
+  cost for behaviour no document specifies. A starvation guard remains open, and
+  specifying one means specifying its ageing mechanism with it.
 - Exact credit refill latency and refill amount on exhaustion. The 10-cycle
   figure above is a starter value in the same sense as the other delays in this
   section, not a number this document sources.

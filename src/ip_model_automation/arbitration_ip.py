@@ -123,7 +123,6 @@ class ArbitrationIpModel:
             "burst_debit": burst_debit_latency,
             "backpressure_retry": 1,
             "pointer_update": 1,
-            "age_update": 2,
             "weighted_order_rebuild": weighted_order_rebuild_latency,
             "reset": reset_latency,
         }
@@ -608,7 +607,4 @@ class ArbitrationIpModel:
             yield self.env.timeout(self.latency["weighted_order_rebuild"])
             self.metrics["policy_updates"] += 1
             self.logger.debug("policy update selection=%s", selection)
-            self._set_fsm_state("policy_update", "UPDATE_AGE")
-            yield self.env.timeout(self.latency["age_update"])
-            self.metrics["age_updates"] += 1
             self._set_fsm_state("policy_update", "WAIT_GRANT")

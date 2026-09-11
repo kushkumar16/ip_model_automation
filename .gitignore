@@ -15,3 +15,5 @@ prompt_packs/
 # Local-only presenter's reference, kept out of the repo by request
 docs/team_briefing.md
 docs/team_briefing.docx
+# Claude Code local session/tooling state (e.g. agent worktrees), never project content
+.claude/

@@ -68,6 +68,13 @@ class CompletionIpModel:
         self.metrics = defaultdict(int)
         self.window_metrics: List[Dict[str, float]] = []
         self._pending_snapshot: Dict[str, float] = {"time": 0.0, "completed": 0.0}
+        # The set of tenants with active traffic and available tokens. The
+        # scheduler leaves IDLE only while it is non-empty, so it does not pay an
+        # 8-cycle tenant select to discover that nothing can be served. Kept
+        # incrementally -- each event that can change one tenant's eligibility
+        # refreshes that tenant -- rather than rescanned.
+        self.eligible_tenants: set = set()
+        self._scheduler_wake = None
         # Published so the interface wait points are observable: each interface's
         # wait model names the <fsm>.<STATE> this model must be sitting in while
         # the requester waits on it.
@@ -102,6 +109,7 @@ class CompletionIpModel:
         self.tokens[tenant_id].update(base)
         self.base_tokens[tenant_id].update(base)
         self.tenant_alive[tenant_id] = alive
+        self._refresh_eligibility(tenant_id)
         self.logger.info("configured tenant=%s alive=%s", tenant_id, alive)
 
     def _ensure_tenant(self, tenant_id: str, weight: int = 1) -> None:
@@ -158,6 +166,7 @@ class CompletionIpModel:
             self.pending[command.tenant_id].append(command)
             # The wait point completes here, not at submission.
             accepted.succeed()
+            self._refresh_eligibility(command.tenant_id)
             if not self.tenant_alive[command.tenant_id]:
                 # The command is parked, not accepted: tenant_inactive is one of
                 # this command's declared error_conditions, and accept declares
@@ -183,6 +192,34 @@ class CompletionIpModel:
             return {}
         return {"write": 1.0, "write_bw": float(command.size_kb)}
 
+    def _tenant_eligible(self, tenant_id: str) -> bool:
+        """Active traffic and available tokens, per the DLD's section 7.
+
+        Deliberately a tenant-level test, not a command-level one: it asks
+        whether the tenant holds *any* tokens on the axes its head command
+        consumes, not whether it can afford that command. A tenant can therefore
+        be eligible while its head command still costs more than the tokens
+        left, which is what keeps CHECK_TOKENS -> WAIT_TOKENS reachable --
+        affordability is decided there, not here.
+        """
+        if not self.tenant_alive[tenant_id] or not self.pending[tenant_id]:
+            return False
+        costs = self._costs(self.pending[tenant_id][0])
+        return all(self.tokens[tenant_id][name] > 0 for name in costs)
+
+    def _refresh_eligibility(self, tenant_id: str) -> None:
+        """Re-evaluate one tenant and wake a scheduler waiting in IDLE."""
+        if self._tenant_eligible(tenant_id):
+            self.eligible_tenants.add(tenant_id)
+            if self._scheduler_wake is not None and not self._scheduler_wake.triggered:
+                self._scheduler_wake.succeed()
+        else:
+            self.eligible_tenants.discard(tenant_id)
+
+    def _refresh_all_eligibility(self) -> None:
+        for tenant_id in list(self.pending) + list(self.tokens):
+            self._refresh_eligibility(tenant_id)
+
     def _select_tenant(self, skip_inactive: bool = False) -> Optional[str]:
         """Pick the next tenant with work.
 
@@ -204,6 +241,8 @@ class CompletionIpModel:
             if skip_inactive and not self.tenant_alive[tenant_id]:
                 self.metrics["tenant_inactive_stalls"] += 1
                 self.logger.warning("tenant inactive, passed over tenant=%s", tenant_id)
+                return False
+            if skip_inactive and tenant_id not in self.eligible_tenants:
                 return False
             return True
 
@@ -246,27 +285,45 @@ class CompletionIpModel:
 
     def completion_scheduler(self):
         while True:
+            # IDLE -> SELECT_TENANT on any_eligible_tenant. The scheduler waits
+            # here until a tenant has both active traffic and available tokens,
+            # rather than paying an 8-cycle select to find out there is nothing
+            # to serve.
+            #
+            # This is what puts the declared no_stall_completion path at 21
+            # rather than 17: a tenant cannot become eligible before its command
+            # has been enqueued, so the 4-cycle enqueue precedes the select
+            # instead of overlapping it. The DLD states both the 21 and the
+            # ordering it comes from.
+            #
+            # The wait is armed before the set is re-tested, with no simulated
+            # time between, so an enqueue cannot fall into the gap.
+            #
+            # It sits outside the inner loop deliberately: a token stall returns
+            # to SELECT_TENANT and so does an emit with another eligible tenant
+            # waiting, both of which the template declares. Putting the wait at
+            # the top of the inner loop routed them through IDLE and made both
+            # declared transitions dead.
+            self.fsm_state["completion_scheduler"] = "IDLE"
+            while not self.eligible_tenants:
+                self._scheduler_wake = self.env.event()
+                if self.eligible_tenants:
+                    self._scheduler_wake = None
+                    break
+                yield self._scheduler_wake
+                self._scheduler_wake = None
+
             while True:
-                # The scheduler pays tenant_select from the top of its loop,
-                # before it has a candidate. That is not an oversight: the
-                # template's no_stall_completion note says so in as many words,
-                # and the 17-cycle figure depends on it -- a command's 4-cycle
-                # enqueue overlaps the 8-cycle select rather than preceding it,
-                # because accept and completion_scheduler are declared parallel.
-                #
-                # Waiting in IDLE for any_pending_command before selecting makes
-                # those two serial and puts a single READ at 21, which is the
-                # figure the template records having already corrected away. So
-                # IDLE is where a select that found nothing waits, and it is held
-                # there for the retry so it occupies real time.
                 self.fsm_state["completion_scheduler"] = "SELECT_TENANT"
                 yield self.env.timeout(self.tenant_select_latency)
                 tenant_id = self._select_tenant(skip_inactive=True)
                 if tenant_id is None:
-                    self.fsm_state["completion_scheduler"] = "IDLE"
+                    # Eligibility was true when IDLE was left and is not now:
+                    # a refill window or a concurrent change moved it. Back to
+                    # the wait rather than spinning the select.
                     self.metrics["stalls"] += 1
                     yield self.env.timeout(self.retry_latency)
-                    continue
+                    break
 
                 command = self.pending[tenant_id][0]
                 self.fsm_state["completion_scheduler"] = "CHECK_TOKENS"
@@ -324,6 +381,7 @@ class CompletionIpModel:
                 self.completed.append((self.env.now, command))
                 self.metrics[f"completed_{command.kind.lower()}"] += 1
                 self.metrics["completed_commands"] += 1
+                self._refresh_eligibility(tenant_id)
                 self.logger.info(
                     "completed cmd=%s kind=%s tenant=%s time=%s",
                     command.cmd_id,
@@ -331,9 +389,11 @@ class CompletionIpModel:
                     tenant_id,
                     self.env.now,
                 )
-                # EMIT -> SELECT_TENANT on more_candidates, which the loop now
-                # takes unconditionally: the next pass re-enters SELECT_TENANT,
-                # and a pass that finds nothing waits in IDLE.
+                # EMIT -> SELECT_TENANT on more_candidates, or EMIT -> IDLE
+                # when there are none. Both are declared; the DLD names the
+                # second and the template dropped it.
+                if not self.eligible_tenants:
+                    break
 
     def _release_output_port(self, port):
         """Let the port's declared latency elapse, then release it.
@@ -367,6 +427,7 @@ class CompletionIpModel:
         """Declared action on ASSESS_USAGE -> REFILL_BASE."""
         for tenant_id, base in self.base_tokens.items():
             self.tokens[tenant_id].update(base)
+        self._refresh_all_eligibility()
 
     def _write_window_metrics(self, snapshot: Dict[str, float]) -> None:
         """Declared action on REFILL_BASE -> PUBLISH_METRICS."""

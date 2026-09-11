@@ -17,6 +17,16 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertEqual(model.completed[0][1].cmd_id, "r0")
 
     def test_completion_token_starvation_blocks_until_refill(self):
+        """A tenant with no tokens is not eligible, so it is not polled at all.
+
+        This used to assert `token_stalls > 0`: the scheduler selected the
+        starved tenant, paid the tenant select and the token check, and recorded
+        a stall, once per retry, for as long as the starvation lasted. Under the
+        eligibility rule it is not selected while it holds no tokens on the axes
+        its head command needs, so the command waits without costing selects.
+        The stall counter is for a tenant that holds *some* tokens and still
+        cannot afford its head command -- see the test below.
+        """
         env = simpy.Environment()
         model = CompletionIpModel(
             env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
@@ -25,11 +35,77 @@ class TestCompletionIpModel(unittest.TestCase):
         model.submit(Command("w0", "WRITE", tenant_id="T0", size_kb=4))
         env.run(until=12)
         self.assertEqual(model.completed, [])
-        self.assertGreater(model.metrics["token_stalls"], 0)
+        self.assertNotIn("T0", model.eligible_tenants, "a tenant with no write tokens was still eligible")
+        self.assertEqual(model.metrics["token_stalls"], 0, "the starved tenant was selected anyway")
+
         model.base_tokens["T0"].update({"write": 1.0, "write_bw": 4.0})
         model.refill_once()
         env.run(until=24)
         self.assertEqual(model.completed[0][1].cmd_id, "w0")
+
+    def test_completion_idle_scheduler_waits_instead_of_selecting(self):
+        """An idle scheduler costs nothing, and the declared path is phase-flat.
+
+        The scheduler used to pay an 8-cycle tenant select every pass with
+        nothing to serve. It now waits in IDLE until a tenant has both active
+        traffic and available tokens.
+
+        The second assertion is the one that matters for the timing model: while
+        the scheduler free-ran, the end-to-end latency of a single no-stall READ
+        varied between 14 and 22 cycles with arrival phase, because a command
+        either made the select that was already running or waited for the next.
+        Waiting on eligibility removes the phase entirely.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, log_level="CRITICAL")
+        model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
+        env.run(until=500)
+
+        self.assertEqual(model.metrics["stalls"], 0, "an idle scheduler is still selecting")
+        self.assertEqual(model.fsm_state["completion_scheduler"], "IDLE")
+
+        model.submit(Command("late", "READ", tenant_id="T0", size_kb=1))
+        env.run(until=700)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.completed], ["late"], "the wake after a long idle was lost"
+        )
+
+        latencies = []
+        for phase in range(10):
+            env = simpy.Environment()
+            model = CompletionIpModel(env, log_level="CRITICAL")
+            model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
+
+            def arrive(at=phase, target=model):
+                yield env.timeout(at)
+                target.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+            env.process(arrive())
+            env.run(until=300)
+            latencies.append(model.completed[0][0] - phase)
+
+        self.assertEqual(set(latencies), {4 + 8 + 5 + 4}, "the declared path still varies with arrival phase")
+
+    def test_completion_partial_tokens_still_reach_wait_tokens(self):
+        """CHECK_TOKENS -> WAIT_TOKENS, which eligibility must not make dead.
+
+        Eligibility is a tenant-level test -- does it hold any tokens on the
+        axes its head command needs -- not a command-level one. A tenant holding
+        some bandwidth but not enough for its head command is therefore eligible,
+        is selected, and stalls at the token check. Defining eligibility per
+        command would have made this declared transition unreachable.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+        )
+        model.configure_tenant("T0", read=5, write=5, read_bw=2, write_bw=2)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=8))
+        env.run(until=20)
+
+        self.assertEqual(model.completed, [], "a command was emitted it could not pay for")
+        self.assertIn("T0", model.eligible_tenants, "a tenant holding tokens was ruled ineligible")
+        self.assertGreater(model.metrics["token_stalls"], 0, "CHECK_TOKENS -> WAIT_TOKENS was never taken")
 
     def test_completion_flush_costs_no_tokens(self):
         env = simpy.Environment()
@@ -249,16 +325,12 @@ class TestCompletionIpModel(unittest.TestCase):
 
         self.assertEqual(len(model.completed), 1)
         completed_at = model.completed[0][0]
-        # tenant_select 8 + token_check 5 + emit 4 = 17, measured from submission
-        # and not from the end of ENQUEUE. This assertion used to subtract
-        # service_latency, on the reasoning that the scheduler cannot select what
-        # has not arrived -- which sounds right and is not what the template
-        # says. The scheduler pays tenant_select from the top of its loop, so the
-        # 4-cycle enqueue overlaps the 8-cycle select; the template's own note
-        # records having corrected 21 to 17 for exactly this reason. Subtracting
-        # made the test pass on a model that had regressed to 21 and fail on one
-        # that hits the declared 17.
-        self.assertEqual(completed_at, 8 + 5 + 4)
+        # enqueue 4 + tenant_select 8 + token_check 5 + emit 4 = 21, the figure
+        # the DLD states in its end-to-end table and again in its sequential
+        # dependency. The enqueue is on the critical path because the scheduler
+        # waits in IDLE until a tenant is eligible, and a tenant cannot become
+        # eligible before its command has been enqueued.
+        self.assertEqual(completed_at, 4 + 8 + 5 + 4)
 
         held = [now for now, count in busy if count]
         self.assertEqual(

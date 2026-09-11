@@ -501,8 +501,13 @@ class CompletionIpModel:
             yield self.env.timeout(self.usage_assessment_latency)
             self._restore_base_tokens()
 
-            # qos_config_if is wait_for_ack_inline: the configured budgets take
-            # effect here, at the declared wait point refill.REFILL_BASE.
+            # _restore_base_tokens() (called above, in ASSESS_USAGE) is a
+            # periodic top-up of already-configured tenants' tokens back to
+            # base level -- it is not where a pending configure_tenant call
+            # takes effect. configure_tenant applies its values immediately,
+            # at call time; qos_config_if's declared wait_for_ack_inline gate
+            # at this state is not modelled -- see M33 in
+            # decisions/completion_ip.md.
             self.fsm_state["refill"] = "REFILL_BASE"
             yield self.env.timeout(self.base_refill_latency)
             self._write_window_metrics(snapshot)

@@ -43,6 +43,71 @@ class TestCompletionIpModel(unittest.TestCase):
         env.run(until=24)
         self.assertEqual(model.completed[0][1].cmd_id, "w0")
 
+    def test_completion_accept_holds_reset_before_it_accepts(self):
+        """RESET -> READY, which was never taken because RESET was never entered.
+
+        ip.reset.behavior is clear_pending_queues_tokens_and_metrics, and the
+        constructor did that work while accept_process opened in READY -- so the
+        reset was implemented as construction rather than modelled, and a
+        command handed to the IP at t=0 was accepted as though no reset existed.
+        arbitration_ip holds its RESET; this now does too.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, log_level="CRITICAL")
+        self.assertEqual(model.fsm_state["accept"], "RESET", "accept did not start in reset")
+
+        model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        env.run(until=model.reset_latency)
+        self.assertEqual(model.metrics["accepted_commands"], 0, "a command was accepted during reset")
+
+        env.run(until=60)
+        self.assertEqual(model.metrics["accepted_commands"], 1)
+
+    def test_completion_backpressure_resumes_through_ready(self):
+        """BACKPRESSURE -> READY -> ENQUEUE, not BACKPRESSURE -> ENQUEUE.
+
+        The template declares the resumption on queue_space_available and the
+        enqueue on incoming_valid_and_queue_space, so a command held by a full
+        queue passes back through READY. The model used to fall straight from
+        BACKPRESSURE into ENQUEUE, skipping the state that says "ready to
+        accept" on exactly the pass where a producer is watching for it, and the
+        test that claimed to check the resumption could not tell the two apart.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, pending_depth=1, log_level="CRITICAL")
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+        model.submit(Command("a", "READ", tenant_id="T0", size_kb=1))
+        model.submit(Command("b", "READ", tenant_id="T0", size_kb=1))
+
+        seen = []
+        previous = None
+
+        def watcher():
+            nonlocal previous
+            while True:
+                state = model.fsm_state["accept"]
+                if state != previous:
+                    seen.append(state)
+                    previous = state
+                yield env.timeout(1)
+
+        env.process(watcher())
+        env.run(until=40)
+        self.assertEqual(model.fsm_state["accept"], "BACKPRESSURE", "the second command was not held")
+
+        model.pending["T0"].clear()
+        env.run(until=80)
+
+        resumption = seen[seen.index("BACKPRESSURE") :]
+        self.assertIn("READY", resumption, "BACKPRESSURE -> READY was never taken")
+        self.assertLess(
+            resumption.index("READY"),
+            resumption.index("ENQUEUE"),
+            "the queue-full command went straight to ENQUEUE",
+        )
+
     def test_completion_idle_scheduler_waits_instead_of_selecting(self):
         """An idle scheduler costs nothing, and the declared path is phase-flat.
 
@@ -77,12 +142,12 @@ class TestCompletionIpModel(unittest.TestCase):
             model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
 
             def arrive(at=phase, target=model):
-                yield env.timeout(at)
+                yield env.timeout(target.reset_latency + at)
                 target.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
 
             env.process(arrive())
             env.run(until=300)
-            latencies.append(model.completed[0][0] - phase)
+            latencies.append(model.completed[0][0] - model.reset_latency - phase)
 
         self.assertEqual(set(latencies), {4 + 8 + 5 + 4}, "the declared path still varies with arrival phase")
 
@@ -151,7 +216,7 @@ class TestCompletionIpModel(unittest.TestCase):
         )
         model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
         model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
-        env.run(until=2)
+        env.run(until=2 + model.reset_latency)
         self.assertEqual(model.metrics["accepted_commands"], 1)
         model.tenant_alive["T0"] = False
         env.run(until=12)
@@ -311,8 +376,16 @@ class TestCompletionIpModel(unittest.TestCase):
         env = simpy.Environment()
         model = CompletionIpModel(env, log_level="CRITICAL")
         model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
-        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
 
+        # Submitted once reset has deasserted. The declared path is measured
+        # "after command becomes service-ready", and a command handed to an IP
+        # still in RESET waits for it -- that cycle is the reset's, not the
+        # path's.
+        def submit_after_reset():
+            yield env.timeout(model.reset_latency)
+            model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        env.process(submit_after_reset())
         busy = []
 
         def watcher():
@@ -325,12 +398,13 @@ class TestCompletionIpModel(unittest.TestCase):
 
         self.assertEqual(len(model.completed), 1)
         completed_at = model.completed[0][0]
+        path_cost = completed_at - model.reset_latency
         # enqueue 4 + tenant_select 8 + token_check 5 + emit 4 = 21, the figure
         # the DLD states in its end-to-end table and again in its sequential
         # dependency. The enqueue is on the critical path because the scheduler
         # waits in IDLE until a tenant is eligible, and a tenant cannot become
         # eligible before its command has been enqueued.
-        self.assertEqual(completed_at, 4 + 8 + 5 + 4)
+        self.assertEqual(path_cost, 4 + 8 + 5 + 4)
 
         held = [now for now, count in busy if count]
         self.assertEqual(

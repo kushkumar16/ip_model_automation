@@ -24,6 +24,7 @@ class CompletionIpModel:
         base_refill_latency=10,
         metrics_publish_latency=10,
         port_latency=1,
+        reset_latency=1,
         pending_depth: Optional[int] = None,
         tenant_weights: Optional[Dict[str, int]] = None,
         start_refill_process=False,
@@ -42,6 +43,7 @@ class CompletionIpModel:
         self.base_refill_latency = base_refill_latency
         self.metrics_publish_latency = metrics_publish_latency
         self.port_latency = port_latency
+        self.reset_latency = reset_latency
         # accept declares READY -> BACKPRESSURE on incoming_valid_and_queue_full,
         # and the only declared queue is tenant_pending_queues at depth
         # unbounded -- which can never be full, so the declared transition was
@@ -79,7 +81,7 @@ class CompletionIpModel:
         # wait model names the <fsm>.<STATE> this model must be sitting in while
         # the requester waits on it.
         self.fsm_state = {
-            "accept": "READY",
+            "accept": "RESET",
             "completion_scheduler": "IDLE",
             "refill": "WAIT_WINDOW",
         }
@@ -140,6 +142,15 @@ class CompletionIpModel:
         return accepted
 
     def accept_process(self):
+        # RESET -> READY is declared with reset_deasserted, and ip.reset.behavior
+        # is clear_pending_queues_tokens_and_metrics. The constructor did that
+        # work and the process opened in READY, so RESET was never entered and
+        # the declared transition was never taken -- the reset was implemented
+        # as construction rather than modelled. arbitration_ip holds its RESET;
+        # this now does too.
+        self.fsm_state["accept"] = "RESET"
+        yield self.env.timeout(self.reset_latency)
+        self._clear_state()
         while True:
             self.fsm_state["accept"] = "READY"
             command, accepted = yield self.input_q.get()
@@ -149,10 +160,23 @@ class CompletionIpModel:
             # is a different condition the template does not name here -- and in
             # that branch the command was appended to pending anyway, so it was
             # an enqueue wearing the label of a stall.
+            backpressured = False
             while self._pending_queue_full(command.tenant_id):
+                backpressured = True
                 self.fsm_state["accept"] = "BACKPRESSURE"
                 self.metrics["queue_full_stalls"] += 1
                 self.logger.warning("pending queue full tenant=%s cmd=%s", command.tenant_id, command.cmd_id)
+                yield self.env.timeout(self.retry_latency)
+
+            if backpressured:
+                # BACKPRESSURE -> READY on queue_space_available, then
+                # READY -> ENQUEUE. The model used to fall straight from
+                # BACKPRESSURE into ENQUEUE, so the declared resumption was
+                # never taken and the state that says "ready to accept" was
+                # skipped on exactly the pass where a producer is watching for
+                # it. The test that claimed to check the resumption could not
+                # tell the two apart.
+                self.fsm_state["accept"] = "READY"
                 yield self.env.timeout(self.retry_latency)
 
             # accepted_cmd_if is wait_for_ack_inline: the producer's accept
@@ -191,6 +215,25 @@ class CompletionIpModel:
         if command.kind == "FLUSH":
             return {}
         return {"write": 1.0, "write_bw": float(command.size_kb)}
+
+    def _clear_state(self) -> None:
+        """ip.reset.behavior: clear pending queues, tokens and metrics.
+
+        Two of the three are cleared here. Token state is not, and that is a
+        deliberate gap rather than an oversight: in this model `tokens` is
+        written by `configure_tenant` over qos_config_if, which callers apply
+        before the simulation starts. A runtime reset that zeroed it would
+        discard the configuration the run was set up with, and one that restored
+        it from base would undo a caller that had deliberately drained a tenant.
+        Either way the reset would be overwriting configuration rather than
+        modelling a reset. Recorded in decisions/completion_ip.md.
+        """
+        self.pending.clear()
+        self.metrics.clear()
+        self.window_metrics.clear()
+        self.completed.clear()
+        self.eligible_tenants.clear()
+        self._refresh_all_eligibility()
 
     def _tenant_eligible(self, tenant_id: str) -> bool:
         """Active traffic and available tokens, per the DLD's section 7.

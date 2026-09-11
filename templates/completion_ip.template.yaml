@@ -138,6 +138,16 @@ fsm_processes:
         actions: [pop_candidate, publish_completion, update_metrics]
         latency_cycles: 1
       - from: EMIT
+        to: IDLE
+        condition: no_more_candidates
+        actions: []
+        latency_cycles: 1
+      - from: STALL_OUTPUT
+        to: EMIT
+        condition: output_ready
+        actions: []
+        latency_cycles: 1
+      - from: EMIT
         to: STALL_OUTPUT
         condition: output_not_ready
         actions: [hold_completion, increment_output_stall]

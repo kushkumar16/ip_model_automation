@@ -49,3 +49,25 @@ What a reader must not take from this: the port's declared
 against a measured back-to-back spacing of 17 — a figure no reading of the
 17-cycle path can satisfy either. That contradiction is left standing rather than
 resolved in the model's favour.
+
+## Reset, and the part of it that is not modelled
+
+`ip.reset.behavior` is `clear_pending_queues_tokens_and_metrics`, and `accept`
+now holds `RESET` for a cycle before taking the declared `RESET -> READY`. Two
+of the three are cleared there: pending queues and metrics, along with the
+window snapshots, the completed list and the eligible-tenant set.
+
+**Token state is not cleared, deliberately.** In this model `tokens` is written
+by `configure_tenant` over `qos_config_if`, and callers apply that before the
+simulation starts. A runtime reset that zeroed it would discard the
+configuration the run was set up with; one that restored it from `base_tokens`
+would undo a caller that had deliberately drained a tenant to exercise
+starvation. Either way the reset would be overwriting configuration rather than
+modelling a reset, and both were tried before this was written down — the first
+emptied every budget in the suite, the second silently refilled tenants that
+tests had drained on purpose.
+
+What a reader must not take from this: a reset in the model does not return
+token budgets to a known state. If a future DLD separates the reset value of a
+token budget from the value configuration supplies, that distinction has to
+exist in the model before this can be closed.

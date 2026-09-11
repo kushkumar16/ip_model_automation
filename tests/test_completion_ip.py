@@ -51,18 +51,41 @@ class TestCompletionIpModel(unittest.TestCase):
         reset was implemented as construction rather than modelled, and a
         command handed to the IP at t=0 was accepted as though no reset existed.
         arbitration_ip holds its RESET; this now does too.
+
+        The middle check used to be `env.run(until=model.reset_latency);
+        assertEqual(accepted_commands, 0)`, which does not discriminate whether
+        RESET actually costs `reset_latency`: with `service_latency` at its
+        class default of 4, `accepted_commands` stays 0 past either a 1-cycle
+        or a 0-cycle RESET, since ENQUEUE's own cost outlasts either. Pinned
+        instead with a `reset_latency` distinct from every other configured
+        latency and a `fsm_state["accept"]` trace taken with `env.step()`:
+        READY is entered for no simulated time here (a command is already
+        queued, so ENQUEUE is assigned in the same instant), so a single
+        `env.run(until=...)` snapshot cannot catch it, but the first state the
+        trace records after RESET pins exactly when and to what RESET exits.
         """
         env = simpy.Environment()
-        model = CompletionIpModel(env, log_level="CRITICAL")
+        model = CompletionIpModel(env, reset_latency=5, log_level="CRITICAL")
         self.assertEqual(model.fsm_state["accept"], "RESET", "accept did not start in reset")
 
         model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
         model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
 
-        env.run(until=model.reset_latency)
-        self.assertEqual(model.metrics["accepted_commands"], 0, "a command was accepted during reset")
+        trace = []
+        previous = None
+        while env.peek() < 60:
+            env.step()
+            state = model.fsm_state["accept"]
+            if state != previous:
+                trace.append((env.now, state))
+                previous = state
+            if model.metrics["accepted_commands"]:
+                break
 
-        env.run(until=60)
+        self.assertEqual(trace[0], (0, "RESET"), "accept did not start in reset")
+        self.assertEqual(
+            trace[1], (5, "READY"), "RESET did not hold for exactly its declared latency before RESET -> READY"
+        )
         self.assertEqual(model.metrics["accepted_commands"], 1)
 
     def test_completion_backpressure_resumes_through_ready(self):

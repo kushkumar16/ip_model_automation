@@ -225,10 +225,12 @@ Credit exhaustion:
 
 - A tenant is selected only when it holds credit. A tenant with active traffic
   and no credit is passed over, not granted.
-- When every tenant with active traffic under the selected port is out of
-  credit, credit is refilled before tenant selection is retried, rather than the
-  scan stalling until some external event restores it. Exhaustion of all active
-  tenants is therefore self-clearing and cannot starve the port indefinitely.
+- When every tenant with active traffic is out of credit, credit is refilled
+  before tenant selection is retried, rather than the scan stalling until some
+  external event restores it. Exhaustion is therefore self-clearing and cannot
+  starve the device indefinitely. A tenant that is not alive does not count as
+  out of credit: it is out of the running, and must not make an exhausted scan
+  look refillable.
 - Refill is triggered by exhaustion, not by a window timer. Completion IP's
   windowed refill and this on-demand refill are separate mechanisms.
 
@@ -273,14 +275,19 @@ Transitions:
 - `PORT_SCAN -> TENANT_SCAN`: eligible pending port found.
 - `PORT_SCAN -> STALL`: no eligible port found.
 - `TENANT_SCAN -> SQ_SCAN`: eligible pending tenant found.
-- `TENANT_SCAN -> CREDIT_REFILL`: every tenant with active traffic under the
-  selected port is out of credit.
+- `TENANT_SCAN -> CREDIT_REFILL`: every tenant with active traffic, across all
+  ports with pending work, is out of credit. The test is deliberately not
+  per-port: refilling as soon as one port comes up exhausted lets that port's
+  tenant jump ahead of an eligible command waiting on another, which inverts the
+  rule that a blocked tenant must not hold up a different port.
 - `CREDIT_REFILL -> TENANT_SCAN`: credit restored; tenant selection is retried.
 - `TENANT_SCAN -> STALL`: no tenant with active traffic under selected port.
 - `SQ_SCAN -> GRANT`: eligible SQ with pending command found.
 - `SQ_SCAN -> STALL`: no eligible SQ found under selected tenant.
 - `GRANT -> IDLE`: selected SQ metadata accepted by issue pipeline.
-- `STALL -> PORT_SCAN`: readiness or eligibility changes.
+- `STALL -> IDLE`: the arbiter returns to the wait. It does not rescan on a
+  timer -- an idle arbiter does not poll -- so readiness or eligibility changing
+  is what moves it on, via `IDLE -> PORT_SCAN`.
 
 ### 6.2 Policy Update FSM
 

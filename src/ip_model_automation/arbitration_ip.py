@@ -51,6 +51,7 @@ class ArbitrationIpModel:
         weighted_order_rebuild_latency: int = 8,
         reset_latency: int = 1,
         issue_slot_latency: int = 1,
+        credit_refill_latency: int = 10,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
@@ -125,6 +126,7 @@ class ArbitrationIpModel:
             "pointer_update": 1,
             "weighted_order_rebuild": weighted_order_rebuild_latency,
             "reset": reset_latency,
+            "credit_refill": credit_refill_latency,
         }
 
         self._arbiter_wake = None
@@ -286,6 +288,28 @@ class ArbitrationIpModel:
             if self.port_pending_bitmap.get(port_id, False):
                 return port_id
         return None
+
+    def _active_tenants(self, port_id: str) -> list:
+        """Tenants under this port with pending work and a live status.
+
+        A dead tenant is not "out of credit" -- it is out of the running -- so it
+        must not make an exhausted port look refillable.
+        """
+        return [
+            tenant_id
+            for tenant_id in self.tenant_policies[port_id].scan()
+            if self.tenant_pending_bitmap[port_id].get(tenant_id, False)
+            and self.tenant_credit[tenant_id]["tenant_alive"]
+        ]
+
+    def _refill_tenant_credit(self, tenant_ids) -> None:
+        """Restore credit on every axis, leaving tenant_alive alone."""
+        for tenant_id in tenant_ids:
+            for field in self.tenant_credit[tenant_id]:
+                if field != "tenant_alive":
+                    self.tenant_credit[tenant_id][field] = True
+        self.metrics["credit_refills"] += 1
+        self.logger.info("credit refilled tenants=%s time=%s", list(tenant_ids), self.env.now)
 
     def _pending_ports(self) -> list:
         """Every pending port, in policy order.
@@ -461,6 +485,35 @@ class ArbitrationIpModel:
                 break
 
             if port_id is None:
+                # TENANT_SCAN -> CREDIT_REFILL when every tenant with active
+                # traffic is out of credit. Exhaustion is self-clearing:
+                # without it the arbiter waits for some external event to
+                # restore credit and stalls indefinitely.
+                #
+                # The test is across every candidate port, not the one port the
+                # scan happened to stop on. Refilling as soon as a single port
+                # comes up exhausted lets that port's tenant jump ahead of an
+                # eligible command waiting on another one -- measured, it
+                # inverted the starvation fix it sits next to.
+                #
+                # A tenant that is merely not alive does not qualify: it is out
+                # of the running, not out of credit, and must not make an
+                # exhausted scan look refillable.
+                exhausted = [
+                    tenant_id
+                    for candidate_port in candidates
+                    for tenant_id in self._active_tenants(candidate_port)
+                    if not self.sample_eligibility(tenant_id)
+                ]
+                if exhausted:
+                    self._set_fsm_state("arbiter_main", "CREDIT_REFILL")
+                    yield self.env.timeout(self.latency["credit_refill"])
+                    self._refill_tenant_credit(exhausted)
+                    # CREDIT_REFILL -> TENANT_SCAN: selection is retried.
+                    self._set_fsm_state("arbiter_main", "TENANT_SCAN")
+                    yield self.env.timeout(self.latency["tenant_scan"])
+                    continue
+
                 if tenant_id is None:
                     yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
                 else:

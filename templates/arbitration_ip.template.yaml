@@ -136,7 +136,7 @@ fsm_processes:
         latency_cycles: 1
       - from: TENANT_SCAN
         to: CREDIT_REFILL
-        condition: all_active_tenants_out_of_credit
+        condition: all_active_tenants_out_of_credit_across_all_pending_ports
         actions: [refill_tenant_credit]
         latency_cycles: 10
       - from: CREDIT_REFILL
@@ -155,8 +155,8 @@ fsm_processes:
         actions: [increment_no_sq_stall]
         latency_cycles: 1
       - from: STALL
-        to: PORT_SCAN
-        condition: readiness_or_eligibility_changed
+        to: IDLE
+        condition: returns_to_the_wait
         actions: []
         latency_cycles: 1
       - from: SQ_SCAN

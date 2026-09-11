@@ -407,6 +407,66 @@ class TestArbitrationIpModel(unittest.TestCase):
             "the issue slot was not busy for its own latency beyond the request",
         )
 
+    def test_arbitration_credit_exhaustion_refills_and_retries(self):
+        """TENANT_SCAN -> CREDIT_REFILL -> TENANT_SCAN when nothing can be granted.
+
+        A tenant is selected only while it holds credit. When every tenant with
+        active traffic is out of credit the arbiter refills before retrying,
+        rather than waiting for an external event: exhaustion is self-clearing.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("only", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        reached = []
+        previous = None
+        while env.peek() < 300:
+            env.step()
+            state = model.fsm_state["arbiter_main"]
+            if state != previous:
+                reached.append(state)
+                previous = state
+            if model.issued:
+                break
+
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["only"], "exhaustion never cleared")
+        self.assertIn("CREDIT_REFILL", reached)
+        self.assertEqual(model.metrics["credit_refills"], 1)
+
+    def test_arbitration_refill_does_not_let_an_exhausted_port_jump_the_queue(self):
+        """The refill test is across all pending ports, not the one scanned.
+
+        Refilling as soon as a single port comes up exhausted lets that port's
+        tenant overtake an eligible command already waiting on another port,
+        which inverts the rule that a blocked tenant must not hold up a
+        different port. Measured before this was fixed: the blocked command
+        issued first.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("blocked", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("ready", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            ["ready", "blocked"],
+            "an exhausted port was refilled ahead of an eligible one",
+        )
+
+    def test_arbitration_dead_tenant_does_not_trigger_a_refill(self):
+        """A tenant that is not alive is out of the running, not out of credit."""
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", tenant_alive=False)
+        model.enqueue(Command("dead", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
+        self.assertEqual(model.issued, [])
+
     def test_arbitration_idle_arbiter_waits_instead_of_scanning(self):
         """An idle arbiter costs nothing and records nothing.
 
@@ -450,15 +510,18 @@ class TestArbitrationIpModel(unittest.TestCase):
         model.enqueue(Command("ready", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
 
         env.run(until=200)
+        issued = [command.cmd_id for _, command in model.issued]
         self.assertEqual(
-            [command.cmd_id for _, command in model.issued],
-            ["ready"],
+            issued[0],
+            "ready",
             "the eligible command on the other port was starved by a blocked tenant",
         )
-
-        model.set_tenant_credit("T0", read_iops_credit=1)
-        env.run(until=400)
-        self.assertEqual([command.cmd_id for _, command in model.issued], ["ready", "blocked"])
+        # "blocked" follows once its credit is refilled on exhaustion; what this
+        # test pins is that it does not go first and does not hold up the other
+        # port. The assertion used to be `issued == ["ready"]`, which held only
+        # while an exhausted tenant waited for an external event.
+        self.assertEqual(issued, ["ready", "blocked"])
+        self.assertGreater(model.metrics["credit_refills"], 0)
 
     def test_arbitration_stalls_when_the_last_port_drains_mid_scan(self):
         """PORT_SCAN -> STALL on no_eligible_port, which now needs a real race.
@@ -585,9 +648,15 @@ class TestArbitrationIpModel(unittest.TestCase):
         env.run(until=200)
 
         selected = [entry["tenant_id"] for entry in model.selection_trace]
-        self.assertEqual(selected, ["T1"], "an ineligible tenant was granted")
+        self.assertEqual(selected[0], "T1", "an ineligible tenant was granted ahead of an eligible one")
         self.assertGreater(model.metrics["eligibility_rejections"], 0)
-        self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 1, "its command must still be queued")
+
+        # T0 is granted too, but only after a refill: credit exhaustion is
+        # self-clearing, so the gate decides *order*, not exclusion. This
+        # assertion used to be `selected == ["T1"]`, which was true only while a
+        # credit-blocked tenant could wait forever.
+        self.assertEqual(selected, ["T1", "T0"])
+        self.assertGreater(model.metrics["credit_refills"], 0, "credit was never refilled")
 
         # Restoring credit makes it selectable again, and nothing was debited.
         model.set_tenant_credit("T0", read_iops_credit=True)

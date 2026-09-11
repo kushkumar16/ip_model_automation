@@ -212,6 +212,11 @@ fsm_processes:
         condition: downstream_accepts_request
         actions: [pop_issue_count_commands]
         latency_cycles: 3
+      - from: ISSUE_REQUEST
+        to: ISSUE_STALL
+        condition: downstream_did_not_accept
+        actions: [hold_selected_sq, increment_output_stall]
+        latency_cycles: 1
       - from: ISSUE_STALL
         to: READ_PENDING_COUNT
         condition: retry_while_selected_sq_remains_pending

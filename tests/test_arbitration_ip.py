@@ -303,8 +303,26 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertGreater(model.metrics["output_backpressure_cycles"], 0, "the stall went unrecorded")
         self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
 
-        env.run(until=200)
+        # The retry takes the declared path: ISSUE_REQUEST -> ISSUE_STALL on a
+        # downstream that did not accept, a hold in ISSUE_STALL while
+        # issue_ready is low, then ISSUE_STALL -> READ_PENDING_COUNT, re-reading
+        # the count and burst rather than re-issuing against a stale reading.
+        reached = []
+        previous = None
+        while env.peek() < 200:
+            env.step()
+            state = model.fsm_state["issue_pipeline"]
+            if state != previous:
+                reached.append(state)
+                previous = state
+            if model.issued:
+                break
         self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"], "the command never issued")
+        self.assertEqual(
+            reached[:4],
+            ["ISSUE_STALL", "READ_PENDING_COUNT", "READ_BURST", "CALC_ISSUE_COUNT"],
+            "the retry did not re-read the pending count and burst",
+        )
 
     def test_arbitration_issue_slots_serialises_competing_requesters(self):
         """issue_slots is declared capacity 1, and must enforce it.

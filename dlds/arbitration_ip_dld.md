@@ -306,6 +306,11 @@ Transitions:
   downstream is ready.
 - `CALC_ISSUE_COUNT -> ISSUE_STALL`: issue count is zero.
 - `ISSUE_REQUEST -> UPDATE_BURST`: downstream accepts request.
+- `ISSUE_REQUEST -> ISSUE_STALL`: downstream does not accept the request. The
+  selected SQ is retained and no command leaves the ingress queue; the pipeline
+  holds in `ISSUE_STALL` while `issue_ready` is low and retries from
+  `READ_PENDING_COUNT`, re-reading the pending count and burst state, which can
+  both move while the downstream is not accepting.
 - `ISSUE_STALL -> READ_PENDING_COUNT`: retry while selected SQ remains pending.
 - `UPDATE_BURST -> WAIT_SELECTION`: burst counters debited.
 

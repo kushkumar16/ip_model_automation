@@ -488,33 +488,22 @@ class ArbitrationIpModel:
             # contract. The end-to-end total is the same either way; the
             # placement is what the template actually declares.
             yield self.env.timeout(self.latency["selection_accept"])
-            self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
-            yield self.env.timeout(self.latency["pending_count"])
-            pending_count = self._pending_count(selection)
-            self._set_fsm_state("issue_pipeline", "READ_BURST")
-            yield self.env.timeout(self.latency["burst_read"])
-            self._set_fsm_state("issue_pipeline", "CALC_ISSUE_COUNT")
-            yield self.env.timeout(self.latency["burst_calc"])
-            issue_count = self._issue_count(selection)
-            if issue_count <= 0:
-                self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
-                self.metrics["burst_stalls"] += 1
-                self.logger.warning("burst stall selection=%s time=%s", selection, self.env.now)
-                self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
-                yield self.env.timeout(1)
-                continue
-            # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
-            # resuming on issue_ready, and the declared invariants are that
-            # commands are popped only when issue_ready is true and that queue
-            # entries remain pending during downstream backpressure. The check
-            # used to run only *before* the request: once ISSUE_REQUEST was
-            # entered, issue_ready dropping during those 3 cycles did nothing and
-            # the commands were popped anyway, with output_backpressure_cycles
-            # left at 0. The request is now re-driven until it completes with
-            # issue_ready still high, so nothing leaves the queue during a stall.
-            slot = self.issue_slots.request()
-            yield slot
+            # A request the downstream does not accept returns to
+            # READ_PENDING_COUNT, which is the retry path the DLD declares for
+            # ISSUE_STALL ("retry while selected SQ remains pending"). The
+            # re-drive used to loop straight back to ISSUE_REQUEST, an edge no
+            # document declares, and it re-issued against a pending count and
+            # burst reading it had taken before the stall. Re-reading them is
+            # both what the contract says and the safer of the two: the queue
+            # and the burst state can move while the downstream is not
+            # accepting.
+            burst_stalled = False
             while True:
+                # The hold comes before the re-read, not after it. issue_if
+                # declares that while issue_ready is low the pipeline holds in
+                # ISSUE_STALL; re-reading the pending count and burst on a loop
+                # during backpressure would leave it cycling through
+                # READ_PENDING_COUNT and READ_BURST instead of holding.
                 while not self.output_ready:
                     self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
                     self.metrics["output_stalls"] += 1
@@ -522,11 +511,50 @@ class ArbitrationIpModel:
                     self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
                     yield self.env.timeout(1)
 
+                self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
+                yield self.env.timeout(self.latency["pending_count"])
+                pending_count = self._pending_count(selection)
+                self._set_fsm_state("issue_pipeline", "READ_BURST")
+                yield self.env.timeout(self.latency["burst_read"])
+                self._set_fsm_state("issue_pipeline", "CALC_ISSUE_COUNT")
+                yield self.env.timeout(self.latency["burst_calc"])
+                issue_count = self._issue_count(selection)
+                if issue_count <= 0:
+                    self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                    self.metrics["burst_stalls"] += 1
+                    self.logger.warning("burst stall selection=%s time=%s", selection, self.env.now)
+                    self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
+                    yield self.env.timeout(1)
+                    burst_stalled = True
+                    break
+
+                # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
+                # resuming on issue_ready: commands are popped only when
+                # issue_ready is true, and queue entries remain pending during
+                # downstream backpressure.
+                slot = self.issue_slots.request()
+                yield slot
                 self._set_fsm_state("issue_pipeline", "ISSUE_REQUEST")
                 yield self.env.timeout(self.latency["issue"])
                 if self.output_ready:
                     break
+
+                # ISSUE_REQUEST -> ISSUE_STALL: the downstream did not accept.
+                # The slot is released at once rather than after the port's
+                # latency -- nothing left through it, so there is nothing for it
+                # to carry out.
+                self.issue_slots.release(slot)
+                self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                self.metrics["output_stalls"] += 1
+                self.metrics["output_backpressure_cycles"] += 1
                 self.logger.warning("issue_ready dropped during request selection=%s time=%s", selection, self.env.now)
+                yield self.env.timeout(1)
+                # back to the top: it holds here while issue_ready stays low,
+                # and re-reads only once the downstream is ready again.
+
+            if burst_stalled:
+                continue
+
             issued_cmds = []
             queue = self.queues[selection["port_id"]][selection["tenant_id"]][selection["sq_id"]]
             for _ in range(issue_count):

@@ -122,6 +122,11 @@ fsm_processes:
         condition: candidate_found
         actions: [peek_candidate]
         latency_cycles: 1
+      - from: SELECT_TENANT
+        to: IDLE
+        condition: candidate_lost_eligibility
+        actions: [increment_stall]
+        latency_cycles: 1
       - from: CHECK_TOKENS
         to: EMIT
         condition: required_tokens_available_and_output_ready

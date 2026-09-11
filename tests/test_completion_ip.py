@@ -209,6 +209,34 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertGreater(model.metrics["tenant_inactive_stalls"], 0)
         self.assertEqual(len(model.pending["T0"]), 1)
 
+    def test_completion_select_tenant_returns_to_idle_when_candidate_loses_eligibility(self):
+        """SELECT_TENANT -> IDLE on candidate_lost_eligibility, via a declared API.
+
+        tenant_select costs 8 cycles at model defaults, and any_eligible_tenant
+        is sampled against live, mutable state a caller can legitimately change
+        through configure_tenant while a select is already in flight. Reached
+        here with no misuse -- no direct dict write -- to show the edge is
+        inherent to the design: the candidate the select was chasing can
+        evaporate out from under it before the select completes.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, log_level="CRITICAL")
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        env.run(until=9)
+        self.assertEqual(model.fsm_state["completion_scheduler"], "SELECT_TENANT", "select had not yet started")
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+
+        env.run(until=20)
+        self.assertEqual(model.completed, [], "the command completed despite losing eligibility mid-select")
+        self.assertEqual(model.metrics["stalls"], 1)
+        self.assertEqual(model.fsm_state["completion_scheduler"], "IDLE")
+
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        env.run(until=60)
+        self.assertEqual([command.cmd_id for _, command in model.completed], ["r0"], "eligibility never recovered")
+
     def test_completion_scheduler_stalls_when_tenant_goes_inactive(self):
         env = simpy.Environment()
         model = CompletionIpModel(

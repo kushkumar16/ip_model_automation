@@ -361,9 +361,11 @@ class CompletionIpModel:
                 yield self.env.timeout(self.tenant_select_latency)
                 tenant_id = self._select_tenant(skip_inactive=True)
                 if tenant_id is None:
-                    # Eligibility was true when IDLE was left and is not now:
-                    # a refill window or a concurrent change moved it. Back to
-                    # the wait rather than spinning the select.
+                    # SELECT_TENANT -> IDLE on candidate_lost_eligibility:
+                    # eligibility was true when IDLE was left and is not now --
+                    # a configure_tenant call or a concurrent change moved it
+                    # during the 8-cycle select. Back to the wait rather than
+                    # spinning the select.
                     self.metrics["stalls"] += 1
                     yield self.env.timeout(self.retry_latency)
                     break

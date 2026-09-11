@@ -269,11 +269,72 @@ class TestCompletionIpModel(unittest.TestCase):
         model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
         env.run(until=2 + model.reset_latency)
         self.assertEqual(model.metrics["accepted_commands"], 1)
-        model.tenant_alive["T0"] = False
+        model.set_tenant_alive("T0", False)
         env.run(until=12)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["tenant_inactive_stalls"], 0)
         self.assertEqual(len(model.pending["T0"]), 1)
+
+    def test_completion_set_tenant_alive_stops_the_spin_a_raw_write_would_leave(self):
+        """set_tenant_alive keeps eligible_tenants in sync, so IDLE stays quiescent.
+
+        A raw `model.tenant_alive[tenant_id] = False` bypasses eligibility
+        refresh entirely: eligible_tenants keeps a phantom True entry, and the
+        scheduler spins IDLE -> SELECT_TENANT -> IDLE forever, re-taking the
+        tenant_inactive_stalls increment on every poll -- reviewer's round-five
+        repro measured 1998 of them by t=2000 with no API but configure_tenant
+        and a raw write. set_tenant_alive refreshes eligibility, so the one
+        select already in flight when liveness changes is the last one: after
+        it, T0 is out of eligible_tenants and the scheduler is genuinely idle,
+        not polling.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+        )
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
+        env.run(until=2 + model.reset_latency)
+        model.set_tenant_alive("T0", False)
+
+        env.run(until=2000)
+        self.assertNotIn("T0", model.eligible_tenants, "a dead tenant was left in the eligible set")
+        self.assertLessEqual(
+            model.metrics["tenant_inactive_stalls"],
+            2,
+            "the scheduler kept polling a tenant eligibility should have excluded",
+        )
+        self.assertEqual(model.fsm_state["completion_scheduler"], "IDLE")
+
+    def test_completion_credit_tokens_makes_a_now_eligible_tenant_selectable_again(self):
+        """credit_tokens keeps eligible_tenants in sync in the other direction.
+
+        A raw `model.tokens[tenant_id][...] = ...` write bypasses eligibility
+        refresh the same way a raw tenant_alive write does: eligible_tenants
+        keeps a phantom False entry, and a command that should now complete
+        per qos.insufficient_token_behavior (command_remains_pending_until_refill)
+        never does, because IDLE -> SELECT_TENANT is never retaken for a
+        tenant nothing ever re-evaluated. credit_tokens refreshes eligibility,
+        so the pending command completes once enough tokens are back on every
+        axis it needs.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+        )
+        model.configure_tenant("T0", read=2, write=0, read_bw=8, write_bw=0)
+        model.submit(Command("w0", "WRITE", tenant_id="T0", size_kb=4))
+        env.run(until=20)
+        self.assertEqual(model.completed, [], "a command completed without the tokens it needed")
+        self.assertNotIn("T0", model.eligible_tenants, "a tenant with no write tokens was still eligible")
+
+        model.credit_tokens("T0", write=5.0, write_bw=20.0)
+        env.run(until=40)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.completed],
+            ["w0"],
+            "the command never completed after tokens were restored",
+        )
 
     def test_completion_step_functional_debits_and_pops_ready_command(self):
         env = simpy.Environment()
@@ -297,11 +358,11 @@ class TestCompletionIpModel(unittest.TestCase):
         model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
         model.pending["T0"].append(Command("r0", "READ", tenant_id="T0", size_kb=4))
 
-        model.tenant_alive["T0"] = False
+        model.set_tenant_alive("T0", False)
         self.assertIsNone(model.step_functional())
         self.assertEqual(model.metrics["tenant_inactive_stalls"], 1)
 
-        model.tenant_alive["T0"] = True
+        model.set_tenant_alive("T0", True)
         model.set_completion_ready(False)
         self.assertIsNone(model.step_functional())
         self.assertEqual(model.metrics["output_stalls"], 1)
@@ -547,7 +608,7 @@ class TestCompletionIpModel(unittest.TestCase):
             log_level="CRITICAL",
         )
         model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
-        model.tokens["T0"].update({"read": 0.0, "write": 0.0, "read_bw": 0.0, "write_bw": 0.0})
+        model.credit_tokens("T0", read=0.0, write=0.0, read_bw=0.0, write_bw=0.0)
 
         # restore_base_tokens is declared on ASSESS_USAGE -> REFILL_BASE, which
         # completes at window + usage_assessment = 120.

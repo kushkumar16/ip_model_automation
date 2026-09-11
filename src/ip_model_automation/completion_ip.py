@@ -114,6 +114,38 @@ class CompletionIpModel:
         self._refresh_eligibility(tenant_id)
         self.logger.info("configured tenant=%s alive=%s", tenant_id, alive)
 
+    def set_tenant_alive(self, tenant_id: str, alive: bool) -> None:
+        """Toggle a tenant's liveness after its initial configure_tenant.
+
+        A write straight to tenant_alive -- the only way to express this,
+        since qos_config_if's transaction has no field for it on its own --
+        leaves eligible_tenants stale in both directions: a tenant marked
+        dead stays selectable, or one marked alive again is never noticed.
+        _refresh_eligibility keeps the two in sync and wakes a scheduler
+        that was waiting on an empty eligible set.
+        """
+        self.tenant_alive[tenant_id] = alive
+        self._refresh_eligibility(tenant_id)
+        self.logger.info("tenant_alive=%s tenant=%s", alive, tenant_id)
+
+    def credit_tokens(self, tenant_id: str, **fields: float) -> None:
+        """Restore or adjust specific token axes outside configure_tenant/refill.
+
+        The five declared token axes are the only fields TOKEN_NAMES has;
+        unnamed fields keep their current value. This is how a caller models
+        a token grant that is not a full reconfiguration and not a refill
+        window boundary -- an external credit, say. Refreshes eligibility so
+        a tenant that regains tokens on every axis its pending work needs is
+        selected again, rather than left permanently excluded the way a raw
+        `model.tokens[tenant_id][...] = ...` write would.
+        """
+        unknown = set(fields) - set(TOKEN_NAMES)
+        if unknown:
+            raise ValueError(f"unknown token field(s) {sorted(unknown)}")
+        self.tokens[tenant_id].update(fields)
+        self._refresh_eligibility(tenant_id)
+        self.logger.debug("tokens credited tenant=%s %s", tenant_id, dict(self.tokens[tenant_id]))
+
     def _ensure_tenant(self, tenant_id: str, weight: int = 1) -> None:
         if tenant_id not in self.tenant_weights:
             self.tenant_weights[tenant_id] = max(1, int(weight))

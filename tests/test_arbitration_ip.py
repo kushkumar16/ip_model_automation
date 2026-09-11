@@ -531,6 +531,39 @@ class TestArbitrationIpModel(unittest.TestCase):
             "the refill retry paid for a repeated scan the declared edge does not describe",
         )
 
+    def test_arbitration_refill_scope_covers_every_exhausted_port_in_one_pass(self):
+        """CREDIT_REFILL's scope is every exhausted tenant across all pending ports.
+
+        templates/arbitration_ip.template.yaml declares
+        `all_active_tenants_out_of_credit_across_all_pending_ports` as the
+        TENANT_SCAN -> CREDIT_REFILL condition -- the whole pending set, not
+        just the port under scan. Every other exhaustion test here blocks
+        only one port at a time, so narrowing the scope to the first
+        candidate port alone still passes all of them; only a scenario with
+        two ports exhausted at once, both commands enqueued together, tells
+        the declared scope apart from the narrower one: the declared scope
+        refills both tenants in a single combined CREDIT_REFILL, where a
+        first-port-only scope would need two sequential ones.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.set_tenant_credit("T2", read_iops_credit=False)
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("c1", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(
+            sorted(command.cmd_id for _, command in model.issued),
+            ["c0", "c1"],
+            "exhaustion never cleared for one of the two simultaneously blocked ports",
+        )
+        self.assertEqual(
+            model.metrics["credit_refills"],
+            1,
+            "two ports exhausted at once took two separate refills instead of one combined pass",
+        )
+
     def test_arbitration_second_candidate_port_is_reached_through_port_scan(self):
         """No TENANT_SCAN -> TENANT_SCAN or SQ_SCAN -> TENANT_SCAN.
 

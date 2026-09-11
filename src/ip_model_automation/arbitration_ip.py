@@ -583,7 +583,6 @@ class ArbitrationIpModel:
             # both what the contract says and the safer of the two: the queue
             # and the burst state can move while the downstream is not
             # accepting.
-            burst_stalled = False
             while True:
                 # The hold comes before the re-read, not after it. issue_if
                 # declares that while issue_ready is low the pipeline holds in
@@ -606,13 +605,21 @@ class ArbitrationIpModel:
                 yield self.env.timeout(self.latency["burst_calc"])
                 issue_count = self._issue_count(selection)
                 if issue_count <= 0:
+                    # ISSUE_STALL -> READ_PENDING_COUNT ("retry while selected
+                    # SQ remains pending") is the declared exit here too, not
+                    # just from a rejected request. This used to discard the
+                    # selection outright -- inflight_sqs.discard, break to
+                    # WAIT_SELECTION for a brand new selection -- abandoning a
+                    # candidate arbiter_main had already paid a full scan and
+                    # grant for. The SQ stays claimed in inflight_sqs while
+                    # this retries: it is still legitimately in flight, not
+                    # released back for the arbiter to select again while this
+                    # pipeline is also still holding it.
                     self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
                     self.metrics["burst_stalls"] += 1
                     self.logger.warning("burst stall selection=%s time=%s", selection, self.env.now)
-                    self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
                     yield self.env.timeout(1)
-                    burst_stalled = True
-                    break
+                    continue
 
                 # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
                 # resuming on issue_ready: commands are popped only when
@@ -637,9 +644,6 @@ class ArbitrationIpModel:
                 yield self.env.timeout(1)
                 # back to the top: it holds here while issue_ready stays low,
                 # and re-reads only once the downstream is ready again.
-
-            if burst_stalled:
-                continue
 
             issued_cmds = []
             queue = self.queues[selection["port_id"]][selection["tenant_id"]][selection["sq_id"]]

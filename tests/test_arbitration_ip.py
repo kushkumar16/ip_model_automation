@@ -467,6 +467,35 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
         self.assertEqual(model.issued, [])
 
+    def test_arbitration_burst_stall_retries_in_place_rather_than_re_arbitrating(self):
+        """ISSUE_STALL -> READ_PENDING_COUNT on a burst stall, not a discard.
+
+        A selection with issue_count <= 0 used to be dropped outright --
+        inflight_sqs released, the whole thing discarded back to
+        WAIT_SELECTION -- abandoning a candidate arbiter_main had already paid
+        a full scan and grant for (23+ cycles). It still eventually issued in
+        a run with nothing else pending, but only via a *second* grant: the
+        arbiter re-scanned and re-selected the same SQ from scratch once burst
+        was replenished. `grants` is the discriminator -- it now stays at 1
+        across the whole stall-and-replenish cycle.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.configure_burst(device=0)
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=50)
+
+        self.assertGreater(model.metrics["burst_stalls"], 0, "the burst stall was never taken")
+        self.assertEqual(model.issued, [], "the command issued before burst was ever replenished")
+        self.assertIn(("T0", "SQ0"), model.inflight_sqs, "the SQ was released while still legitimately in flight")
+        self.assertEqual(model.metrics["grants"], 1, "the selection was discarded and re-arbitrated")
+
+        model.configure_burst(device=1024, tenants={"T0": 1024}, sqs={"T0": {"SQ0": 1024}})
+        env.run(until=100)
+
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"])
+        self.assertEqual(model.metrics["grants"], 1, "a second grant means the selection was re-arbitrated")
+
     def test_arbitration_credit_refill_retry_actually_re_scans_the_tenant(self):
         """CREDIT_REFILL -> TENANT_SCAN must retry, not restart the whole sweep.
 

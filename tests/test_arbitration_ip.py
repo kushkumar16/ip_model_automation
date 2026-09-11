@@ -113,6 +113,23 @@ class TestArbitrationIpModel(unittest.TestCase):
         equal = self._weighted_selection_sequence({"T0": 1, "T1": 1})
         inverted = self._weighted_selection_sequence({"T0": 4, "T1": 1})
 
+        # These sequences are measured, not derived, and the equal-weight one is
+        # phase-sensitive. It has now moved twice -- once when the arbiter
+        # stopped spinning IDLE -> PORT_SCAN -> STALL while idle, and once when
+        # policy_update's 2-cycle UPDATE_AGE was removed -- because both changed
+        # when a scan lands relative to the issue pipeline's bitmap updates.
+        # Neither time did the weighted or inverted order move, and all three
+        # stayed distinct, which is what says the weighting logic is intact and
+        # only the equal-weight interleaving is phase-coupled.
+        #
+        # It is pinned exactly anyway: per-tenant counts are 2 and 4 for all
+        # three weightings, so only the order distinguishes weighted round-robin
+        # from plain round-robin, and a looser assertion would not be able to
+        # fail for the thing this test exists to catch. If it moves again on an
+        # unrelated timing change, that is this assertion doing its secondary
+        # job -- telling you the change had a scheduling consequence -- and the
+        # check to make is that weighted and inverted are still distinct from it
+        # before updating the value.
         self.assertEqual(equal, ["T0", "T1", "T1", "T0", "T1", "T1"])
         self.assertEqual(inverted, ["T0", "T0", "T1", "T1", "T1", "T1"])
         self.assertNotEqual(weighted, equal, "weighting made no difference to the order")
@@ -221,13 +238,19 @@ class TestArbitrationIpModel(unittest.TestCase):
         model.enqueue(Command("c", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
 
         entered = {}
+        entered_arbiter = {}
         previous = None
+        previous_arbiter = None
         while env.peek() < 300:
             env.step()
             state = model.fsm_state["issue_pipeline"]
             if state != previous:
                 entered.setdefault(state, env.now)
                 previous = state
+            arbiter_state = model.fsm_state["arbiter_main"]
+            if arbiter_state != previous_arbiter:
+                entered_arbiter.setdefault(arbiter_state, env.now)
+                previous_arbiter = arbiter_state
             if model.downstream_requests and state == "UPDATE_BURST":
                 break
 
@@ -251,6 +274,14 @@ class TestArbitrationIpModel(unittest.TestCase):
         # READ_PENDING_COUNT the pipeline's remaining share is five operations:
         # selection_accept is already paid by then, on the edge in.
         self.assertEqual(model.downstream_requests[0]["time"] - entered["READ_PENDING_COUNT"], 3 + 4 + 2 + 3 + 2)
+
+        # ...which is exactly why the pipeline's whole share must also be pinned
+        # from the handoff. Every span above starts at or after READ_PENDING_COUNT,
+        # so none of them contains selection_accept, and deleting its timeout
+        # outright left this entire test green -- the declared 38-cycle path would
+        # have silently become 37. Anchoring at the grant covers all six.
+        grant_completed = entered_arbiter["GRANT"] + model.latency["grant"]
+        self.assertEqual(model.downstream_requests[0]["time"] - grant_completed, 1 + 3 + 4 + 2 + 3 + 2)
 
     def test_arbitration_issue_ready_dropping_during_the_request_holds_the_command(self):
         """issue_ready lowered after ISSUE_REQUEST is entered, which no test drove.
@@ -281,8 +312,245 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertGreater(model.metrics["output_backpressure_cycles"], 0, "the stall went unrecorded")
         self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
 
-        env.run(until=200)
+        # The retry takes the declared path: ISSUE_REQUEST -> ISSUE_STALL on a
+        # downstream that did not accept, a hold in ISSUE_STALL while
+        # issue_ready is low, then ISSUE_STALL -> READ_PENDING_COUNT, re-reading
+        # the count and burst rather than re-issuing against a stale reading.
+        reached = []
+        previous = None
+        while env.peek() < 200:
+            env.step()
+            state = model.fsm_state["issue_pipeline"]
+            if state != previous:
+                reached.append(state)
+                previous = state
+            if model.issued:
+                break
         self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"], "the command never issued")
+        self.assertEqual(
+            reached[:4],
+            ["ISSUE_STALL", "READ_PENDING_COUNT", "READ_BURST", "CALC_ISSUE_COUNT"],
+            "the retry did not re-read the pending count and burst",
+        )
+
+    def test_arbitration_issue_slots_serialises_competing_requesters(self):
+        """issue_slots is declared capacity 1, and must enforce it.
+
+        Mirrors completion_ip's output port test. A capacity is only observable
+        when something contends for it, so this drives a second requester of the
+        declared port and asserts it waits; raising the capacity makes this test
+        fail, which is the property a single-process timing assertion lacks.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        holds = []
+
+        def requester(name, hold):
+            with model.issue_slots.request() as slot:
+                yield slot
+                holds.append((name, env.now))
+                yield env.timeout(hold)
+
+        env.process(requester("first", 5))
+        env.process(requester("second", 5))
+        env.run(until=100)
+
+        self.assertEqual([name for name, _ in holds], ["first", "second"])
+        self.assertEqual(holds[0][1], 0)
+        self.assertEqual(holds[1][1], 5, "the second requester did not wait for the issue slot")
+
+    def test_arbitration_issue_slot_latency_is_charged_off_the_critical_path(self):
+        """issue_slots' declared latency_cycles: 1, which was charged nowhere.
+
+        The declared new_command_to_issue path names eleven operations summing
+        to exactly 38 and the port is not among them, so charging it inline
+        would make the path 39. It is charged in the background instead, as
+        ruled for completion_ip's output port: the command leaves at the end of
+        the request, and the port stays busy one cycle longer. Both halves are
+        pinned -- a port latency that changed nothing observable would be no
+        better than the uncharged one it replaced.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+
+        def arrive():
+            yield env.timeout(100)
+            model.enqueue(Command("c", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        env.process(arrive())
+        busy = []
+
+        def watcher():
+            while True:
+                busy.append((env.now, model.issue_slots.count))
+                yield env.timeout(1)
+
+        env.process(watcher())
+
+        entered = {}
+        previous = None
+        while env.peek() < 400:
+            env.step()
+            state = model.fsm_state["arbiter_main"]
+            if state != previous and env.now >= 100:
+                entered.setdefault(state, env.now)
+                previous = state
+            if model.downstream_requests:
+                break
+        env.run(until=200)
+
+        self.assertEqual(model.downstream_requests[0]["time"] - entered["IDLE"], 38, "the declared 38-cycle path moved")
+        held = [now for now, count in busy if count]
+        self.assertEqual(
+            len(held),
+            model.latency["issue"] + model.issue_slot_latency,
+            "the issue slot was not busy for its own latency beyond the request",
+        )
+
+    def test_arbitration_credit_exhaustion_refills_and_retries(self):
+        """TENANT_SCAN -> CREDIT_REFILL -> TENANT_SCAN when nothing can be granted.
+
+        A tenant is selected only while it holds credit. When every tenant with
+        active traffic is out of credit the arbiter refills before retrying,
+        rather than waiting for an external event: exhaustion is self-clearing.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("only", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        reached = []
+        previous = None
+        while env.peek() < 300:
+            env.step()
+            state = model.fsm_state["arbiter_main"]
+            if state != previous:
+                reached.append(state)
+                previous = state
+            if model.issued:
+                break
+
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["only"], "exhaustion never cleared")
+        self.assertIn("CREDIT_REFILL", reached)
+        self.assertEqual(model.metrics["credit_refills"], 1)
+
+    def test_arbitration_refill_does_not_let_an_exhausted_port_jump_the_queue(self):
+        """The refill test is across all pending ports, not the one scanned.
+
+        Refilling as soon as a single port comes up exhausted lets that port's
+        tenant overtake an eligible command already waiting on another port,
+        which inverts the rule that a blocked tenant must not hold up a
+        different port. Measured before this was fixed: the blocked command
+        issued first.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("blocked", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("ready", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            ["ready", "blocked"],
+            "an exhausted port was refilled ahead of an eligible one",
+        )
+
+    def test_arbitration_dead_tenant_does_not_trigger_a_refill(self):
+        """A tenant that is not alive is out of the running, not out of credit."""
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", tenant_alive=False)
+        model.enqueue(Command("dead", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
+        self.assertEqual(model.issued, [])
+
+    def test_arbitration_idle_arbiter_waits_instead_of_scanning(self):
+        """An idle arbiter costs nothing and records nothing.
+
+        It used to spin IDLE -> PORT_SCAN -> STALL every 6 cycles with nothing
+        queued, taking the declared edge with its condition `any_port_pending`
+        false and paying a 4-cycle port scan to rediscover what the bitmap it had
+        just refreshed already said. `stalls` and `no_port_pending_stalls` then
+        measured elapsed idle time rather than arbitration events.
+
+        The wake must also not be lost: a command arriving long after the arbiter
+        has blocked is still served.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        env.run(until=500)
+
+        self.assertEqual(model.metrics["stalls"], 0, "an idle arbiter is still scanning")
+        self.assertEqual(model.metrics["no_port_pending_stalls"], 0)
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
+
+        model.enqueue(Command("late", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=700)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued], ["late"], "the wake-up after a long idle was lost"
+        )
+
+    def test_arbitration_blocked_tenant_does_not_starve_the_other_port(self):
+        """A port whose tenants are all ineligible must not consume the arbiter.
+
+        `_select_port` used to return the first *pending* port and the scan
+        committed to it, so one credit-blocked tenant held the arbiter forever:
+        measured at 400 cycles with zero grants while an eligible command sat on
+        the other port, and nothing moved until credit was restored. The scan now
+        walks the ports in policy order, because `eligible_port_found` cannot be
+        decided until a port's tenants have been looked at.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=0)
+        model.enqueue(Command("blocked", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("ready", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+
+        env.run(until=200)
+        issued = [command.cmd_id for _, command in model.issued]
+        self.assertEqual(
+            issued[0],
+            "ready",
+            "the eligible command on the other port was starved by a blocked tenant",
+        )
+        # "blocked" follows once its credit is refilled on exhaustion; what this
+        # test pins is that it does not go first and does not hold up the other
+        # port. The assertion used to be `issued == ["ready"]`, which held only
+        # while an exhausted tenant waited for an external event.
+        self.assertEqual(issued, ["ready", "blocked"])
+        self.assertGreater(model.metrics["credit_refills"], 0)
+
+    def test_arbitration_stalls_when_the_last_port_drains_mid_scan(self):
+        """PORT_SCAN -> STALL on no_eligible_port, which now needs a real race.
+
+        While the arbiter polled, this transition fired on every idle pass and
+        was trivially covered. Now that an idle arbiter blocks in IDLE until a
+        port is pending, PORT_SCAN is entered only when one is -- so the declared
+        `no_eligible_port` condition is reachable in exactly one way: the last
+        pending command leaves during the four cycles the scan takes. That is a
+        real case (the issue pipeline drains it), and without this test the fix
+        for M23 would quietly make a declared transition unreachable, which is
+        what rounds one and two were about.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        def drain_during_the_scan():
+            while model.fsm_state["arbiter_main"] != "PORT_SCAN":
+                yield env.timeout(1)
+            # the command is issued while the scan is in flight
+            model.queues["port0"]["T0"]["SQ0"].clear()
+            model._update_pending_bitmaps()
+
+        env.process(drain_during_the_scan())
+        env.run(until=60)
+
+        self.assertEqual(model.metrics["no_port_pending_stalls"], 1, "the declared no_eligible_port stall never fired")
+        self.assertEqual(model.metrics["grants"], 0)
 
     def _sq_selection_sequence(self, sq_weights, until=400):
         """Selections at the SQ level, under load that keeps all four SQs pending.
@@ -380,9 +648,15 @@ class TestArbitrationIpModel(unittest.TestCase):
         env.run(until=200)
 
         selected = [entry["tenant_id"] for entry in model.selection_trace]
-        self.assertEqual(selected, ["T1"], "an ineligible tenant was granted")
+        self.assertEqual(selected[0], "T1", "an ineligible tenant was granted ahead of an eligible one")
         self.assertGreater(model.metrics["eligibility_rejections"], 0)
-        self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 1, "its command must still be queued")
+
+        # T0 is granted too, but only after a refill: credit exhaustion is
+        # self-clearing, so the gate decides *order*, not exclusion. This
+        # assertion used to be `selected == ["T1"]`, which was true only while a
+        # credit-blocked tenant could wait forever.
+        self.assertEqual(selected, ["T1", "T0"])
+        self.assertGreater(model.metrics["credit_refills"], 0, "credit was never refilled")
 
         # Restoring credit makes it selectable again, and nothing was debited.
         model.set_tenant_credit("T0", read_iops_credit=True)

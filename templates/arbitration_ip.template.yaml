@@ -42,7 +42,7 @@ interfaces:
       wait_points: [issue_pipeline.ISSUE_REQUEST]
       resumes_on: issue_ready
       source: dld
-      notes: "downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue"
+      notes: "downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue. `issue_ready` changes only at transaction boundaries, so it is sampled before a request is driven and again at the end of it, never during: a deassertion shorter than one request cannot occur, and `low` here means low at a boundary. See decisions/arbitration_ip.md."
     transactions:
       - name: issue_command
         fields: [cmd_descriptor, selected_port, selected_tenant, selected_sq, pending_cmd_count, device_burst_available, tenant_burst_available, sq_burst_available, issue_count, selection_reason]
@@ -105,6 +105,8 @@ fsm_processes:
         description: Evaluate pending ports in RR/WRR order.
       - name: TENANT_SCAN
         description: Evaluate pending tenants linked to the selected port.
+      - name: CREDIT_REFILL
+        description: Restore tenant credit when every tenant with active traffic under the selected port is out of credit.
       - name: SQ_SCAN
         description: Evaluate pending SQs linked to the selected tenant.
       - name: GRANT
@@ -131,6 +133,31 @@ fsm_processes:
         to: SQ_SCAN
         condition: eligible_tenant_found
         actions: [record_selected_tenant]
+        latency_cycles: 1
+      - from: TENANT_SCAN
+        to: CREDIT_REFILL
+        condition: all_active_tenants_out_of_credit_across_all_pending_ports
+        actions: [refill_tenant_credit]
+        latency_cycles: 10
+      - from: CREDIT_REFILL
+        to: TENANT_SCAN
+        condition: credit_restored
+        actions: []
+        latency_cycles: 1
+      - from: TENANT_SCAN
+        to: STALL
+        condition: no_tenant_with_active_traffic
+        actions: [increment_no_tenant_stall]
+        latency_cycles: 1
+      - from: SQ_SCAN
+        to: STALL
+        condition: no_eligible_sq
+        actions: [increment_no_sq_stall]
+        latency_cycles: 1
+      - from: STALL
+        to: IDLE
+        condition: returns_to_the_wait
+        actions: []
         latency_cycles: 1
       - from: SQ_SCAN
         to: GRANT
@@ -185,6 +212,16 @@ fsm_processes:
         condition: downstream_accepts_request
         actions: [pop_issue_count_commands]
         latency_cycles: 3
+      - from: ISSUE_REQUEST
+        to: ISSUE_STALL
+        condition: downstream_did_not_accept
+        actions: [hold_selected_sq, increment_output_stall]
+        latency_cycles: 1
+      - from: ISSUE_STALL
+        to: READ_PENDING_COUNT
+        condition: retry_while_selected_sq_remains_pending
+        actions: []
+        latency_cycles: 1
       - from: UPDATE_BURST
         to: WAIT_SELECTION
         condition: burst_debited
@@ -194,9 +231,9 @@ fsm_processes:
     queues_used: [sq_ingress_queues]
     resources_used: [issue_slots]
   - name: policy_update
-    purpose: Maintains round-robin, weighted order, and age metadata.
+    purpose: Maintains round-robin and weighted order.
     simpy_process: true
-    states: [RESET, WAIT_GRANT, UPDATE_POINTER, UPDATE_AGE]
+    states: [RESET, WAIT_GRANT, UPDATE_POINTER]
     transitions:
       - from: WAIT_GRANT
         to: UPDATE_POINTER
@@ -204,13 +241,8 @@ fsm_processes:
         actions: [advance_port_tenant_sq_pointers]
         latency_cycles: 0
       - from: UPDATE_POINTER
-        to: UPDATE_AGE
-        condition: pointer_updated
-        actions: [age_unselected_queues]
-        latency_cycles: 0
-      - from: UPDATE_AGE
         to: WAIT_GRANT
-        condition: age_updated
+        condition: pointer_updated
         actions: []
         latency_cycles: 0
     interfaces_touched: []
@@ -223,6 +255,17 @@ resources:
     capacity: 1
     bandwidth: one_command_per_dispatch_tick
     latency_cycles: 1
+    note: >-
+      This cycle is charged off the command's critical path, not on it:
+      end_to_end_paths.new_command_to_issue names eleven operations summing to
+      exactly 38 and this port is not among them, so charging it inline would
+      make that path 39 and break a figure the model matches. The pipeline holds
+      the slot across the downstream request and releases it one cycle later
+      from a background process, so the command leaves at the end of the request
+      while the port stays busy for its own latency -- which is where a capacity
+      of 1 is meant to be felt. Same ruling as completion_ip's
+      completion_output_port. See decisions/arbitration_ip.md.
+
     arbitration: configured_policy
     sharing_scope: global
 
@@ -285,7 +328,7 @@ fsm_relationships:
       path: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, issue_pipeline.READ_PENDING_COUNT, issue_pipeline.READ_BURST, issue_pipeline.CALC_ISSUE_COUNT, issue_pipeline.ISSUE_REQUEST]
       description: Pipeline 1 selects one SQ; pipeline 2 computes issue_count and sends downstream request.
     - name: policy_update_path
-      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER, policy_update.UPDATE_AGE]
+      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER]
       description: Accepted grant updates policy state for the next scan.
   gating_relationships:
     - source: issue_if.issue_ready
@@ -317,12 +360,12 @@ timing_model:
         - {name: tenant_scan, cycles: 6, ns: 12}
         - {name: sq_scan, cycles: 8, ns: 16}
         - {name: grant_selected_sq, cycles: 2, ns: 4}
+        - {name: credit_refill, cycles: 10, ns: 20}
         - {name: backpressure_retry, cycles: 1, ns: 2}
     - fsm: policy_update
       mode: parallel_helper
       operations:
         - {name: pointer_update, cycles: 1, ns: 2}
-        - {name: age_update, cycles: 2, ns: 4}
         - {name: weighted_order_rebuild, cycles: 8, ns: 16}
     - fsm: issue_pipeline
       mode: parallel_process

@@ -188,6 +188,13 @@ Timing:
 - In burst mode, `issue_count` may be greater than one. The issued count is the
   minimum of selected SQ pending command count, device burst availability,
   tenant burst availability, and SQ burst availability.
+- `issue_ready` changes only at transaction boundaries. It is sampled before a
+  request is driven and again at the end of it, and is not sampled during the
+  request: a deassertion shorter than one request cannot occur. A deassertion
+  that is present at either boundary is handled -- the pipeline holds in
+  `ISSUE_STALL` and retries from `READ_PENDING_COUNT` -- so "while `issue_ready`
+  is low" in the wait model below means low at a boundary, not low at some
+  instant within a transaction.
 
 Wait model:
 
@@ -213,6 +220,19 @@ Timing:
 - Credit checks are sampled during candidate evaluation.
 - Credit consumption may be owned by Completion IP or by a shared QoS service.
   In this starter DLD, Arbitration IP performs eligibility check only.
+
+Credit exhaustion:
+
+- A tenant is selected only when it holds credit. A tenant with active traffic
+  and no credit is passed over, not granted.
+- When every tenant with active traffic is out of credit, credit is refilled
+  before tenant selection is retried, rather than the scan stalling until some
+  external event restores it. Exhaustion is therefore self-clearing and cannot
+  starve the device indefinitely. A tenant that is not alive does not count as
+  out of credit: it is out of the running, and must not make an exhausted scan
+  look refillable.
+- Refill is triggered by exhaustion, not by a window timer. Completion IP's
+  windowed refill and this on-demand refill are separate mechanisms.
 
 Wait model:
 
@@ -242,6 +262,8 @@ States:
 - `IDLE`: no eligible command or downstream not ready.
 - `PORT_SCAN`: inspect pending ports according to port policy.
 - `TENANT_SCAN`: inspect tenants linked to selected port.
+- `CREDIT_REFILL`: restore tenant credit when every tenant with active traffic
+  under the selected port is out of credit.
 - `SQ_SCAN`: inspect SQs linked to selected tenant.
 - `GRANT`: select one SQ and pass selected SQ metadata to issue pipeline.
 - `STALL`: downstream backpressure or no eligible command.
@@ -253,11 +275,19 @@ Transitions:
 - `PORT_SCAN -> TENANT_SCAN`: eligible pending port found.
 - `PORT_SCAN -> STALL`: no eligible port found.
 - `TENANT_SCAN -> SQ_SCAN`: eligible pending tenant found.
-- `TENANT_SCAN -> STALL`: no eligible tenant found under selected port.
+- `TENANT_SCAN -> CREDIT_REFILL`: every tenant with active traffic, across all
+  ports with pending work, is out of credit. The test is deliberately not
+  per-port: refilling as soon as one port comes up exhausted lets that port's
+  tenant jump ahead of an eligible command waiting on another, which inverts the
+  rule that a blocked tenant must not hold up a different port.
+- `CREDIT_REFILL -> TENANT_SCAN`: credit restored; tenant selection is retried.
+- `TENANT_SCAN -> STALL`: no tenant with active traffic under selected port.
 - `SQ_SCAN -> GRANT`: eligible SQ with pending command found.
 - `SQ_SCAN -> STALL`: no eligible SQ found under selected tenant.
 - `GRANT -> IDLE`: selected SQ metadata accepted by issue pipeline.
-- `STALL -> PORT_SCAN`: readiness or eligibility changes.
+- `STALL -> IDLE`: the arbiter returns to the wait. It does not rescan on a
+  timer -- an idle arbiter does not poll -- so readiness or eligibility changing
+  is what moves it on, via `IDLE -> PORT_SCAN`.
 
 ### 6.2 Policy Update FSM
 
@@ -266,7 +296,6 @@ States:
 - `RESET`: initialize policy state.
 - `WAIT_GRANT`: wait for a successful grant.
 - `UPDATE_POINTER`: update round-robin pointer or weighted deficit.
-- `UPDATE_AGE`: update age/starvation metadata.
 
 ### 6.3 Issue Pipeline FSM
 
@@ -290,6 +319,11 @@ Transitions:
   downstream is ready.
 - `CALC_ISSUE_COUNT -> ISSUE_STALL`: issue count is zero.
 - `ISSUE_REQUEST -> UPDATE_BURST`: downstream accepts request.
+- `ISSUE_REQUEST -> ISSUE_STALL`: downstream does not accept the request. The
+  selected SQ is retained and no command leaves the ingress queue; the pipeline
+  holds in `ISSUE_STALL` while `issue_ready` is low and retries from
+  `READ_PENDING_COUNT`, re-reading the pending count and burst state, which can
+  both move while the downstream is not accepting.
 - `ISSUE_STALL -> READ_PENDING_COUNT`: retry while selected SQ remains pending.
 - `UPDATE_BURST -> WAIT_SELECTION`: burst counters debited.
 
@@ -491,8 +525,8 @@ Per-process timing:
 
 | FSM/process | Runs as | Delay model |
 | --- | --- | --- |
-| Arbiter Main FSM | Pipeline 1 process | Bitmap update visibility: 3 cycles = 6 ns. Port scan: 4 cycles = 8 ns. Tenant scan: 6 cycles = 12 ns. SQ scan: 8 cycles = 16 ns. Grant selected SQ: 2 cycles = 4 ns. |
-| Policy Update FSM | Parallel helper process triggered by grant | Pointer update: 1 cycle = 2 ns. Age metadata update: 2 cycles = 4 ns. Weighted-order rebuild after config change: 8 cycles = 16 ns. |
+| Arbiter Main FSM | Pipeline 1 process | Bitmap update visibility: 3 cycles = 6 ns. Port scan: 4 cycles = 8 ns. Tenant scan: 6 cycles = 12 ns. SQ scan: 8 cycles = 16 ns. Grant selected SQ: 2 cycles = 4 ns. Credit refill on exhaustion: 10 cycles = 20 ns (starter value, see Open Items). |
+| Policy Update FSM | Parallel helper process triggered by grant | Pointer update: 1 cycle = 2 ns. Weighted-order rebuild after config change: 8 cycles = 16 ns. |
 | Issue Pipeline FSM | Pipeline 2 process | Selection accept: 1 cycle = 2 ns. Pending count read: 3 cycles = 6 ns. Burst read: 4 cycles = 8 ns. Min burst calculation: 2 cycles = 4 ns. Downstream issue request: 3 cycles = 6 ns. Burst debit: 2 cycles = 4 ns. Downstream backpressure retry interval: 1 cycle = 2 ns. |
 
 End-to-end command issue delay:
@@ -506,7 +540,7 @@ End-to-end command issue delay:
 - End-to-end no-stall selected SQ to downstream request:
   `pipeline 1 20 + pipeline 2 15 = 35 cycles = 70 ns`.
 - With policy update included for next selection readiness:
-  `20 + max(1, 2) = 22 cycles = 44 ns`.
+  `20 + 1 = 21 cycles = 42 ns`.
 - If downstream is not ready, add `1 cycle = 2 ns` per retry tick.
 
 Sequential/parallel relationship:
@@ -530,7 +564,15 @@ Sequential dependency:
 - Whether credit consumption happens in Arbitration IP or Completion IP.
 - Flush/admin ordering rules.
 - Per-clock issue width.
-- Starvation guard threshold.
+- Starvation guard threshold, and the mechanism that would feed it. An
+  `UPDATE_AGE` state and an `age_unselected_queues` action were declared here
+  with a 2-cycle cost and no ageing policy -- nothing said what aged, by how
+  much, or what an aged queue gained. They are removed rather than carried as a
+  cost for behaviour no document specifies. A starvation guard remains open, and
+  specifying one means specifying its ageing mechanism with it.
+- Exact credit refill latency and refill amount on exhaustion. The 10-cycle
+  figure above is a starter value in the same sense as the other delays in this
+  section, not a number this document sources.
 - Exact production port-to-tenant mapping.
 - Exact production tenant-to-SQ mapping.
 - Exact device, tenant, and SQ burst refill rules.

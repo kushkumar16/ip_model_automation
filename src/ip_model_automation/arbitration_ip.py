@@ -50,6 +50,8 @@ class ArbitrationIpModel:
         burst_debit_latency: int = 2,
         weighted_order_rebuild_latency: int = 8,
         reset_latency: int = 1,
+        issue_slot_latency: int = 1,
+        credit_refill_latency: int = 10,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
@@ -122,11 +124,22 @@ class ArbitrationIpModel:
             "burst_debit": burst_debit_latency,
             "backpressure_retry": 1,
             "pointer_update": 1,
-            "age_update": 2,
             "weighted_order_rebuild": weighted_order_rebuild_latency,
             "reset": reset_latency,
+            "credit_refill": credit_refill_latency,
         }
 
+        self._arbiter_wake = None
+        self.issue_slot_latency = issue_slot_latency
+        # issue_slots: declared capacity 1 with latency_cycles 1. The capacity
+        # was already modelled by the depth-1 handoff store below, which limits
+        # the arbiter to one selection ahead; the port's own latency was charged
+        # nowhere. It is charged in the background, as ruled for completion_ip's
+        # output port: the pipeline holds the slot across the downstream request
+        # and hands the release to a process that lets the port's latency elapse
+        # first, so the declared 38-cycle path is unchanged while the port stays
+        # busy a cycle longer -- which is where a capacity of 1 is felt.
+        self.issue_slots = simpy.Resource(env, capacity=1)
         self.selected_sq_q = simpy.Store(env, capacity=1)
         self.policy_update_q = simpy.Store(env)
         self.queues: Dict[str, Dict[str, Dict[str, Deque[Command]]]] = defaultdict(
@@ -182,6 +195,7 @@ class ArbitrationIpModel:
             raise ValueError(f"SQ {sq_id} is not linked to tenant {tenant_id}")
         self.queues[port_id][tenant_id][sq_id].append(command)
         self.bitmap_dirty = True
+        self._wake_arbiter()
         self.logger.info("enqueue cmd=%s port=%s tenant=%s sq=%s", command.cmd_id, port_id, tenant_id, sq_id)
 
     def configure_burst(
@@ -275,6 +289,37 @@ class ArbitrationIpModel:
                 return port_id
         return None
 
+    def _active_tenants(self, port_id: str) -> list:
+        """Tenants under this port with pending work and a live status.
+
+        A dead tenant is not "out of credit" -- it is out of the running -- so it
+        must not make an exhausted port look refillable.
+        """
+        return [
+            tenant_id
+            for tenant_id in self.tenant_policies[port_id].scan()
+            if self.tenant_pending_bitmap[port_id].get(tenant_id, False)
+            and self.tenant_credit[tenant_id]["tenant_alive"]
+        ]
+
+    def _refill_tenant_credit(self, tenant_ids) -> None:
+        """Restore credit on every axis, leaving tenant_alive alone."""
+        for tenant_id in tenant_ids:
+            for field in self.tenant_credit[tenant_id]:
+                if field != "tenant_alive":
+                    self.tenant_credit[tenant_id][field] = True
+        self.metrics["credit_refills"] += 1
+        self.logger.info("credit refilled tenants=%s time=%s", list(tenant_ids), self.env.now)
+
+    def _pending_ports(self) -> list:
+        """Every pending port, in policy order.
+
+        The scan needs all of them, not just the first: `eligible_port_found` is
+        about a port that yields a grantable candidate, and that cannot be known
+        until its tenants have been examined.
+        """
+        return [port_id for port_id in self.port_policy.scan() if self.port_pending_bitmap.get(port_id, False)]
+
     def _select_tenant(self, port_id: str) -> Optional[str]:
         for tenant_id in self.tenant_policies[port_id].scan():
             if not self.tenant_pending_bitmap[port_id].get(tenant_id, False):
@@ -327,6 +372,20 @@ class ArbitrationIpModel:
             self.sq_burst_available[tenant_id][sq_id],
         )
 
+    def _release_issue_slot(self, slot):
+        """Let the issue port's declared latency elapse, then release it.
+
+        Runs off the pipeline's critical path deliberately: the cost belongs to
+        the port, not to the command that just left it.
+        """
+        yield self.env.timeout(self.issue_slot_latency)
+        self.issue_slots.release(slot)
+
+    def _wake_arbiter(self) -> None:
+        """Tell an arbiter blocked in IDLE that work may now exist."""
+        if self._arbiter_wake is not None and not self._arbiter_wake.triggered:
+            self._arbiter_wake.succeed()
+
     def _stall(self, reason: str, metric: str):
         """Hold STALL for the declared retry, recording the reason's own metric.
 
@@ -361,17 +420,31 @@ class ArbitrationIpModel:
         while True:
             # IDLE is held on every pass, so it is occupied rather than merely
             # assigned, and the loop is re-entered here after a grant -- which is
-            # the declared GRANT -> IDLE. bitmap_update is still charged only
-            # when the bitmaps are actually dirty: charging it on every idle spin
-            # would invent 3 cycles the timing model does not price for a refresh
-            # with nothing to refresh. An idle pass instead costs the 1-cycle
-            # retry the template prices for a poll that found nothing.
+            # the declared GRANT -> IDLE.
+            #
+            # IDLE -> PORT_SCAN is declared on `any_port_pending`, and the
+            # arbiter waits here until that is true rather than scanning to find
+            # out. It used to spin IDLE -> PORT_SCAN -> STALL every 6 cycles with
+            # nothing queued, taking the declared edge with its declared
+            # condition false and paying a 4-cycle port scan to rediscover what
+            # the bitmap it had just refreshed already said -- so `stalls` and
+            # `no_port_pending_stalls` measured elapsed idle time rather than
+            # arbitration events. An idle arbiter now costs nothing and records
+            # nothing.
+            #
+            # The wait is armed before the condition is re-tested and no
+            # simulated time passes between the two, so an enqueue cannot slip
+            # into the gap and be missed.
             self._set_fsm_state("arbiter_main", "IDLE")
-            if self.bitmap_dirty:
-                yield self.env.timeout(self.latency["bitmap"])
-                self._update_pending_bitmaps()
-            else:
-                yield self.env.timeout(self.latency["backpressure_retry"])
+            while True:
+                if self.bitmap_dirty:
+                    yield self.env.timeout(self.latency["bitmap"])
+                    self._update_pending_bitmaps()
+                if any(self.port_pending_bitmap.values()):
+                    break
+                self._arbiter_wake = self.env.event()
+                yield self._arbiter_wake
+                self._arbiter_wake = None
             # Each scan decides its own level, in the state the template
             # declares that decision on: the port at the end of PORT_SCAN, the
             # tenant -- and with it the qos_credit_if eligibility sample, whose
@@ -381,25 +454,70 @@ class ArbitrationIpModel:
             # a credit-blocked candidate pay all three scans before stalling.
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
-            port_id = self._select_port()
+            candidates = self._pending_ports()
             # PORT_SCAN -> STALL on no_eligible_port, with its declared
             # increment_no_eligible_stall action.
-            if port_id is None:
+            if not candidates:
                 yield from self._stall("no eligible port", "no_port_pending_stalls")
                 continue
 
-            self._set_fsm_state("arbiter_main", "TENANT_SCAN")
-            yield self.env.timeout(self.latency["tenant_scan"])
-            tenant_id = self._select_tenant(port_id)
-            if tenant_id is None:
-                yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
-                continue
+            # The scan walks the ports in policy order rather than committing to
+            # the first pending one. A port is `eligible` only if a grantable
+            # candidate can be found beneath it, so a port whose tenants are all
+            # credit-blocked must not consume the arbiter: it used to, and one
+            # blocked tenant starved every other port indefinitely -- measured at
+            # 400 cycles with zero grants while an eligible command sat on the
+            # other port.
+            port_id = tenant_id = sq_id = None
+            for candidate_port in candidates:
+                self._set_fsm_state("arbiter_main", "TENANT_SCAN")
+                yield self.env.timeout(self.latency["tenant_scan"])
+                tenant_id = self._select_tenant(candidate_port)
+                if tenant_id is None:
+                    continue
 
-            self._set_fsm_state("arbiter_main", "SQ_SCAN")
-            yield self.env.timeout(self.latency["sq_scan"])
-            sq_id = self._select_sq(tenant_id)
-            if sq_id is None:
-                yield from self._stall("no eligible sq", "no_sq_pending_stalls")
+                self._set_fsm_state("arbiter_main", "SQ_SCAN")
+                yield self.env.timeout(self.latency["sq_scan"])
+                sq_id = self._select_sq(tenant_id)
+                if sq_id is None:
+                    continue
+                port_id = candidate_port
+                break
+
+            if port_id is None:
+                # TENANT_SCAN -> CREDIT_REFILL when every tenant with active
+                # traffic is out of credit. Exhaustion is self-clearing:
+                # without it the arbiter waits for some external event to
+                # restore credit and stalls indefinitely.
+                #
+                # The test is across every candidate port, not the one port the
+                # scan happened to stop on. Refilling as soon as a single port
+                # comes up exhausted lets that port's tenant jump ahead of an
+                # eligible command waiting on another one -- measured, it
+                # inverted the starvation fix it sits next to.
+                #
+                # A tenant that is merely not alive does not qualify: it is out
+                # of the running, not out of credit, and must not make an
+                # exhausted scan look refillable.
+                exhausted = [
+                    tenant_id
+                    for candidate_port in candidates
+                    for tenant_id in self._active_tenants(candidate_port)
+                    if not self.sample_eligibility(tenant_id)
+                ]
+                if exhausted:
+                    self._set_fsm_state("arbiter_main", "CREDIT_REFILL")
+                    yield self.env.timeout(self.latency["credit_refill"])
+                    self._refill_tenant_credit(exhausted)
+                    # CREDIT_REFILL -> TENANT_SCAN: selection is retried.
+                    self._set_fsm_state("arbiter_main", "TENANT_SCAN")
+                    yield self.env.timeout(self.latency["tenant_scan"])
+                    continue
+
+                if tenant_id is None:
+                    yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                else:
+                    yield from self._stall("no eligible sq", "no_sq_pending_stalls")
                 continue
 
             selection = self._commit_selection(port_id, tenant_id, sq_id)
@@ -422,31 +540,22 @@ class ArbitrationIpModel:
             # contract. The end-to-end total is the same either way; the
             # placement is what the template actually declares.
             yield self.env.timeout(self.latency["selection_accept"])
-            self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
-            yield self.env.timeout(self.latency["pending_count"])
-            pending_count = self._pending_count(selection)
-            self._set_fsm_state("issue_pipeline", "READ_BURST")
-            yield self.env.timeout(self.latency["burst_read"])
-            self._set_fsm_state("issue_pipeline", "CALC_ISSUE_COUNT")
-            yield self.env.timeout(self.latency["burst_calc"])
-            issue_count = self._issue_count(selection)
-            if issue_count <= 0:
-                self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
-                self.metrics["burst_stalls"] += 1
-                self.logger.warning("burst stall selection=%s time=%s", selection, self.env.now)
-                self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
-                yield self.env.timeout(1)
-                continue
-            # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
-            # resuming on issue_ready, and the declared invariants are that
-            # commands are popped only when issue_ready is true and that queue
-            # entries remain pending during downstream backpressure. The check
-            # used to run only *before* the request: once ISSUE_REQUEST was
-            # entered, issue_ready dropping during those 3 cycles did nothing and
-            # the commands were popped anyway, with output_backpressure_cycles
-            # left at 0. The request is now re-driven until it completes with
-            # issue_ready still high, so nothing leaves the queue during a stall.
+            # A request the downstream does not accept returns to
+            # READ_PENDING_COUNT, which is the retry path the DLD declares for
+            # ISSUE_STALL ("retry while selected SQ remains pending"). The
+            # re-drive used to loop straight back to ISSUE_REQUEST, an edge no
+            # document declares, and it re-issued against a pending count and
+            # burst reading it had taken before the stall. Re-reading them is
+            # both what the contract says and the safer of the two: the queue
+            # and the burst state can move while the downstream is not
+            # accepting.
+            burst_stalled = False
             while True:
+                # The hold comes before the re-read, not after it. issue_if
+                # declares that while issue_ready is low the pipeline holds in
+                # ISSUE_STALL; re-reading the pending count and burst on a loop
+                # during backpressure would leave it cycling through
+                # READ_PENDING_COUNT and READ_BURST instead of holding.
                 while not self.output_ready:
                     self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
                     self.metrics["output_stalls"] += 1
@@ -454,17 +563,58 @@ class ArbitrationIpModel:
                     self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
                     yield self.env.timeout(1)
 
+                self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
+                yield self.env.timeout(self.latency["pending_count"])
+                pending_count = self._pending_count(selection)
+                self._set_fsm_state("issue_pipeline", "READ_BURST")
+                yield self.env.timeout(self.latency["burst_read"])
+                self._set_fsm_state("issue_pipeline", "CALC_ISSUE_COUNT")
+                yield self.env.timeout(self.latency["burst_calc"])
+                issue_count = self._issue_count(selection)
+                if issue_count <= 0:
+                    self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                    self.metrics["burst_stalls"] += 1
+                    self.logger.warning("burst stall selection=%s time=%s", selection, self.env.now)
+                    self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
+                    yield self.env.timeout(1)
+                    burst_stalled = True
+                    break
+
+                # issue_if is wait_for_ack_inline at issue_pipeline.ISSUE_REQUEST,
+                # resuming on issue_ready: commands are popped only when
+                # issue_ready is true, and queue entries remain pending during
+                # downstream backpressure.
+                slot = self.issue_slots.request()
+                yield slot
                 self._set_fsm_state("issue_pipeline", "ISSUE_REQUEST")
                 yield self.env.timeout(self.latency["issue"])
                 if self.output_ready:
                     break
+
+                # ISSUE_REQUEST -> ISSUE_STALL: the downstream did not accept.
+                # The slot is released at once rather than after the port's
+                # latency -- nothing left through it, so there is nothing for it
+                # to carry out.
+                self.issue_slots.release(slot)
+                self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                self.metrics["output_stalls"] += 1
+                self.metrics["output_backpressure_cycles"] += 1
                 self.logger.warning("issue_ready dropped during request selection=%s time=%s", selection, self.env.now)
+                yield self.env.timeout(1)
+                # back to the top: it holds here while issue_ready stays low,
+                # and re-reads only once the downstream is ready again.
+
+            if burst_stalled:
+                continue
+
             issued_cmds = []
             queue = self.queues[selection["port_id"]][selection["tenant_id"]][selection["sq_id"]]
             for _ in range(issue_count):
                 command = queue.popleft()
                 issued_cmds.append(command)
                 self.issued.append((self.env.now, command))
+
+            self.env.process(self._release_issue_slot(slot))
 
             self.device_burst_available -= issue_count
             self.tenant_burst_available[selection["tenant_id"]] -= issue_count
@@ -510,7 +660,4 @@ class ArbitrationIpModel:
             yield self.env.timeout(self.latency["weighted_order_rebuild"])
             self.metrics["policy_updates"] += 1
             self.logger.debug("policy update selection=%s", selection)
-            self._set_fsm_state("policy_update", "UPDATE_AGE")
-            yield self.env.timeout(self.latency["age_update"])
-            self.metrics["age_updates"] += 1
             self._set_fsm_state("policy_update", "WAIT_GRANT")

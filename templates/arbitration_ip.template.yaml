@@ -105,6 +105,8 @@ fsm_processes:
         description: Evaluate pending ports in RR/WRR order.
       - name: TENANT_SCAN
         description: Evaluate pending tenants linked to the selected port.
+      - name: CREDIT_REFILL
+        description: Restore tenant credit when every tenant with active traffic under the selected port is out of credit.
       - name: SQ_SCAN
         description: Evaluate pending SQs linked to the selected tenant.
       - name: GRANT
@@ -131,6 +133,31 @@ fsm_processes:
         to: SQ_SCAN
         condition: eligible_tenant_found
         actions: [record_selected_tenant]
+        latency_cycles: 1
+      - from: TENANT_SCAN
+        to: CREDIT_REFILL
+        condition: all_active_tenants_out_of_credit
+        actions: [refill_tenant_credit]
+        latency_cycles: 10
+      - from: CREDIT_REFILL
+        to: TENANT_SCAN
+        condition: credit_restored
+        actions: []
+        latency_cycles: 1
+      - from: TENANT_SCAN
+        to: STALL
+        condition: no_tenant_with_active_traffic
+        actions: [increment_no_tenant_stall]
+        latency_cycles: 1
+      - from: SQ_SCAN
+        to: STALL
+        condition: no_eligible_sq
+        actions: [increment_no_sq_stall]
+        latency_cycles: 1
+      - from: STALL
+        to: PORT_SCAN
+        condition: readiness_or_eligibility_changed
+        actions: []
         latency_cycles: 1
       - from: SQ_SCAN
         to: GRANT
@@ -185,6 +212,11 @@ fsm_processes:
         condition: downstream_accepts_request
         actions: [pop_issue_count_commands]
         latency_cycles: 3
+      - from: ISSUE_STALL
+        to: READ_PENDING_COUNT
+        condition: retry_while_selected_sq_remains_pending
+        actions: []
+        latency_cycles: 1
       - from: UPDATE_BURST
         to: WAIT_SELECTION
         condition: burst_debited
@@ -317,6 +349,7 @@ timing_model:
         - {name: tenant_scan, cycles: 6, ns: 12}
         - {name: sq_scan, cycles: 8, ns: 16}
         - {name: grant_selected_sq, cycles: 2, ns: 4}
+        - {name: credit_refill, cycles: 10, ns: 20}
         - {name: backpressure_retry, cycles: 1, ns: 2}
     - fsm: policy_update
       mode: parallel_helper

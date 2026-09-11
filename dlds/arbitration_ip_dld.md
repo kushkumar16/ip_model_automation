@@ -214,6 +214,17 @@ Timing:
 - Credit consumption may be owned by Completion IP or by a shared QoS service.
   In this starter DLD, Arbitration IP performs eligibility check only.
 
+Credit exhaustion:
+
+- A tenant is selected only when it holds credit. A tenant with active traffic
+  and no credit is passed over, not granted.
+- When every tenant with active traffic under the selected port is out of
+  credit, credit is refilled before tenant selection is retried, rather than the
+  scan stalling until some external event restores it. Exhaustion of all active
+  tenants is therefore self-clearing and cannot starve the port indefinitely.
+- Refill is triggered by exhaustion, not by a window timer. Completion IP's
+  windowed refill and this on-demand refill are separate mechanisms.
+
 Wait model:
 
 - Mode: `wait_for_response`
@@ -242,6 +253,8 @@ States:
 - `IDLE`: no eligible command or downstream not ready.
 - `PORT_SCAN`: inspect pending ports according to port policy.
 - `TENANT_SCAN`: inspect tenants linked to selected port.
+- `CREDIT_REFILL`: restore tenant credit when every tenant with active traffic
+  under the selected port is out of credit.
 - `SQ_SCAN`: inspect SQs linked to selected tenant.
 - `GRANT`: select one SQ and pass selected SQ metadata to issue pipeline.
 - `STALL`: downstream backpressure or no eligible command.
@@ -253,7 +266,10 @@ Transitions:
 - `PORT_SCAN -> TENANT_SCAN`: eligible pending port found.
 - `PORT_SCAN -> STALL`: no eligible port found.
 - `TENANT_SCAN -> SQ_SCAN`: eligible pending tenant found.
-- `TENANT_SCAN -> STALL`: no eligible tenant found under selected port.
+- `TENANT_SCAN -> CREDIT_REFILL`: every tenant with active traffic under the
+  selected port is out of credit.
+- `CREDIT_REFILL -> TENANT_SCAN`: credit restored; tenant selection is retried.
+- `TENANT_SCAN -> STALL`: no tenant with active traffic under selected port.
 - `SQ_SCAN -> GRANT`: eligible SQ with pending command found.
 - `SQ_SCAN -> STALL`: no eligible SQ found under selected tenant.
 - `GRANT -> IDLE`: selected SQ metadata accepted by issue pipeline.
@@ -491,7 +507,7 @@ Per-process timing:
 
 | FSM/process | Runs as | Delay model |
 | --- | --- | --- |
-| Arbiter Main FSM | Pipeline 1 process | Bitmap update visibility: 3 cycles = 6 ns. Port scan: 4 cycles = 8 ns. Tenant scan: 6 cycles = 12 ns. SQ scan: 8 cycles = 16 ns. Grant selected SQ: 2 cycles = 4 ns. |
+| Arbiter Main FSM | Pipeline 1 process | Bitmap update visibility: 3 cycles = 6 ns. Port scan: 4 cycles = 8 ns. Tenant scan: 6 cycles = 12 ns. SQ scan: 8 cycles = 16 ns. Grant selected SQ: 2 cycles = 4 ns. Credit refill on exhaustion: 10 cycles = 20 ns (starter value, see Open Items). |
 | Policy Update FSM | Parallel helper process triggered by grant | Pointer update: 1 cycle = 2 ns. Age metadata update: 2 cycles = 4 ns. Weighted-order rebuild after config change: 8 cycles = 16 ns. |
 | Issue Pipeline FSM | Pipeline 2 process | Selection accept: 1 cycle = 2 ns. Pending count read: 3 cycles = 6 ns. Burst read: 4 cycles = 8 ns. Min burst calculation: 2 cycles = 4 ns. Downstream issue request: 3 cycles = 6 ns. Burst debit: 2 cycles = 4 ns. Downstream backpressure retry interval: 1 cycle = 2 ns. |
 
@@ -531,6 +547,9 @@ Sequential dependency:
 - Flush/admin ordering rules.
 - Per-clock issue width.
 - Starvation guard threshold.
+- Exact credit refill latency and refill amount on exhaustion. The 10-cycle
+  figure above is a starter value in the same sense as the other delays in this
+  section, not a number this document sources.
 - Exact production port-to-tenant mapping.
 - Exact production tenant-to-SQ mapping.
 - Exact device, tenant, and SQ burst refill rules.

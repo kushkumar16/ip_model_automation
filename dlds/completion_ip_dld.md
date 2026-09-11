@@ -179,7 +179,7 @@ States:
 
 Transitions:
 
-- `IDLE -> SELECT_TENANT`: at least one pending command exists.
+- `IDLE -> SELECT_TENANT`: at least one tenant is eligible.
 - `SELECT_TENANT -> CHECK_TOKENS`: candidate command found.
 - `CHECK_TOKENS -> EMIT`: all required tokens available.
 - `CHECK_TOKENS -> WAIT_TOKENS`: tokens unavailable.
@@ -207,6 +207,22 @@ Transitions:
 
 ## 7. QoS Rules
 
+Tenant eligibility:
+
+- Completion IP maintains the set of tenants that currently have both active
+  traffic and available tokens. A tenant is eligible when it is alive, holds at
+  least one pending command, and has non-zero tokens on the axes its pending
+  traffic consumes.
+- The scheduler leaves `IDLE` only while that set is non-empty. It does not poll
+  a tenant that cannot be served, and it does not pay a tenant select to
+  discover that no tenant can be served.
+- Eligibility is a tenant-level property, not a command-level one. A tenant may
+  be eligible while its head command still costs more than the tokens left, so
+  `CHECK_TOKENS -> WAIT_TOKENS` remains reachable and is the place where a
+  specific command's affordability is decided.
+- The set changes when a command is enqueued, when a completion is emitted, when
+  a refill restores tokens, and when a tenant's alive status changes.
+
 Base tokens:
 
 - Per-window token allocation is derived from per-second rate and `window_ms`.
@@ -230,6 +246,8 @@ The SimPy model shall include:
 - Per-tenant pending queues as `simpy.Store`.
 - Output completion port as capacity-limited resource or store.
 - Token accounting state per tenant.
+- The eligible-tenant set described in section 7, maintained incrementally
+  rather than recomputed by scanning.
 - Window metric snapshots.
 - Latency measurement from command arrival to completion emit.
 - Stall counters for no tokens, output backpressure, queue full, and tenant
@@ -278,7 +296,10 @@ FSM/process count:
 - Parallel processes: `Accept FSM`, `Completion Scheduler FSM`, and `Refill
   FSM` run in parallel.
 - Sequential dependency for a command: accept/enqueue must complete before the
-  scheduler can select the command; token check must pass before emit.
+  scheduler can select the command; token check must pass before emit. The
+  scheduler waits in `IDLE` until a tenant is eligible, which cannot happen
+  before the enqueue completes, so the enqueue is on the critical path and is
+  not overlapped by the tenant select.
 - Refill is periodic and parallel, but it gates scheduler progress when tokens
   are unavailable.
 

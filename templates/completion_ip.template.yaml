@@ -114,7 +114,7 @@ fsm_processes:
     transitions:
       - from: IDLE
         to: SELECT_TENANT
-        condition: any_pending_command
+        condition: any_eligible_tenant
         actions: [load_weighted_tenant_order]
         latency_cycles: 1
       - from: SELECT_TENANT
@@ -187,15 +187,15 @@ resources:
     latency_cycles: 1
     note: >-
       This cycle is charged off the completion's critical path, not on it:
-      end_to_end_paths.no_stall_completion states 17 cycles over a list this
-      port is not in, so charging it inline would make that path 18 and break a
+      end_to_end_paths.no_stall_completion states 21 cycles over a list this
+      port is not in, so charging it inline would make that path 22 and break a
       figure the model matches exactly. The model holds the port across the emit
       and releases it one cycle later from a background process, so the
       completion finishes at the end of the emit while the port stays busy for
       its own latency -- which is where a capacity of 1 is meant to be felt.
       See decisions/completion_ip.md. The bandwidth figure above remains
-      unmodelled and unreconciled with the 17-cycle path; that is recorded
-      there too rather than resolved in the model'"'"'s favour.
+      unmodelled and unreconciled with the 21-cycle path; that is recorded
+      there too rather than resolved in the model's favour.
     arbitration: weighted_round_robin
     sharing_scope: global
 
@@ -266,25 +266,28 @@ timing_model:
         - {name: metrics_publish, cycles: 10, ns: 20}
   end_to_end_paths:
     - name: no_stall_completion
-      cycles: 17
-      ns: 34
-      path: [tenant_select, token_check, completion_emit]
+      cycles: 21
+      ns: 42
+      path: [accepted_command_enqueue, tenant_select, token_check, completion_emit]
       note: >-
-        Corrected from 21 cycles / 42 ns, which summed enqueue + tenant_select +
-        token_check + completion_emit as if the four ran in series. They do not:
-        accept and completion_scheduler are declared parallel_processes, and the
-        scheduler pays tenant_select from the top of its loop, before it has a
-        candidate. A command's 4-cycle enqueue therefore overlaps that 8-cycle
-        select instead of preceding it, and the path costs 8 + 5 + 4 = 17.
-        Measured at model defaults: a single READ completes at t=17. enqueue is
-        left out of the path for that reason -- it is real, it is charged, and it
-        is not on the critical path for a command arriving into an idle
-        scheduler. See sequential_paths.command_completion_path, which states the
-        ordering constraint this figure must not be read as a sum of.
+        4 + 8 + 5 + 4, the figure the DLD states. This was briefly changed to 17
+        on the reasoning that accept and completion_scheduler are declared
+        parallel_processes, so a command's 4-cycle enqueue overlaps the 8-cycle
+        select rather than preceding it. That is true only of a scheduler that
+        selects before it has a candidate, and the design does not: Completion IP
+        maintains the set of tenants with active traffic and available tokens,
+        and the scheduler leaves IDLE only while that set is non-empty. A tenant
+        cannot become eligible before its command has been enqueued, so the
+        enqueue is on the critical path. The DLD says the same thing twice -- in
+        this figure and in the sequential dependency "accept/enqueue must
+        complete before the scheduler can select the command" -- and the 17 was
+        the template disagreeing with it. Measured at model defaults once the
+        model follows this: a single READ completes at t=21. See
+        sequential_paths.command_completion_path.
 
 functionality_model:
   implemented_in_simpy: true
-  state_variables: [tenant_pending_queues, tenant_tokens, tenant_alive, completed_commands, window_metrics, stall_counters, fsm_state, transition_counts]
+  state_variables: [eligible_tenants, tenant_pending_queues, tenant_tokens, tenant_alive, completed_commands, window_metrics, stall_counters, fsm_state, transition_counts]
   apis: [configure_tenant, accept_command, set_completion_ready, run, get_completed, get_metrics]
   invariants:
     - A completion is emitted only after required tokens are debited.

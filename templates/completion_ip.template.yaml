@@ -48,10 +48,10 @@ interfaces:
     wait_model:
       mode: wait_for_ack_inline
       requester: this_ip
-      wait_points: [completion_scheduler.EMIT]
+      wait_points: [completion_scheduler.STALL_OUTPUT]
       resumes_on: cpl_ready
       source: dld
-      notes: "while `cpl_ready` is low the scheduler holds in `STALL_OUTPUT` and the completion stays queued"
+      notes: "`EMIT` is the act of emitting, not the wait: while `cpl_ready` is low the scheduler holds in `STALL_OUTPUT` and the completion stays queued. The wait point used to name `EMIT` while this note named `STALL_OUTPUT`, and the two could not both be true. Measured through a stall: `EMIT` occupied 0 cycles, `STALL_OUTPUT` 26."
     transactions:
       - name: emit_completion
         fields: [cmd_id, tenant_id, status, latency]

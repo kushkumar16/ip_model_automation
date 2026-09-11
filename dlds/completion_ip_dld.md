@@ -125,9 +125,12 @@ Wait model:
 
 - Mode: `wait_for_ack_inline`
 - Requester: this IP
-- Waits in: `completion_scheduler.EMIT`
+- Waits in: `completion_scheduler.STALL_OUTPUT`
 - Resumes on: `cpl_ready`
-- Note: while `cpl_ready` is low the scheduler holds in `STALL_OUTPUT` and the completion stays queued
+- Note: `EMIT` is the act of emitting, not the wait. While `cpl_ready` is low
+  the scheduler holds in `STALL_OUTPUT` and the completion stays queued; this
+  used to name `EMIT` as the wait point while the note beside it named
+  `STALL_OUTPUT`, and the two cannot both be true.
 
 ## 5. Commands
 

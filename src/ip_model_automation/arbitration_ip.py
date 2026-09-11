@@ -283,12 +283,6 @@ class ArbitrationIpModel:
         self.bitmap_dirty = False
         self.metrics["bitmap_updates"] += 1
 
-    def _select_port(self) -> Optional[str]:
-        for port_id in self.port_policy.scan():
-            if self.port_pending_bitmap.get(port_id, False):
-                return port_id
-        return None
-
     def _active_tenants(self, port_id: str) -> list:
         """Tenants under this port with pending work and a live status.
 
@@ -389,12 +383,9 @@ class ArbitrationIpModel:
     def _stall(self, reason: str, metric: str):
         """Hold STALL for the declared retry, recording the reason's own metric.
 
-        Only PORT_SCAN -> STALL is declared, so the tenant- and SQ-level stalls
-        leave their scan by an edge the template does not describe. That is a gap
-        in the contract rather than a choice this model can make correctly: the
-        template gives TENANT_SCAN and SQ_SCAN no exit but forward, and a
-        candidate blocked on credit or already in flight has to go somewhere.
-        Recorded in decisions/arbitration_ip.md.
+        PORT_SCAN, TENANT_SCAN and SQ_SCAN each declare their own exit to
+        STALL, restored from the DLD in f8468c1 after the template had dropped
+        them; `reason`/`metric` name which one fired.
         """
         self._set_fsm_state("arbiter_main", "STALL")
         self.metrics["stalls"] += 1
@@ -417,10 +408,23 @@ class ArbitrationIpModel:
         # took undeclared RESET -> PORT_SCAN and GRANT -> PORT_SCAN instead.
         self._set_fsm_state("arbiter_main", "IDLE")
         self._clear_state()
+        # `tried_ports` excludes a port that has already failed from being
+        # picked again by _pending_ports() below, without moving the
+        # persistent `port_policy` pointer, which only a real grant advances
+        # (via policy_update, on grant_accepted). It is cleared at the four
+        # points where a previous exclusion stops being valid: a genuine wait
+        # ends (new stimulus -- every port deserves a fresh look), no untried
+        # candidate is left (the next pass starts clean rather than staying
+        # permanently excluded), a refill changes credit (every port might
+        # work now), and a grant changes queue/burst state.
+        tried_ports: set = set()
         while True:
             # IDLE is held on every pass, so it is occupied rather than merely
             # assigned, and the loop is re-entered here after a grant -- which is
-            # the declared GRANT -> IDLE.
+            # the declared GRANT -> IDLE -- and after every STALL, which is the
+            # declared STALL -> IDLE. Routing every retry back through here
+            # (rather than straight to PORT_SCAN) costs nothing when a port is
+            # already pending: the wait below falls through immediately.
             #
             # IDLE -> PORT_SCAN is declared on `any_port_pending`, and the
             # arbiter waits here until that is true rather than scanning to find
@@ -445,6 +449,8 @@ class ArbitrationIpModel:
                 self._arbiter_wake = self.env.event()
                 yield self._arbiter_wake
                 self._arbiter_wake = None
+                tried_ports = set()
+
             # Each scan decides its own level, in the state the template
             # declares that decision on: the port at the end of PORT_SCAN, the
             # tenant -- and with it the qos_credit_if eligibility sample, whose
@@ -452,72 +458,76 @@ class ArbitrationIpModel:
             # the SQ at the end of SQ_SCAN. All three used to run together after
             # SQ_SCAN's timeout, which sampled credit eight cycles late and made
             # a credit-blocked candidate pay all three scans before stalling.
+            #
+            # Round five (M32/M33) found the multi-candidate version of this
+            # loop undeclared: trying a second port after the first failed took
+            # TENANT_SCAN -> TENANT_SCAN or SQ_SCAN -> TENANT_SCAN, edges the
+            # FSM does not have, and the final stall reason reflected only
+            # whichever candidate was tried last rather than the one that
+            # actually produced it. Each candidate now gets its own PORT_SCAN
+            # dwell (through the outer loop above), so every entry into
+            # TENANT_SCAN is preceded by the declared PORT_SCAN -> TENANT_SCAN
+            # edge, and each failure is stalled and counted the instant it
+            # happens, under its own correct reason.
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
-            candidates = self._pending_ports()
+            port_id = next((p for p in self._pending_ports() if p not in tried_ports), None)
             # PORT_SCAN -> STALL on no_eligible_port, with its declared
-            # increment_no_eligible_stall action.
-            if not candidates:
+            # increment_no_eligible_stall action: either nothing is pending, or
+            # everything pending has already been tried and failed this sweep.
+            if port_id is None:
+                tried_ports = set()
                 yield from self._stall("no eligible port", "no_port_pending_stalls")
                 continue
 
-            # The scan walks the ports in policy order rather than committing to
-            # the first pending one. A port is `eligible` only if a grantable
-            # candidate can be found beneath it, so a port whose tenants are all
-            # credit-blocked must not consume the arbiter: it used to, and one
-            # blocked tenant starved every other port indefinitely -- measured at
-            # 400 cycles with zero grants while an eligible command sat on the
-            # other port.
-            port_id = tenant_id = sq_id = None
-            for candidate_port in candidates:
-                self._set_fsm_state("arbiter_main", "TENANT_SCAN")
-                yield self.env.timeout(self.latency["tenant_scan"])
-                tenant_id = self._select_tenant(candidate_port)
-                if tenant_id is None:
-                    continue
+            tenant_id, sq_id = yield from self._scan_candidate(port_id)
 
-                self._set_fsm_state("arbiter_main", "SQ_SCAN")
-                yield self.env.timeout(self.latency["sq_scan"])
-                sq_id = self._select_sq(tenant_id)
-                if sq_id is None:
-                    continue
-                port_id = candidate_port
-                break
-
-            if port_id is None:
-                # TENANT_SCAN -> CREDIT_REFILL when every tenant with active
-                # traffic is out of credit. Exhaustion is self-clearing:
-                # without it the arbiter waits for some external event to
-                # restore credit and stalls indefinitely.
-                #
-                # The test is across every candidate port, not the one port the
-                # scan happened to stop on. Refilling as soon as a single port
-                # comes up exhausted lets that port's tenant jump ahead of an
-                # eligible command waiting on another one -- measured, it
-                # inverted the starvation fix it sits next to.
-                #
-                # A tenant that is merely not alive does not qualify: it is out
-                # of the running, not out of credit, and must not make an
-                # exhausted scan look refillable.
-                exhausted = [
-                    tenant_id
-                    for candidate_port in candidates
-                    for tenant_id in self._active_tenants(candidate_port)
-                    if not self.sample_eligibility(tenant_id)
-                ]
-                if exhausted:
-                    self._set_fsm_state("arbiter_main", "CREDIT_REFILL")
-                    yield self.env.timeout(self.latency["credit_refill"])
-                    self._refill_tenant_credit(exhausted)
-                    # CREDIT_REFILL -> TENANT_SCAN: selection is retried.
-                    self._set_fsm_state("arbiter_main", "TENANT_SCAN")
-                    yield self.env.timeout(self.latency["tenant_scan"])
-                    continue
-
-                if tenant_id is None:
-                    yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+            if tenant_id is None:
+                tried_ports.add(port_id)
+                more_candidates = any(p not in tried_ports for p in self._pending_ports())
+                if not more_candidates:
+                    # TENANT_SCAN -> CREDIT_REFILL when every tenant with
+                    # active traffic across all pending ports is out of
+                    # credit. Checked only once every candidate this sweep has
+                    # had its own look and none produced a tenant -- checking
+                    # on the first failure, before an untried port has had its
+                    # turn, is what let a port's own exhaustion jump ahead of
+                    # an eligible one waiting elsewhere, the mistake this sits
+                    # next to. Exhaustion is self-clearing: without this the
+                    # arbiter waits for some external event to restore credit
+                    # and stalls indefinitely. A tenant that is merely not
+                    # alive does not qualify -- it is out of the running, not
+                    # out of credit -- and must not make an exhausted scan
+                    # look refillable.
+                    exhausted = [
+                        t
+                        for p in self._pending_ports()
+                        for t in self._active_tenants(p)
+                        if not self.sample_eligibility(t)
+                    ]
+                    if exhausted:
+                        self._set_fsm_state("arbiter_main", "CREDIT_REFILL")
+                        yield self.env.timeout(self.latency["credit_refill"])
+                        self._refill_tenant_credit(exhausted)
+                        # CREDIT_REFILL -> TENANT_SCAN: this port is
+                        # re-evaluated directly, not re-picked through a fresh
+                        # PORT_SCAN -- credit changed, not which port is under
+                        # consideration.
+                        tenant_id, sq_id = yield from self._scan_candidate(port_id)
+                        if tenant_id is None:
+                            tried_ports = set()
+                            yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                            continue
+                    else:
+                        yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                        continue
                 else:
-                    yield from self._stall("no eligible sq", "no_sq_pending_stalls")
+                    yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                    continue
+
+            if sq_id is None:
+                tried_ports.add(port_id)
+                yield from self._stall("no eligible sq", "no_sq_pending_stalls")
                 continue
 
             selection = self._commit_selection(port_id, tenant_id, sq_id)
@@ -526,6 +536,30 @@ class ArbitrationIpModel:
             yield self.selected_sq_q.put(selection)
             yield self.policy_update_q.put(selection)
             self.metrics["grants"] += 1
+            tried_ports = set()
+
+    def _scan_candidate(self, port_id: str):
+        """Evaluate one port's tenant and SQ, charging exactly their own costs.
+
+        Returns `(tenant_id, sq_id)`: `tenant_id` is `None` if TENANT_SCAN
+        found nothing; `sq_id` is `None` (`tenant_id` set) if SQ_SCAN found
+        nothing; both are set on success.
+
+        Deliberately does not touch PORT_SCAN -- callers pick the port and pay
+        that dwell themselves, because CREDIT_REFILL -> TENANT_SCAN retries a
+        tenant scan for the port already under consideration, without picking
+        a new one.
+        """
+        self._set_fsm_state("arbiter_main", "TENANT_SCAN")
+        yield self.env.timeout(self.latency["tenant_scan"])
+        tenant_id = self._select_tenant(port_id)
+        if tenant_id is None:
+            return None, None
+
+        self._set_fsm_state("arbiter_main", "SQ_SCAN")
+        yield self.env.timeout(self.latency["sq_scan"])
+        sq_id = self._select_sq(tenant_id)
+        return tenant_id, sq_id
 
     def issue_pipeline(self):
         self._set_fsm_state("issue_pipeline", "WAIT_SELECTION")

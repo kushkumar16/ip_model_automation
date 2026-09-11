@@ -1,223 +1,270 @@
 ip: completion_ip
 kind: model
-template_sha256: 1f8a9fa8322a1d0823cc58a10c82b662629474fdff09d69297cae4a25d5098ef
-model_sha256: 64d71c55dadcfa0c50210a5b495333bc3c2b07086d36b81c1787dd47b6d121cb
-tests_sha256: 9350caf4ea4269b18f043620bd712ff399f54897dd453b0f729e350f140273d0
+template_sha256: 1e00c1977eec8b2efb8d2c1b5f832f1f00ad7408a13bd4d5b4077806119f9e32
+model_sha256: 7031d01561a9aca328fc5c349f54c1bcb18427421f7d244630c8e7b4eaa09a02
+tests_sha256: c69b63d5f051e944f3fcc7fd87bbc4777c2d548100bc9d9855e0ce8af7a0c088
 findings:
-  - id: M24
+  - id: M30
     class: fsm_structure
     severity: medium
     claim: >-
-      `IDLE -> SELECT_TENANT` is declared on the condition `any_pending_command`, and the
-      scheduler now takes it unconditionally: it re-enters `SELECT_TENANT` and pays the full
-      8-cycle `tenant_select` every time it polls an empty queue. The helper that implemented
-      the declared condition, `_any_pending_command()`, was deleted outright.
+      `completion_scheduler.SELECT_TENANT -> IDLE` is a transition the template does not
+      declare, and the scheduler takes it whenever the 8-cycle `tenant_select` outlasts a
+      tenant's eligibility. This is the surviving half of round-three's M19 / round-four's M27,
+      reproduced again this round against the new `any_eligible_tenant` design and confirmed
+      still open with a clean, non-misuse repro.
     template: >-
-      fsm_processes[completion_scheduler].transitions (templates/completion_ip.template.yaml:115-119):
-      `from: IDLE`, `to: SELECT_TENANT`, `condition: any_pending_command`, `actions:
-      [load_weighted_tenant_order]`, `latency_cycles: 1`. timing_model.fsm_process_delays[completion_scheduler]
-      `{name: tenant_select, cycles: 8, ns: 16}`.
+      templates/completion_ip.template.yaml:113-162 (`fsm_processes[completion_scheduler]`)
+      declares exactly one edge touching `IDLE`: `IDLE -> SELECT_TENANT` (:115-119, condition
+      `any_eligible_tenant`). `SELECT_TENANT` has exactly one declared exit,
+      `SELECT_TENANT -> CHECK_TOKENS` on `candidate_found` (:120-124). No transition out of
+      `SELECT_TENANT` to `IDLE` is declared, and `SELECT_TENANT` is not a dead-end state the
+      template left open (`python tools/check_declared_transitions.py completion_ip` lists it
+      among the 2 "no declared exit" states only for `accept: ENQUEUE` and
+      `completion_scheduler: RESET`, not for `SELECT_TENANT`).
     model: >-
-      src/ip_model_automation/completion_ip.py:249-269 — the inner `while True` assigns
-      `SELECT_TENANT` at :262 and charges `tenant_select_latency` at :263 before calling
-      `_select_tenant()` at :264; only when that returns `None` does it assign `IDLE` at :266
-      and wait one `retry_latency` at :268 before looping straight back to :262. The condition's
-      former implementation (`_any_pending_command`, round three's :219-222) is deleted.
+      src/ip_model_automation/completion_ip.py:359-369 — `tenant_id =
+      self._select_tenant(skip_inactive=True)` at :362; `if tenant_id is None:` at :363 falls
+      through the `self.metrics["stalls"] += 1` / `yield self.env.timeout(self.retry_latency)` /
+      `break` at :367-369, which returns control to the outer `while True:` whose first act is
+      `self.fsm_state["completion_scheduler"] = "IDLE"` at :350.
     why: >-
-      Measured with an instrumented `fsm_state` dict recording every assignment against
-      `env.now`. With the model at defaults and **no command ever submitted**, the recorded
-      scheduler trace over 40 cycles is `t=0 IDLE -> SELECT_TENANT`, `t=8 SELECT_TENANT ->
-      IDLE (held 8)`, `t=9 IDLE -> SELECT_TENANT (held 1)`, repeating at t=17/18, 26/27,
-      35/36: the declared edge is taken five times in 40 cycles with `self.pending` empty
-      throughout, i.e. with `any_pending_command` false on every one of them, and the
-      scheduler spends 32 of those 40 cycles inside `SELECT_TENANT` selecting from an empty
-      set. This is not a fix that overshot — it is the template disagreeing with itself, which
-      is why it is filed rather than corrected: `end_to_end_paths.no_stall_completion`
-      (:272-283) says in as many words that "the scheduler pays tenant_select from the top of
-      its loop, before it has a candidate", and the model cannot honour that and the
-      `any_pending_command` guard at the same time. Round three had the guard and measured 21
-      cycles (round-three M16); round four has the note's behaviour and measures 17. A person
-      has to decide which of the two template statements is the contract; no model satisfies
-      both. Marked interpretive only as to *which side gives*, not as to the fact: the edge is
-      demonstrably taken with the declared condition false.
-  - id: M25
-    class: timing_mismatch
-    severity: medium
+      Reproduced `check_declared_transitions.py`'s `UNDECLARED completion_scheduler:
+      SELECT_TENANT -> IDLE` line from my own instrumented trace, using only the declared
+      `configure_tenant` API rather than any internal misuse: one READ submitted for T0 at
+      model defaults (`tenant_select_latency=8`) makes the scheduler leave IDLE at t=5 (after
+      reset+enqueue) and enter SELECT_TENANT at t=6; a second process calls
+      `configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)` at t=10, squarely inside
+      the 8-cycle select window (t=6..14) -- `configure_tenant` correctly calls
+      `_refresh_eligibility`, which removes T0 from `eligible_tenants`. At t=14 the select
+      completes, `_select_tenant(skip_inactive=True)` finds nothing (T0 is no longer in
+      `eligible_tenants`), and the trace shows `(14, 'IDLE')`: `SELECT_TENANT -> IDLE` taken,
+      `metrics["stalls"] == 1`, `completed == []`. This is inherent to the design, not a defect
+      introduced by misuse: the template declares `tenant_select` at a nonzero 8-cycle latency
+      while `any_eligible_tenant` is defined against live, mutable per-tenant state that a
+      declared API (`configure_tenant`) can legitimately change mid-select, and the template
+      names no transition for what happens when the candidate the select was chasing evaporates
+      underneath it. Distinct from M31 below (which is the same edge taken forever rather than
+      once, from a different root cause). Severity kept at `medium`, matching round four's
+      reasoning for the same edge: no test pins the direction either way, and it costs no cycles
+      wrong, only a state the template did not name for it.
+  - id: M31
+    class: fsm_structure
+    severity: high
     claim: >-
-      `no_stall_completion: 17 cycles` now holds only for a command submitted at t=0. Because
-      the scheduler free-runs, sampling the pending queues only at the instant each 8-cycle
-      select ends, the measured end-to-end latency of a single no-stall READ at model defaults
-      ranges from 14 to 22 cycles depending on arrival phase — a spread caused by no stall of
-      any kind the template declares.
+      When a tenant's aliveness is changed by writing `model.tenant_alive[tenant_id]` directly
+      -- the exact pattern the model's own test suite uses to model "a tenant goes inactive"
+      mid-run, since no API exists to toggle liveness after initial `configure_tenant` --
+      `eligible_tenants` goes stale with a phantom `True` entry that nothing ever clears. The
+      scheduler then spins `IDLE -> SELECT_TENANT -> IDLE` forever, taking the undeclared
+      `SELECT_TENANT -> IDLE` edge from M30 on every poll, for the rest of the run.
     template: >-
-      timing_model.end_to_end_paths.no_stall_completion (templates/completion_ip.template.yaml:268-283):
-      `cycles: 17`, `ns: 34`, `path: [tenant_select, token_check, completion_emit]`, note
-      "Measured at model defaults: a single READ completes at t=17 ... it is not on the
-      critical path for a command arriving into an idle scheduler."
-      timing_model.fsm_process_delays[completion_scheduler] `tenant_select` 8, `token_check` 5,
-      `completion_emit` 4; `output_stall_retry` 1 is the only declared retry for this FSM.
+      templates/completion_ip.template.yaml:115-119: `IDLE -> SELECT_TENANT` on
+      `any_eligible_tenant`, with the design rationale restated at :285-296 (`end_to_end_paths`
+      note): the scheduler is meant to "leave IDLE only while that set is non-empty" so it "does
+      not pay an 8-cycle tenant select to discover that nothing can be served." Nothing in the
+      template contemplates the set staying non-empty for a tenant that can never again be
+      served.
     model: >-
-      src/ip_model_automation/completion_ip.py:262-269 — `SELECT_TENANT` charges
-      `tenant_select_latency` *before* `_select_tenant()` reads the queues at :264, so a
-      command that lands in `self.pending` (:158) after that read waits the rest of the poll:
-      `retry_latency` (:268) plus a further full `tenant_select_latency` (:263).
+      src/ip_model_automation/completion_ip.py:253-260 `_refresh_eligibility` is the only writer
+      of `eligible_tenants`, and it is called from exactly four sites: `configure_tenant` (:114),
+      `accept_process` after enqueue (:193), `completion_scheduler` after an emit (:427), and
+      `_refresh_all_eligibility` from reset/refill (:262-264, :236, :473). Direct writes to
+      `self.tenant_alive[...]` -- which `tests/test_completion_ip.py:221` performs
+      (`model.tenant_alive["T0"] = False`) -- go through none of them, so
+      `eligible_tenants` is never told the tenant it already contains is now dead. `_select_tenant`
+      (:266-299) does re-check `tenant_alive` at :284 when `skip_inactive=True`, so no wrong
+      completion is ever produced -- but that re-check runs only after another full
+      `tenant_select_latency` has already been paid.
     why: >-
-      Measured by driving one READ into an otherwise empty model at defaults (service 4 /
-      select 8 / check 5 / emit 4 / retry 1) and sweeping the submission time, reading
-      `model.completed[0][0]`: submit at t=0,1,2,3 completes at t=17 (end-to-end 17, 16, 15,
-      14); submit at t=4..12 completes at t=26 (22, 21, 20, 19, 18, 17, 16, 15, 14); submit at
-      t=13..18 completes at t=35 (22, 21, ...). Min 14, max 22, mean 17.95 over one phase
-      period, against a declared 17 — the figure is the value at phase 0, not a bound in
-      either direction, and the 29% worst case is spent in `IDLE`/`SELECT_TENANT` polling
-      rather than in any declared stall (`token_stalls`, `output_stalls` and
-      `queue_full_stalls` are all zero across the sweep). Attribution confirmed by zeroing the
-      other latencies one at a time: with everything else 0 the first completion is at
-      t=`tenant_select`=8, `token_check`=6, `emit`=5, `service_latency`=4, all-zero t=1 (one
-      idle poll), so the excess is exactly the poll quantum `tenant_select + retry_latency` =
-      9. A related edge: the overlap the note relies on holds only while the enqueue finishes
-      strictly *before* the select samples — sweeping `service_latency` gives t=17 for 0..7 and
-      t=26 for 8, 9, 10, 12, 16, so a declared `enqueue` of 4 against a declared `tenant_select`
-      of 8 sits one cycle inside the boundary. Filed as `medium`, not `high`: the one
-      measurement the template actually states ("a single READ completes at t=17") is
-      reproduced exactly, and what is wrong is the generality a reader will take from a figure
-      called an end-to-end path. Interpretive to that extent, and a consequence of M24 — the
-      two will probably be ruled together, but they are separable: a person could accept the
-      free-running select and still want this figure annotated.
-  - id: M26
+      Reproduced directly: `tests/test_completion_ip.py:212-225`
+      (`test_completion_scheduler_stalls_when_tenant_goes_inactive`) already exhibits this --
+      its own captured log shows `"tenant inactive, passed over tenant=T0"` ten times between
+      t=3 and t=12 (two log lines per `_select_tenant` call, since `usable()` is invoked once
+      from the weighted-order scan and once from the `sorted(pending)` fallback), which the test
+      does not assert on. Extended the same scenario past the test's `env.run(until=12)`
+      cutoff: `env.run(until=200)` gives `tenant_inactive_stalls == 198`,
+      `metrics["stalls"] == 99`, `eligible_tenants == {'T0'}` still; `env.run(until=2000)` gives
+      `tenant_inactive_stalls == 1998`, same stale `{'T0'}`, `completed == []` throughout. There
+      is no recovery path: nothing in the model ever calls `_refresh_eligibility("T0")` again
+      once `configure_tenant` has not been called a second time, so the spin is permanent for
+      the rest of any run, however long. This is not a hang in the sense of blocking `env.run()`
+      -- simulated time keeps advancing -- but it is the FSM never reaching the quiescent IDLE
+      the eligibility redesign exists to provide, contradicting the template's own stated
+      rationale for the `any_eligible_tenant` condition, and it inflates `tenant_inactive_stalls`
+      and `stalls` without bound for any run that outlives the test's 12-cycle window. Filed
+      `high`: the design's central claim -- IDLE costs nothing until there is real work -- is
+      false for the rest of any run after this happens, and it happens through the same raw
+      mutation the model's own test suite already relies on to express tenant deactivation, not
+      through a contrived misuse of an undocumented API.
+  - id: M32
+    class: fsm_structure
+    severity: high
+    claim: >-
+      Symmetrically, when a tenant's tokens are restored by writing `model.tokens[tenant_id]`
+      directly -- the same style of direct-dict mutation `tests/test_completion_ip.py:499`
+      already uses to set up token state -- `eligible_tenants` can go stale with a phantom
+      `False` entry, and a tenant with pending work and now-sufficient tokens is never selected
+      again: the declared `IDLE -> SELECT_TENANT` transition on `any_eligible_tenant` is never
+      taken for it, permanently, even though the condition is true by the template's own
+      definition of eligibility.
+    template: >-
+      templates/completion_ip.template.yaml:115-119, `IDLE -> SELECT_TENANT` on
+      `any_eligible_tenant`; qos.insufficient_token_behavior (:265):
+      `command_remains_pending_until_refill` -- stating that a refill is what ends the wait, not
+      that the wait is permanent regardless of tokens becoming available.
+    model: >-
+      src/ip_model_automation/completion_ip.py:288 `_select_tenant(skip_inactive=True)` requires
+      `tenant_id in self.eligible_tenants` and returns `False` (skips the tenant) otherwise --
+      unlike the liveness check two lines above it, there is no fallback re-test of the
+      underlying condition, so a stale `False` entry is not self-correcting the way M31's stale
+      `True` entry is. `_refresh_eligibility` (:253-260) is reachable only from the four sites
+      listed under M31; a direct write to `self.tokens[tenant_id]` is not one of them.
+    why: >-
+      Reproduced directly: `configure_tenant("T0", read=2, write=0, read_bw=8, write_bw=0)` then
+      submit a WRITE; run to t=20 -- `eligible_tenants == set()`, `completed == []`, as declared.
+      Then `model.tokens["T0"]["write"] = 5.0; model.tokens["T0"]["write_bw"] = 20.0` (direct
+      mutation, no `configure_tenant`/`refill_once`/`refill_process` call) restores more than
+      enough tokens for the pending WRITE. `env.run(until=2000)` afterward: `eligible_tenants`
+      stays `set()` and `completed` stays `[]` for the entire further 1980 cycles -- the command
+      never completes, even though `_tenant_eligible("T0")` would now return `True` if it were
+      ever re-evaluated. Nothing in the model re-evaluates it, because nothing calls
+      `_refresh_eligibility` from a raw token write. Contrast with a control run using only
+      declared APIs (200 sparse `submit()`s over 100,000 cycles interleaved with
+      `configure_tenant` refreshes, seeded for reproducibility): 200/200 completed, zero
+      eligibility-cache mismatches at any sampled point -- so the cache is sound under the
+      documented API surface, and this is specifically about the path the model's own tests use
+      to poke `tokens` directly. Filed `high`, higher than M31: this is not merely wasted
+      polling, it silently violates the model's own stated completion guarantee -- a command
+      that should complete per `insufficient_token_behavior` never does, and no stall counter
+      records it (it is invisible to `token_stalls`, since `_select_tenant` excludes the tenant
+      before a token check is ever attempted).
+  - id: M33
     class: wait_model_impl
     severity: medium
     claim: >-
-      `completion_queue_if` declares its wait point at `completion_scheduler.EMIT`, and EMIT is
-      occupied for exactly zero simulated time whenever `cpl_ready` is low — the only
-      circumstance in which anything waits on that interface. Unchanged since round three
-      (round-three M20): the model, the template and the measurement are all identical.
+      `qos_config_if` declares `mode: wait_for_ack_inline` with `wait_points:
+      [refill.REFILL_BASE]` and `resumes_on: config_applied`, but `configure_tenant` --
+      the method that implements this interface's `tenant_config` transaction -- is a plain
+      synchronous method with no `yield`, no SimPy process, and no dependency on `refill`
+      reaching `REFILL_BASE` at all. Configuration takes effect at the instant the call
+      returns, unconditionally, whether or not the refill process is even running.
     template: >-
-      interfaces[completion_queue_if].wait_model (templates/completion_ip.template.yaml:48-55):
-      mode `wait_for_ack_inline`, requester `this_ip`, `wait_points: [completion_scheduler.EMIT]`,
-      `resumes_on: cpl_ready`, and `notes: "while cpl_ready is low the scheduler holds in
-      STALL_OUTPUT and the completion stays queued"`. fsm_relationships.gating_relationships:
-      `completion_queue_if.cpl_ready` gates `completion_scheduler.EMIT`.
-      fsm_processes[completion_scheduler]: `EMIT -> STALL_OUTPUT`, condition `output_not_ready`,
-      latency_cycles 1.
+      templates/completion_ip.template.yaml:29-43 (`interfaces[qos_config_if].wait_model`):
+      `mode: wait_for_ack_inline`, `requester: peer`, `wait_points: [refill.REFILL_BASE]`,
+      `resumes_on: config_applied`.
     model: >-
-      src/ip_model_automation/completion_ip.py:284 `self.fsm_state["completion_scheduler"] =
-      "EMIT"` is followed immediately by `while not self.output_ready:` at :285 and
-      `= "STALL_OUTPUT"` at :288 with no yield between; the loop re-assigns `EMIT` at :292 and
-      re-tests at :285, overwriting it again with no yield.
+      src/ip_model_automation/completion_ip.py:99-115 `configure_tenant` -- not a generator, not
+      passed to `env.process`, contains no `yield` -- writes `self.tokens[tenant_id]` (:111) and
+      `self.base_tokens[tenant_id]` (:112) directly and returns `None`. The model's own comment
+      at :501-503, attached to `refill_process`'s `REFILL_BASE` assignment (:504), asserts
+      "qos_config_if is wait_for_ack_inline: the configured budgets take effect here, at the
+      declared wait point refill.REFILL_BASE" -- describing `_restore_base_tokens` (:469-473),
+      not `configure_tenant`.
     why: >-
-      Re-measured this round with the instrumented `fsm_state`, defaults, `cpl_ready` low from
-      t=0 and raised at t=24: `t=13 CHECK_TOKENS -> EMIT (held 5)`, `t=13 EMIT -> STALL_OUTPUT
-      (held 0)`, then `STALL_OUTPUT -> EMIT (held 1)` / `EMIT -> STALL_OUTPUT (held 0)` at
-      t=14..23. Total occupancy over the run: STALL_OUTPUT 11 cycles, EMIT 4 — and those 4 are
-      the successful emit after the stall cleared, so EMIT is occupied for 0 cycles of the 11
-      the requester actually waits. Mutation-tested on a fresh copy of the repo
-      (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared, edit asserted present on disk before
-      running): deleting the `EMIT` assignment at :284 entirely, so the model never names the
-      declared wait point before stalling, leaves all 18 tests passing — nothing observes it.
-      `tools/check_wait_model_coverage.py` still reports "OK (2 models assign every declared
-      wait point)" because it reads the assignment, not the occupancy, and
-      `check_declared_transitions.py` reports "0 declared states never observably occupied"
-      because EMIT *is* occupied on the no-stall path. **Still flagged as possibly a template
-      fix rather than a model fix:** the same interface's `notes` name `STALL_OUTPUT`, which is
-      what the model does, so the template names two different states for the same wait and no
-      model can satisfy both as written. Awaiting the human ruling; re-filed unchanged.
-  - id: M27
-    class: fsm_structure
+      Demonstrated with the model's own defaults: `start_refill_process` defaults `False`
+      (:30, constructor), so `refill.REFILL_BASE` can never be entered in a run that does not
+      pass it explicitly -- true of every test in the suite except the two refill-specific ones.
+      Built a model with `start_refill_process` left at its default, called
+      `configure_tenant("T0", read=1, write=1, read_bw=4, write_bw=4)` before `env.run()` was
+      ever invoked, and read `model.tokens["T0"]` back immediately: the configured values are
+      already present, and `model.fsm_state["refill"]` is still its constructor-initial
+      `"WAIT_WINDOW"` -- `refill.REFILL_BASE` was never reached, yet the config had already
+      "applied". A submitted READ then completes normally using those tokens with the refill
+      process never having run at all. The comment at :501-503 is therefore not a description of
+      what happens when `qos_config_if` is used (`configure_tenant`); it describes an unrelated,
+      later, redundant re-application of the same values that `REFILL_BASE` performs regardless
+      of whether any configuration changed. The interface's declared blocking behaviour --
+      config not visible until the peer's write is acknowledged at a named wait point -- is not
+      modelled; the model instead has no wait at all. Filed `medium`: this affects when a reader
+      would expect a configuration change to become visible relative to other declared events,
+      but every test's actual token math is unaffected because all of them configure tenants
+      before any simulated time has passed, where the distinction is moot.
+  - id: M34
+    class: scenario_gap
     severity: medium
     claim: >-
-      `SELECT_TENANT -> IDLE` is a transition the template does not declare, and the scheduler
-      takes it on every poll that finds no candidate. This is the surviving half of round-three
-      M19; the other half (IDLE occupied for zero simulated time) is genuinely fixed.
+      `test_scenarios.token_starvation_blocks_completion` declares `fsm_coverage:
+      [completion_scheduler.WAIT_TOKENS]` and `expected_performance_properties:
+      [token_stall_incremented]` for input `T0_WRITE_4K_WITH_ZERO_TOKENS`. Under the current
+      `any_eligible_tenant` design, a fully zero-token tenant is excluded from
+      `eligible_tenants` and is never selected, so it never reaches `CHECK_TOKENS` or
+      `WAIT_TOKENS` at all -- the test named for this scenario says as much in its own
+      docstring, and asserts `token_stalls == 0`, the opposite of `token_stall_incremented`.
     template: >-
-      fsm_processes[completion_scheduler].transitions (templates/completion_ip.template.yaml:114-152)
-      declares exactly one edge touching `IDLE`: `IDLE -> SELECT_TENANT`. No transition *into*
-      `IDLE` is declared from any state, and `SELECT_TENANT` has one declared exit
-      (`SELECT_TENANT -> CHECK_TOKENS` on `candidate_found`), so it is not a state the template
-      left open.
+      templates/completion_ip.template.yaml:327-332: `name: token_starvation_blocks_completion`,
+      `input_sequence: [T0_WRITE_4K_WITH_ZERO_TOKENS]`,
+      `expected_performance_properties: [token_stall_incremented]`,
+      `fsm_coverage: [completion_scheduler.WAIT_TOKENS]`.
     model: >-
-      src/ip_model_automation/completion_ip.py:265-269 — `if tenant_id is None:` assigns
-      `self.fsm_state["completion_scheduler"] = "IDLE"` at :266 directly from `SELECT_TENANT`.
+      tests/test_completion_ip.py:19-44 `test_completion_token_starvation_blocks_until_refill`
+      -- the test named for this scenario, submitting exactly `T0_WRITE_4K_WITH_ZERO_TOKENS`
+      (`configure_tenant("T0", read=2, write=0, read_bw=8, write_bw=0)` then a WRITE) -- asserts
+      `assertNotIn("T0", model.eligible_tenants, ...)` (:38) and
+      `assertEqual(model.metrics["token_stalls"], 0, "the starved tenant was selected anyway")`
+      (:39). Its own docstring (:20-28) states the design reason: "Under the eligibility rule it
+      is not selected while it holds no tokens on the axes its head command needs, so the
+      command waits without costing selects."
     why: >-
-      Reproduced `python tools/check_declared_transitions.py completion_ip` (`UNDECLARED
-      completion_scheduler: SELECT_TENANT -> IDLE`) from my own instrumented traces rather than
-      from its output: with one READ at defaults the recorded scheduler changes are `t=17 EMIT
-      -> SELECT_TENANT`, `t=25 SELECT_TENANT -> IDLE (held 8)`, `t=26 IDLE -> SELECT_TENANT
-      (held 1)`, and the same pair repeats every 9 cycles for as long as the model runs. The
-      zero-width half of round-three M19 is fixed and I confirm it: `IDLE` is now held for
-      `retry_latency` on every one of those passes (`held 1` above, never `held 0`), and the
-      round-three `EMIT -> IDLE` edge is gone — the tool reports it no longer, and no trace I
-      recorded contains it. What remains is that the one state the template gives no entry to
-      is entered, now visibly, on every idle poll. Severity kept at `medium` rather than
-      lowered: unlike round three the state is observable, so the divergence is now a plain
-      structural one a reader can see. Note that no test pins it either way — mutation-tested
-      on a fresh copy, deleting the `IDLE` assignment at :266 so the scheduler never leaves
-      `SELECT_TENANT` leaves all 18 tests passing. Unchanged in substance since round three;
-      awaiting the human ruling.
-  - id: M28
-    class: fsm_structure
-    severity: low
+      Instrumented `fsm_state["completion_scheduler"]` at 1-cycle resolution across the entire
+      test, both before and after the refill it drives: the complete set of states observed
+      is `{IDLE}` while starved, and `{IDLE, SELECT_TENANT, CHECK_TOKENS, EMIT}` after
+      `refill_once()` -- `WAIT_TOKENS` is absent from both phases. This is not a timing
+      accident: after refill the tenant's tokens (`write=1.0, write_bw=4.0`, set by the test
+      itself at :41 to exactly match the WRITE's cost) are exactly sufficient, so `CHECK_TOKENS`
+      succeeds immediately and there is nothing left to wait for. No input this test could submit
+      under the current eligibility design reaches `WAIT_TOKENS` for a *fully* zero-token tenant,
+      because full starvation now means exclusion from `eligible_tenants`, not a
+      `CHECK_TOKENS -> WAIT_TOKENS` stall -- that transition is reachable only by a *partially*
+      funded tenant, which is a different declared scenario
+      (`tests/test_completion_ip.py:154-173`,
+      `test_completion_partial_tokens_still_reach_wait_tokens`, not named in
+      `test_scenarios` at all). The template's `token_starvation_blocks_completion` scenario, as
+      currently written with its stated input and coverage, is unsatisfiable by any test under
+      the model's present design -- not merely uncovered by accident. Filed `medium`: the
+      functional behaviour the scenario cares about (`completion_not_emitted`) is genuinely
+      exercised and correct; what is stale is the `fsm_coverage` and
+      `expected_performance_properties` claims attached to it, which would mislead a reader
+      checking whether `WAIT_TOKENS` or `token_stalls` is exercised anywhere for full starvation.
+  - id: M35
+    class: test_asserts_wrong_thing
+    severity: medium
     claim: >-
-      `accept` never takes the declared `BACKPRESSURE -> READY` transition; when queue space
-      appears it goes straight from `BACKPRESSURE` to `ENQUEUE`, an edge the template does not
-      declare, and the test that claims to check the resumption cannot tell the two apart.
-      Unchanged since round three (round-three M21) — `accept_process` was not touched.
+      `test_completion_accept_holds_reset_before_it_accepts`'s middle assertion --
+      `env.run(until=model.reset_latency); assertEqual(accepted_commands, 0)` -- does not
+      discriminate whether `RESET` actually delays acceptance: it passes identically whether
+      `accept.RESET` costs `reset_latency` (1) or 0 cycles, because the test's own
+      `service_latency` (4, the class default) already keeps `accepted_commands` at 0 past
+      either duration.
     template: >-
-      fsm_processes[accept].transitions (templates/completion_ip.template.yaml:86-106):
-      `BACKPRESSURE -> READY`, condition `queue_space_available`, actions `[]`, latency_cycles 0;
-      `READY -> ENQUEUE`, condition `incoming_valid_and_queue_space`, actions `[enqueue_command]`,
-      latency_cycles 1. No `BACKPRESSURE -> ENQUEUE` edge is declared.
+      templates/completion_ip.template.yaml:85-91 (`fsm_processes[accept]`): `RESET -> READY`,
+      condition `reset_deasserted`, `latency_cycles: 1`. This is the field the middle assertion
+      is meant to be checking (per the test's own docstring, "a command handed to the IP at t=0
+      was accepted as though no reset existed" -- the defect this test exists to catch).
     model: >-
-      src/ip_model_automation/completion_ip.py:144-156 — the `while self._pending_queue_full(...)`
-      loop at :144 sets `BACKPRESSURE` at :145 and, when the condition clears, falls through
-      directly to `self.fsm_state["accept"] = "ENQUEUE"` at :156 without passing through
-      `READY`, which is only assigned at the top of the outer loop (:136).
+      tests/test_completion_ip.py:46-66 -- assertion 1 (:57) checks `fsm_state["accept"] ==
+      "RESET"` immediately after construction, which is a genuine, sound check (readable before
+      `env.run()`, per `check_declared_transitions.py`'s own treatment of constructor-set
+      values). Assertion 2 (:63) is `env.run(until=model.reset_latency);
+      assertEqual(accepted_commands, 0)`. Between them, `src/ip_model_automation/completion_ip.py:188-189`
+      charges `service_latency` (constructor default 4) for `ENQUEUE`, after `RESET` (:151-152)
+      has already elapsed.
     why: >-
-      Re-measured from an instrumented trace, `pending_depth=1`, zero-token tenant, two
-      commands, `pending` cleared at t=40: `t=0 READY -> ENQUEUE`, `t=1 ENQUEUE -> READY`,
-      `t=1 READY -> BACKPRESSURE`, `BACKPRESSURE -> BACKPRESSURE` once per retry cycle from
-      t=2 to t=39, then `t=40 BACKPRESSURE -> ENQUEUE`, `t=41 ENQUEUE -> READY`. `READY` is
-      never entered between the stall clearing and the enqueue. Timing is unaffected (the
-      declared edge costs 0 cycles), hence `low`. It matters because
-      tests/test_completion_ip.py:165-169 asserts it *is* taken — the comment reads "Space
-      appears, and accept resumes -- BACKPRESSURE -> READY" while the assertion
-      `assertEqual(model.fsm_state["accept"], "READY")` runs at t=80 and observes the READY
-      written at :136 one full enqueue after the resumption it claims to witness.
-      Mutation-tested on a fresh copy: inserting the declared `BACKPRESSURE -> READY` hop
-      before the enqueue leaves all 18 tests passing, so the assertion is satisfied by both the
-      declared path and the undeclared one. Unchanged since round three; awaiting the human
-      ruling.
-  - id: M29
-    class: fsm_structure
-    severity: low
-    claim: >-
-      `accept.RESET` is never entered and the declared `RESET -> READY` transition is never
-      taken; the model implements no reset of any kind, so the declared reset behaviour (clear
-      pending queues, tokens and metrics) is unmodelled. Unchanged since round three
-      (round-three M23).
-    template: >-
-      fsm_processes[accept] (templates/completion_ip.template.yaml:85-91): `states: [RESET,
-      READY, ENQUEUE, BACKPRESSURE]`, transition `RESET -> READY`, condition `reset_deasserted`,
-      actions `[clear_pending_queues]`, latency_cycles 1. ip.reset
-      (templates/completion_ip.template.yaml:8-10): `type: sync`, `behavior:
-      clear_pending_queues_tokens_and_metrics`.
-    model: >-
-      src/ip_model_automation/completion_ip.py:74-78 — the constructor initialises
-      `fsm_state["accept"]` to `"READY"`, and `accept_process` (:134-169) begins by assigning
-      `"READY"` at :136. No code path assigns `"RESET"` and there is no reset API
-      (`functionality_model.apis` does not list one either).
-    why: >-
-      Confirmed mechanically this round rather than by eye: a regex over every
-      `fsm_state[...] = "..."` in the model yields exactly thirteen (fsm, state) pairs —
-      accept {READY, ENQUEUE, BACKPRESSURE}, completion_scheduler {IDLE, SELECT_TENANT,
-      CHECK_TOKENS, WAIT_TOKENS, EMIT, STALL_OUTPUT}, refill {WAIT_WINDOW, ASSESS_USAGE,
-      REFILL_BASE, PUBLISH_METRICS} — and the string "RESET" does not occur anywhere in the
-      file, nor does any attribute of `CompletionIpModel` contain "reset". `RESET` appears in
-      none of the traces I recorded this round (idle model, single command, two commands,
-      token starvation, output backpressure, inactive tenant, `pending_depth=1` backpressure,
-      refill process). Reproduces `tools/check_declared_transitions.py completion_ip`'s `NEVER
-      TAKEN accept: RESET -> READY`. **Still flagged as the weakest finding here and possibly a
-      template fix:** starting a model in the post-reset state is a defensible abstraction, and
-      `completion_scheduler.RESET` is declared with no exit at all so the template constrains
-      nothing there. It is filed because for `accept` the template does declare the exit, with
-      an action and a latency, and nothing in the model corresponds to any of it. Unchanged
-      since round three; awaiting the human ruling.
+      Mutation-tested on a fresh copy (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared,
+      mutation confirmed present on disk before running): changed line 152 from
+      `yield self.env.timeout(self.reset_latency)` to `yield self.env.timeout(0)`, i.e. `RESET`
+      still exists, is still entered (assertion 1 still passes), but costs no simulated time
+      regardless of what `reset_latency` is configured to. Reran the suite: 21/22 tests still
+      pass, and the one that fails is a *different* test
+      (`test_completion_scheduler_stalls_when_tenant_goes_inactive`, which shifts a completion
+      time and does correctly catch the mutation) -- `test_completion_accept_holds_reset_before_it_accepts`
+      itself passes unchanged under a reset that blocks nothing. The reason is arithmetic, not
+      accidental: `ENQUEUE`'s `service_latency` (4) exceeds `reset_latency` (1) by enough that
+      `accepted_commands` cannot reach 1 before t=`reset_latency`+`service_latency`=5 either way,
+      so sampling at t=`reset_latency`=1 tells you nothing about whether `RESET` contributed any
+      of that delay. Filed `medium`, not `low`: the test's own docstring frames this exact
+      assertion as verifying the fix for "a command handed to the IP at t=0 was accepted as
+      though no reset existed," and a reader taking that claim at face value would believe this
+      line demonstrates it, when the suite's other reset-adjacent assertions (construction-time
+      state, and the final `accepted_commands == 1` at t=60) are what is actually carrying the
+      test, not this one.

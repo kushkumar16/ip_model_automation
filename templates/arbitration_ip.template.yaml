@@ -42,7 +42,7 @@ interfaces:
       wait_points: [issue_pipeline.ISSUE_REQUEST]
       resumes_on: issue_ready
       source: dld
-      notes: "downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue"
+      notes: "downstream returns no result the arbiter needs; while `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue. `issue_ready` changes only at transaction boundaries, so it is sampled before a request is driven and again at the end of it, never during: a deassertion shorter than one request cannot occur, and `low` here means low at a boundary. See decisions/arbitration_ip.md."
     transactions:
       - name: issue_command
         fields: [cmd_descriptor, selected_port, selected_tenant, selected_sq, pending_cmd_count, device_burst_available, tenant_burst_available, sq_burst_available, issue_count, selection_reason]

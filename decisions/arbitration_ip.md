@@ -36,3 +36,28 @@ handoff store between `arbiter_main` and `issue_pipeline` already limited the
 arbiter to one selection ahead. What was missing was only the port's latency.
 The resource added here is the port itself, and the handoff store remains the
 separate thing it always was.
+
+## Sampling of `issue_ready`
+
+**M28 dismissed:** `issue_ready` changes only at transaction boundaries in the
+real design, so sampling it before the request and again at the end of it is the
+whole of the contract, and the model is correct as written.
+
+The finding measured, accurately, that a deassertion which goes low and returns
+high strictly inside the 3-cycle `ISSUE_REQUEST` window produces no
+`ISSUE_STALL`, pops the command on schedule, and leaves
+`output_backpressure_cycles` at 0. Read literally, the interface note — "while
+`issue_ready` is low the pipeline holds in `ISSUE_STALL`" — covers that case.
+It is not a case the signal can produce, and "low" there means low at a
+boundary.
+
+What a reader must not take from this: `output_backpressure_cycles` counts
+cycles spent holding at a boundary, not cycles during which some downstream
+signal was momentarily deasserted. The model would need per-cycle sampling
+inside `ISSUE_REQUEST` to report the latter, and the declared 3-cycle
+`downstream_issue_request` would have to become an interruptible window rather
+than an atomic cost — neither of which the design calls for.
+
+A deassertion that *persists* to the end of a request is a different case and is
+modelled: see the `ISSUE_REQUEST -> ISSUE_STALL` transition and its retry from
+`READ_PENDING_COUNT`.

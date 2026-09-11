@@ -188,6 +188,13 @@ Timing:
 - In burst mode, `issue_count` may be greater than one. The issued count is the
   minimum of selected SQ pending command count, device burst availability,
   tenant burst availability, and SQ burst availability.
+- `issue_ready` changes only at transaction boundaries. It is sampled before a
+  request is driven and again at the end of it, and is not sampled during the
+  request: a deassertion shorter than one request cannot occur. A deassertion
+  that is present at either boundary is handled -- the pipeline holds in
+  `ISSUE_STALL` and retries from `READ_PENDING_COUNT` -- so "while `issue_ready`
+  is low" in the wait model below means low at a boundary, not low at some
+  instant within a transaction.
 
 Wait model:
 

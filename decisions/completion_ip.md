@@ -105,3 +105,9 @@ the way `submit()`'s returned event lets one observe an accept. If a future
 DLD gives `qos_config_if` its own always-running acknowledger — not tied to
 the refill window a caller may never start — that is what would need to exist
 before this can be closed for real.
+
+**M36 dismissed:** the same finding as M33 above, re-filed by a fresh
+reviewer pass that (correctly, per its contract) does not read this file. Same
+gap, same reasoning, same conclusion — `credit_tokens` and `set_tenant_alive`,
+added since M33 was written, apply synchronously for the same reason
+`configure_tenant` does, and are named in this round's version alongside it.

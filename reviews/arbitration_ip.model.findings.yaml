@@ -1,210 +1,86 @@
 ip: arbitration_ip
 kind: model
 template_sha256: a2bdf51f3f327b4a9c1b084837350a639054028cb3a354c80ca6b6b49d3e4f96
-model_sha256: 7d45fb849103fc09903bd8a65dbb29c47dfd86b404409181c3a2554128a83aaa
-tests_sha256: 97915c078cebe9baeb3dd307428b03bbe5d819437759093f0a534805c700f4ed
+model_sha256: d8ff64aae2d1dbac56cac6b58ffb9a9f5f88858dba2394d820372064cd365a68
+tests_sha256: da6d31c6cf6848917ed9b275412796bd68fed23f01577c9a65c46631e9708466
 findings:
-  - id: M30
-    class: timing_mismatch
-    severity: high
-    claim: >-
-      The declared CREDIT_REFILL -> TENANT_SCAN edge (latency_cycles: 1) is charged at the full
-      tenant_scan cost (6 cycles by default) instead, for a state entry that evaluates nothing.
-    template: >-
-      templates/arbitration_ip.template.yaml:142-146 declares `from: CREDIT_REFILL, to: TENANT_SCAN,
-      condition: credit_restored, actions: [], latency_cycles: 1`. :360 prices `tenant_scan` at 6
-      cycles / 12 ns as a distinct operation for actually evaluating tenants.
-    model: >-
-      src/ip_model_automation/arbitration_ip.py:512-515 - immediately after refilling credit, the
-      model sets `arbiter_main = TENANT_SCAN` and charges `self.latency["tenant_scan"]` (6 cycles),
-      not the declared 1. No tenant is examined during this dwell; see M31 for what happens to the
-      state once it ends.
-    why: >-
-      Measured by execution on a scratch copy (PYTHONDONTWRITEBYTECODE=1, `__pycache__` cleared),
-      recording every `fsm_state` assignment against `env.now`. Single tenant, single command,
-      `set_tenant_credit("T0", read_iops_credit=False)`: TENANT_SCAN(5-11, fails on credit) ->
-      CREDIT_REFILL(11-21) -> TENANT_SCAN(21-27, this edge) -> IDLE(27, see M31). The dwell is exactly
-      6 cycles, matching `tenant_scan`, not the declared 1. Mutation confirms it is unpinned: changing
-      the charged timeout from `self.latency["tenant_scan"]` to the declared `1` leaves all 24 tests
-      green (`Ran 24 tests ... OK`). No test measures any span that starts at or ends on this specific
-      TENANT_SCAN entry; `test_arbitration_credit_exhaustion_refills_and_retries` checks only that
-      `"CREDIT_REFILL"` appears in the state sequence and that the command eventually issues.
-  - id: M31
+  - id: M36
     class: fsm_structure
     severity: high
     claim: >-
-      The scan retry that CREDIT_REFILL -> TENANT_SCAN promises does not happen: the TENANT_SCAN entry
-      it lands in evaluates no tenant, and control leaves it by an undeclared TENANT_SCAN -> IDLE edge
-      that restarts the whole pass from scratch, paying a second, real PORT_SCAN (4 cycles) and
-      TENANT_SCAN (6 cycles) that the declared retry edge does not describe.
+      Once a candidate has been granted and handed to issue_pipeline but is
+      still awaiting downstream issue_ready (or is stuck on a burst stall),
+      its SQ stays marked pending in the bitmaps arbiter_main scans, so the
+      arbiter repeatedly re-runs PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL
+      on that same already-granted candidate every cycle for the entire
+      length of the stall, instead of taking the template's declared
+      issue_ready-gated stall path or sitting idle.
     template: >-
-      templates/arbitration_ip.template.yaml:142-146 declares `CREDIT_REFILL -> TENANT_SCAN,
-      condition: credit_restored` as the retry: selection resumes from TENANT_SCAN, which is where
-      `TENANT_SCAN -> SQ_SCAN` (:132-136) and `TENANT_SCAN -> STALL` (:147-151) are the only other
-      declared exits. TENANT_SCAN -> IDLE is declared nowhere, and :328's `command_issue_path` declares
-      the scan as one linear pass (`PORT_SCAN, TENANT_SCAN, SQ_SCAN, GRANT`), not a pass that restarts
-      itself mid-flight.
+      templates/arbitration_ip.template.yaml:333-336 declares
+      `gating_relationships: - source: issue_if.issue_ready, gates:
+      arbiter_main.ISSUE, stall_reason: output_backpressure` -- issue_ready is
+      meant to gate the arbiter itself with its own distinct stall reason --
+      and templates/arbitration_ip.template.yaml:103 describes IDLE as "Wait
+      for queue activity or downstream availability."
     model: >-
-      src/ip_model_automation/arbitration_ip.py:471-521 - the port-candidate loop (`for candidate_port
-      in candidates`) is entered once per outer-loop pass, computes `port_id`/`tenant_id`/`sq_id`
-      locally, and is abandoned entirely on `continue` at :515 after the refill. That `continue` targets
-      the *outer* `while True:` at :420, whose first statement (:438) sets `arbiter_main = IDLE` -
-      not a re-entry into the candidate loop. IDLE's own inner loop (:439-447) then falls straight
-      through to a fresh PORT_SCAN (:455) because the bitmap is unchanged and still shows a port
-      pending, and the candidate loop is re-run from its first candidate.
+      src/ip_model_automation/arbitration_ip.py:268-284 (`_update_pending_bitmaps`
+      marks an SQ pending from queue occupancy alone, never checking
+      `self.inflight_sqs`) together with lines 442-452 (the IDLE wait loop
+      blocks only on `any(self.port_pending_bitmap.values())`, with no check
+      of downstream/issue readiness or in-flight status). Confirmed by
+      grep that arbiter_main never records an `output_backpressure` stall
+      reason anywhere: `output_backpressure_cycles` is only incremented inside
+      `issue_pipeline`, at lines 595 and 642.
     why: >-
-      Same trace as M30: CREDIT_REFILL(11-21) -> TENANT_SCAN(21-27) -> IDLE(27-27, zero cycles) ->
-      PORT_SCAN(27-31) -> TENANT_SCAN(31-37, this one real) -> SQ_SCAN(37-45) -> GRANT(45-47). The
-      grant that CREDIT_REFILL -> TENANT_SCAN was supposed to lead straight to is instead reached only
-      after a second full PORT_SCAN+TENANT_SCAN, 10 cycles neither the declared 1-cycle retry edge nor
-      any other declared edge accounts for. `python tools/check_declared_transitions.py arbitration_ip`
-      reports `UNDECLARED arbiter_main: TENANT_SCAN -> IDLE` on the current suite, corroborating the
-      edge is taken and not declared. For a request that starts pre-credit-blocked, the true added cost
-      of the refill retry is `credit_refill(10) + tenant_scan(6, M30) + port_scan(4) + tenant_scan(6)
-      = 26` cycles against a declared `credit_refill(10) + 1` = 11 - more than double. Confidence is
-      high that the edge and the extra scan are real and reachable (traced directly); how the retry
-      *should* re-enter (continue the abandoned candidate loop in place, vs. a cheaper declared
-      IDLE round-trip) is a design call this review does not make.
-  - id: M32
-    class: fsm_structure
-    severity: high
-    claim: >-
-      Scanning a second candidate port after the first fails takes undeclared TENANT_SCAN -> TENANT_SCAN
-      and SQ_SCAN -> TENANT_SCAN self/cross edges without ever passing back through PORT_SCAN, and can
-      reach CREDIT_REFILL directly from SQ_SCAN - none of which `PORT_SCAN -> TENANT_SCAN`'s declared,
-      one-port-at-a-time handoff describes.
-    template: >-
-      templates/arbitration_ip.template.yaml:127-131 declares exactly one edge into TENANT_SCAN,
-      `PORT_SCAN -> TENANT_SCAN` on `eligible_port_found`, implying a port is decided once per pass
-      before tenant evaluation begins. :137-141 declares the only edge into CREDIT_REFILL as
-      `TENANT_SCAN -> CREDIT_REFILL`. :328's `command_issue_path` lists the scan as the single linear
-      sequence `PORT_SCAN, TENANT_SCAN, SQ_SCAN, GRANT` with no branch that revisits an earlier stage
-      for a different candidate.
-    model: >-
-      src/ip_model_automation/arbitration_ip.py:471-485 - the `for candidate_port in candidates:` loop
-      (candidates being *every* pending port, per M22's fix) re-enters TENANT_SCAN (:473) for each
-      candidate in turn without ever re-entering PORT_SCAN, and drops straight into TENANT_SCAN again
-      when a candidate fails at SQ_SCAN (:481-483, `continue`). When every candidate's failure is
-      examined only after the loop ends (:487-521), the state left standing when `exhausted` triggers
-      CREDIT_REFILL can be whichever a candidate last failed at - TENANT_SCAN or SQ_SCAN alike.
-    why: >-
-      Two deterministic traces. (1) `set_tenant_credit("T0", read_iops_credit=False)`, one command on
-      port0/T0 and one on port1/T2: TENANT_SCAN(5-11, port0, fails on credit) -> TENANT_SCAN(11-17,
-      port1, succeeds) -> SQ_SCAN -> GRANT - an undeclared TENANT_SCAN -> TENANT_SCAN with no PORT_SCAN
-      between. (2) port0/T0/SQ0 enqueued and marked `inflight_sqs` directly (so SQ_SCAN genuinely fails
-      there), port1/T2/SQ0 pending and eligible: TENANT_SCAN(port0) -> SQ_SCAN(port0, fails, sq_id=None)
-      -> TENANT_SCAN(port1, *no PORT_SCAN between*) -> SQ_SCAN(port1) -> GRANT - an undeclared
-      SQ_SCAN -> TENANT_SCAN. `python tools/check_declared_transitions.py arbitration_ip` corroborates
-      both plus a third the current suite happens to reach, `SQ_SCAN -> CREDIT_REFILL`, from the same
-      loop when the last-tried candidate fails at SQ_SCAN and the aggregate exhaustion check (computed
-      after the loop, over all candidates, independently of which one was last) still finds a
-      credit-blocked tenant elsewhere. None of these three is declared, and none is a corner case: they
-      are the ordinary operation of scanning more than one port per pass, which is exactly the mechanism
-      M22's fix depends on. The template's scan topology was written for one port per pass and was not
-      updated when that changed.
-  - id: M33
-    class: fsm_structure
-    severity: high
-    claim: >-
-      When candidate ports fail for different reasons in the same pass, the STALL taken and the counter
-      incremented reflect only whichever candidate the loop tried *last*, not the actual aggregate
-      condition - so a stall can be recorded as `TENANT_SCAN -> STALL` / `no_tenant_pending_stalls`
-      while its own declared condition (`no_tenant_with_active_traffic`) is false, and
-      `no_sq_pending_stalls` can go uncounted even while `sq_pending_bitmap` is true for the SQ that is
-      actually blocking every attempt.
-    template: >-
-      templates/arbitration_ip.template.yaml:147-151 declares `TENANT_SCAN -> STALL, condition:
-      no_tenant_with_active_traffic, actions: [increment_no_tenant_stall]`; :152-156 declares
-      `SQ_SCAN -> STALL, condition: no_eligible_sq, actions: [increment_no_sq_stall]`. :340-345's
-      gating_relationships tie `tenant_pending_bitmap` to the first stall and `sq_pending_bitmap` to the
-      second - i.e. each stall's declared cause is a specific bitmap's state, not "whichever candidate
-      was scanned last."
-    model: >-
-      src/ip_model_automation/arbitration_ip.py:471-521 - `tenant_id` and `sq_id` are loop-local
-      variables overwritten on every candidate; once the loop ends without a `break`, :517-520 branches
-      on their final values alone (`if tenant_id is None: ... "no_tenant_pending_stalls" ... else: ...
-      "no_sq_pending_stalls"`), which is whatever the *last* candidate happened to leave behind, not an
-      aggregate over every candidate examined.
-    why: >-
-      Deterministic, race-free construction (no cross-process timing involved): port0/T0/SQ0 enqueued
-      with `inflight_sqs.add(("T0","SQ0"))` - a genuinely, permanently true `no_eligible_sq` for a
-      tenant that *is* pending and eligible (`tenant_pending_bitmap["port0"]["T0"] == True` throughout,
-      `sq_pending_bitmap["T0"]["SQ0"] == True` throughout) - and port1/T2/SQ0 enqueued with
-      `set_tenant_credit("T2", tenant_alive=False)`, a genuine `no_tenant_with_active_traffic` for
-      port1. Over 60 cycles the arbiter stalls twice, both times via
-      `TENANT_SCAN -> STALL` / `no_tenant_pending_stalls` (final metrics:
-      `{stalls: 2, no_tenant_pending_stalls: 2}`, `no_sq_pending_stalls` absent, i.e. 0) - port0's
-      real, sustained, bitmap-confirmed `no_eligible_sq` condition is never recorded under its declared
-      counter even once, because port1 (candidate order: port0 then port1) is scanned last and its
-      tenant failure is the only thing the trailing `tenant_id`/`sq_id` variables retain. Read the other
-      way: the model takes the declared `TENANT_SCAN -> STALL` edge while its own declared condition,
-      `no_tenant_with_active_traffic`, is false - port0 has an active, eligible tenant the whole time.
-      No test asserts `no_tenant_pending_stalls` or `no_sq_pending_stalls` at all (grepped
-      tests/test_arbitration_ip.py), so nothing catches either the misattribution or its absence.
-  - id: M34
-    class: fsm_structure
-    severity: medium
-    claim: >-
-      A candidate that burst-stalls (`issue_count` computes to 0) leaves ISSUE_STALL by an undeclared
-      ISSUE_STALL -> WAIT_SELECTION edge and abandons the selection outright; the template's only
-      declared exit from ISSUE_STALL is the retry edge to READ_PENDING_COUNT.
-    template: >-
-      templates/arbitration_ip.template.yaml:220-224 declares `from: ISSUE_STALL, to:
-      READ_PENDING_COUNT, condition: retry_while_selected_sq_remains_pending, actions: []` as the only
-      way out of ISSUE_STALL, for both of ISSUE_STALL's declared entries (:205-209 from
-      CALC_ISSUE_COUNT on `issue_count_zero`, :215-219 from ISSUE_REQUEST on
-      `downstream_did_not_accept`).
-    model: >-
-      src/ip_model_automation/arbitration_ip.py:574-581 - on `issue_count <= 0` the model sets
-      ISSUE_STALL, discards the selection from `inflight_sqs`, charges 1 cycle, sets `burst_stalled =
-      True` and `break`s the retry loop; :607-608 then `continue`s the outer `while True:` at :532,
-      whose first statement re-enters WAIT_SELECTION and waits for an entirely new selection from
-      `selected_sq_q`. The retained `selection` this candidate already paid 23+ cycles of arbitration
-      for is not retried; it is dropped, and if re-granted later it starts over from WAIT_SELECTION.
-    why: >-
-      Deterministic reproduction: `configure_burst(device=6, tenants={"T1": 3}, sqs={"T1": {"SQ0":
-      5}})` with 8 commands queued. First selection issues 3 and exhausts `tenant_burst_available` to 0;
-      the SQ is re-granted (still pending) and burst-stalls on every subsequent attempt
-      (`ISSUE_STALL(19) -> WAIT_SELECTION(20) -> READ_PENDING_COUNT(25) -> ... -> ISSUE_STALL(28) ->
-      WAIT_SELECTION(29) -> ...`), confirmed by `metrics: {selected_sqs: 4, grants: 4, burst_stalls: 3,
-      issued_commands: 3}` - one more grant than the commands actually issued, and three ISSUE_STALLs
-      each followed immediately by WAIT_SELECTION rather than READ_PENDING_COUNT. No test asserts
-      `burst_stalls` or inspects `issue_pipeline`'s state after one (grepped
-      tests/test_arbitration_ip.py) even though the existing
-      `test_arbitration_issue_pipeline_uses_min_burst_and_pending_count` drives this exact path in its
-      own log output without checking it. Medium rather than high: the queue entry itself stays pending
-      (the `expected_functional_behavior`/invariant that matters is not violated) and abandon-and-reselect
-      is a defensible reading for a resource-exhaustion stall as opposed to a backpressure one - but the
-      template does not say so, and a reader of ISSUE_STALL's one declared exit would not expect this
-      path to exist.
-  - id: M35
+      Verified by tracing arbiter_main's FSM state with two commands already
+      granted and in flight while issue_ready stayed low: the arbiter looped
+      PORT_SCAN(4) -> TENANT_SCAN(6) -> SQ_SCAN(8) -> STALL(1) ->
+      PORT_SCAN(4) -> STALL(1) continuously for the whole backpressure window,
+      producing (after ~59 cycles of backpressure) stalls=15,
+      no_sq_pending_stalls=8, no_port_pending_stalls=7, even though every
+      pending SQ was already granted and nothing new could be selected. This
+      charges the declared per-scan cycle costs repeatedly for no reason and
+      inflates `stalls`/`no_sq_pending_stalls`/`no_port_pending_stalls` --
+      metrics performance_model.metrics lists as arbitration-health counters
+      -- under a condition (output backpressure, and equally a burst stall,
+      since a burst-stalled SQ is left in `inflight_sqs` the same way) the
+      template explicitly separates out with its own `output_backpressure`
+      stall reason that the model never produces. None of the existing
+      backpressure/burst-stall tests
+      (tests/test_arbitration_ip.py:286-334, :410-436, :470-498, :861-891)
+      check arbiter_main's own stall metrics during the hold, only the
+      eventual outcome and issue_pipeline's stall counters, so this churn
+      goes unnoticed. In a longer stall or a busier queue this scales with
+      the stall duration and misrepresents both simulated arbitration timing
+      and the reported stall-reason breakdown.
+  - id: M37
     class: scenario_gap
-    severity: medium
+    severity: low
     claim: >-
-      No test distinguishes the credit-refill scope the round's own design decision specifies -
-      refilling every exhausted tenant across *all* pending ports in one pass - from refilling only the
-      first pending port: narrowing `exhausted` to the first candidate port leaves all 24 tests green,
-      and only a scenario with two ports simultaneously and fully exhausted (which no test constructs)
-      tells the two apart.
+      The weighted_order_four_tenants test_scenario's declared fsm_coverage
+      names `arbiter_main.ISSUE`, a state that does not exist anywhere in
+      arbiter_main's declared `states` list or in the model's `fsm_state`
+      tracking, so the test written for this scenario neither exercises nor
+      could exercise it.
     template: >-
-      templates/arbitration_ip.template.yaml:137-141 declares `from: TENANT_SCAN, to: CREDIT_REFILL,
-      condition: all_active_tenants_out_of_credit_across_all_pending_ports` - the condition name itself
-      is the "all pending ports" scope this finding is about. `test_scenarios` (:425-457) has no
-      scenario for credit refill at all, let alone one with two ports exhausted at once.
+      templates/arbitration_ip.template.yaml:439 (`fsm_coverage: [...
+      arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]`)
+      names `arbiter_main.ISSUE`; arbiter_main's actual declared states, at
+      templates/arbitration_ip.template.yaml:99-115, are `RESET, IDLE,
+      PORT_SCAN, TENANT_SCAN, CREDIT_REFILL, SQ_SCAN, GRANT, STALL` -- no
+      `ISSUE` among them. The same phantom state also appears in
+      `gating_relationships` (line 335) and `sequential_paths.policy_update_path`
+      (line 331), suggesting a state was renamed (to GRANT) without these
+      three references being updated to match.
     model: >-
-      src/ip_model_automation/arbitration_ip.py:502-507 computes `exhausted` over `for candidate_port in
-      candidates` (every pending port), matching the declared condition's scope.
+      tests/test_arbitration_ip.py:138-153
+      (test_arbitration_weighted_order_across_four_tenants, the test written
+      for this scenario) records only `selection_trace`, never
+      `fsm_state["arbiter_main"]`, and could not check ISSUE coverage even if
+      it tried to: `self.fsm_state` at src/ip_model_automation/arbitration_ip.py:162-166
+      only ever takes the eight states the template itself declares for
+      arbiter_main.
     why: >-
-      Mutation on a scratch copy: restricting the comprehension to `candidates[:1]` and running the full
-      suite (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared) gives `Ran 24 tests ... OK` - no
-      failure anywhere, including `test_arbitration_refill_does_not_let_an_exhausted_port_jump_the_queue`,
-      whose name suggests it covers exactly this. It does not: by the time that test's scan actually
-      reaches the exhausted-credit branch, the other port has already been serviced and drained by the
-      *ordinary* per-candidate loop (found via M32's ordinary port-walk, not the refill scope), so only
-      one port is ever a member of `candidates` at that point regardless of scope. Constructing the case
-      the scope is actually for - `set_tenant_credit` blocking one tenant on *each* of two ports,
-      both commands enqueued together - shows the real divergence: original code takes one combined
-      10-cycle CREDIT_REFILL (`credit_refills: 1`) and both commands issue by t=71; the narrowed mutation
-      takes two sequential ones (`credit_refills: 2`) with the second command not issued until roughly
-      45 cycles later. That is a real, measurable behavioural difference with no test standing over it in
-      either direction.
+      A reader consulting this scenario's fsm_coverage to see what a passing
+      test verifies is told it touches a state that has never existed in the
+      model, silently overstating this scenario's coverage.

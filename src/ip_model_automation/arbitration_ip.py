@@ -127,6 +127,7 @@ class ArbitrationIpModel:
             "reset": reset_latency,
         }
 
+        self._arbiter_wake = None
         self.selected_sq_q = simpy.Store(env, capacity=1)
         self.policy_update_q = simpy.Store(env)
         self.queues: Dict[str, Dict[str, Dict[str, Deque[Command]]]] = defaultdict(
@@ -182,6 +183,7 @@ class ArbitrationIpModel:
             raise ValueError(f"SQ {sq_id} is not linked to tenant {tenant_id}")
         self.queues[port_id][tenant_id][sq_id].append(command)
         self.bitmap_dirty = True
+        self._wake_arbiter()
         self.logger.info("enqueue cmd=%s port=%s tenant=%s sq=%s", command.cmd_id, port_id, tenant_id, sq_id)
 
     def configure_burst(
@@ -275,6 +277,15 @@ class ArbitrationIpModel:
                 return port_id
         return None
 
+    def _pending_ports(self) -> list:
+        """Every pending port, in policy order.
+
+        The scan needs all of them, not just the first: `eligible_port_found` is
+        about a port that yields a grantable candidate, and that cannot be known
+        until its tenants have been examined.
+        """
+        return [port_id for port_id in self.port_policy.scan() if self.port_pending_bitmap.get(port_id, False)]
+
     def _select_tenant(self, port_id: str) -> Optional[str]:
         for tenant_id in self.tenant_policies[port_id].scan():
             if not self.tenant_pending_bitmap[port_id].get(tenant_id, False):
@@ -327,6 +338,11 @@ class ArbitrationIpModel:
             self.sq_burst_available[tenant_id][sq_id],
         )
 
+    def _wake_arbiter(self) -> None:
+        """Tell an arbiter blocked in IDLE that work may now exist."""
+        if self._arbiter_wake is not None and not self._arbiter_wake.triggered:
+            self._arbiter_wake.succeed()
+
     def _stall(self, reason: str, metric: str):
         """Hold STALL for the declared retry, recording the reason's own metric.
 
@@ -361,17 +377,31 @@ class ArbitrationIpModel:
         while True:
             # IDLE is held on every pass, so it is occupied rather than merely
             # assigned, and the loop is re-entered here after a grant -- which is
-            # the declared GRANT -> IDLE. bitmap_update is still charged only
-            # when the bitmaps are actually dirty: charging it on every idle spin
-            # would invent 3 cycles the timing model does not price for a refresh
-            # with nothing to refresh. An idle pass instead costs the 1-cycle
-            # retry the template prices for a poll that found nothing.
+            # the declared GRANT -> IDLE.
+            #
+            # IDLE -> PORT_SCAN is declared on `any_port_pending`, and the
+            # arbiter waits here until that is true rather than scanning to find
+            # out. It used to spin IDLE -> PORT_SCAN -> STALL every 6 cycles with
+            # nothing queued, taking the declared edge with its declared
+            # condition false and paying a 4-cycle port scan to rediscover what
+            # the bitmap it had just refreshed already said -- so `stalls` and
+            # `no_port_pending_stalls` measured elapsed idle time rather than
+            # arbitration events. An idle arbiter now costs nothing and records
+            # nothing.
+            #
+            # The wait is armed before the condition is re-tested and no
+            # simulated time passes between the two, so an enqueue cannot slip
+            # into the gap and be missed.
             self._set_fsm_state("arbiter_main", "IDLE")
-            if self.bitmap_dirty:
-                yield self.env.timeout(self.latency["bitmap"])
-                self._update_pending_bitmaps()
-            else:
-                yield self.env.timeout(self.latency["backpressure_retry"])
+            while True:
+                if self.bitmap_dirty:
+                    yield self.env.timeout(self.latency["bitmap"])
+                    self._update_pending_bitmaps()
+                if any(self.port_pending_bitmap.values()):
+                    break
+                self._arbiter_wake = self.env.event()
+                yield self._arbiter_wake
+                self._arbiter_wake = None
             # Each scan decides its own level, in the state the template
             # declares that decision on: the port at the end of PORT_SCAN, the
             # tenant -- and with it the qos_credit_if eligibility sample, whose
@@ -381,25 +411,41 @@ class ArbitrationIpModel:
             # a credit-blocked candidate pay all three scans before stalling.
             self._set_fsm_state("arbiter_main", "PORT_SCAN")
             yield self.env.timeout(self.latency["port_scan"])
-            port_id = self._select_port()
+            candidates = self._pending_ports()
             # PORT_SCAN -> STALL on no_eligible_port, with its declared
             # increment_no_eligible_stall action.
-            if port_id is None:
+            if not candidates:
                 yield from self._stall("no eligible port", "no_port_pending_stalls")
                 continue
 
-            self._set_fsm_state("arbiter_main", "TENANT_SCAN")
-            yield self.env.timeout(self.latency["tenant_scan"])
-            tenant_id = self._select_tenant(port_id)
-            if tenant_id is None:
-                yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
-                continue
+            # The scan walks the ports in policy order rather than committing to
+            # the first pending one. A port is `eligible` only if a grantable
+            # candidate can be found beneath it, so a port whose tenants are all
+            # credit-blocked must not consume the arbiter: it used to, and one
+            # blocked tenant starved every other port indefinitely -- measured at
+            # 400 cycles with zero grants while an eligible command sat on the
+            # other port.
+            port_id = tenant_id = sq_id = None
+            for candidate_port in candidates:
+                self._set_fsm_state("arbiter_main", "TENANT_SCAN")
+                yield self.env.timeout(self.latency["tenant_scan"])
+                tenant_id = self._select_tenant(candidate_port)
+                if tenant_id is None:
+                    continue
 
-            self._set_fsm_state("arbiter_main", "SQ_SCAN")
-            yield self.env.timeout(self.latency["sq_scan"])
-            sq_id = self._select_sq(tenant_id)
-            if sq_id is None:
-                yield from self._stall("no eligible sq", "no_sq_pending_stalls")
+                self._set_fsm_state("arbiter_main", "SQ_SCAN")
+                yield self.env.timeout(self.latency["sq_scan"])
+                sq_id = self._select_sq(tenant_id)
+                if sq_id is None:
+                    continue
+                port_id = candidate_port
+                break
+
+            if port_id is None:
+                if tenant_id is None:
+                    yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
+                else:
+                    yield from self._stall("no eligible sq", "no_sq_pending_stalls")
                 continue
 
             selection = self._commit_selection(port_id, tenant_id, sq_id)

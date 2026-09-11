@@ -1,0 +1,215 @@
+ip: arbitration_ip
+kind: model
+template_sha256: adfdea8a3317a0728292db9e69f5ba19c76a65bd8efc02b1e17e65b2cee2dc63
+model_sha256: 0417e76fc4ae3e2a0e933774e8ab6780435be10778cc6d587f5269f5b8cd3ea3
+tests_sha256: e31e0cec7f23f758110a0ff6a7cbe7adc385d9fb08d78e57e8805cfc633dd746
+findings:
+- id: M16
+  class: wait_model_impl
+  severity: medium
+  claim: >-
+    qos_credit_if declares its wait point at arbiter_main.TENANT_SCAN, but the eligibility sample that
+    decides the grant is still taken at the end of SQ_SCAN, eight cycles after TENANT_SCAN has been
+    left. This is round two's M10 unchanged: the commit that reports fixing it (a170e89, "Each level
+    is now decided in the state declared to decide it ... select_sq() is gone") changed
+    tests/test_arbitration_ip.py only and left the model untouched.
+  template: >-
+    templates/arbitration_ip.template.yaml:51-67 declares qos_credit_if with `mode: wait_for_response`,
+    `wait_points: [arbiter_main.TENANT_SCAN]` (:58), `resumes_on: credit_status_sampled` (:59) and
+    `response_used_for: "the eligibility result decides whether the candidate may be granted"` (:61),
+    with `timing_notes: sampled during candidate evaluation` (:67). :130-134 puts the tenant decision
+    on TENANT_SCAN -> SQ_SCAN (`condition: eligible_tenant_found`, `actions: [record_selected_tenant]`),
+    and :317 prices tenant_scan at 6 cycles.
+  model: >-
+    src/ip_model_automation/arbitration_ip.py:380-384 - TENANT_SCAN is entered and its 6-cycle timeout
+    yielded with no work done in it, SQ_SCAN is entered and its 8-cycle timeout yielded, and only then
+    does :384 call `select_sq()` (:298-318), which runs `_select_port`, `_select_tenant` (:278-290,
+    where `sample_eligibility` is called at :285) and `_select_sq` back to back. `select_sq()` still
+    exists; `_commit_selection()` and a per-state decision do not exist anywhere in the tree
+    (`grep -rn "_commit_selection" src tests` returns nothing).
+  why: >-
+    Measured on a copy of the repo with PYTHONDONTWRITEBYTECODE=1, by replacing `fsm_state` with a
+    dict that records every assignment against `env.now` and wrapping `sample_eligibility` to record
+    the state it is called in. Stimulus: single-port model, one command in port0/T0/SQ0, T0 denied
+    `read_iops_credit`, defaults elsewhere. arbiter_main occupies TENANT_SCAN over t=6-12, 26-32,
+    46-52 and SQ_SCAN over t=12-20, 32-40, 52-60, while the only eligibility samples are
+    (t=20, SQ_SCAN, T0), (t=40, SQ_SCAN, T0), (t=60, SQ_SCAN, T0) - every one of them 8 cycles after
+    the declared wait point was left. The three processes run concurrently, so credit that changes
+    during those 8 cycles yields a different grant than the contract describes. Applying the fix the
+    commit message describes (decide the port at the end of PORT_SCAN, the tenant including
+    `sample_eligibility` at the end of TENANT_SCAN, the SQ at the end of SQ_SCAN) leaves all 15 tests
+    passing, so nothing in the suite holds the model to the current placement and nothing would resist
+    the correction.
+- id: M17
+  class: fsm_structure
+  severity: high
+  claim: >-
+    A candidate blocked by credit or by an in-flight SQ leaves the arbiter through an undeclared
+    SQ_SCAN -> STALL edge, having taken TENANT_SCAN -> SQ_SCAN with its declared condition
+    `eligible_tenant_found` false, and having charged port_scan + tenant_scan + sq_scan = 18 cycles
+    for a stall the template places at PORT_SCAN. This is the deterministic residue of round one's M1,
+    whose fix covered only the case where the port bitmap is already empty.
+  template: >-
+    templates/arbitration_ip.template.yaml:125-144 declares exactly three exits from the scan chain:
+    PORT_SCAN -> TENANT_SCAN on `eligible_port_found`, TENANT_SCAN -> SQ_SCAN on
+    `eligible_tenant_found`, SQ_SCAN -> GRANT on `eligible_sq_found`, and one stall edge,
+    PORT_SCAN -> STALL on `no_eligible_port` with `actions: [increment_no_eligible_stall]` (:140-144).
+    No SQ_SCAN -> STALL or TENANT_SCAN -> STALL edge is declared. :297-302 declares
+    `tenant_pending_bitmap gates arbiter_main.TENANT_SCAN, stall_reason: no_tenant_pending` and
+    `sq_pending_bitmap gates arbiter_main.SQ_SCAN, stall_reason: no_sq_pending`; :316-318 prices
+    port_scan 4, tenant_scan 6, sq_scan 8.
+  model: >-
+    src/ip_model_automation/arbitration_ip.py:367-390 - the only stall test made in PORT_SCAN is
+    `not any(self.port_pending_bitmap.values())` at :367; TENANT_SCAN (:380) and SQ_SCAN (:382) are
+    then entered unconditionally, and the tenant and SQ decisions are not made until `select_sq()` at
+    :384, whose three None returns (:300-312) all land on the same `STALL` at :386 from SQ_SCAN. The
+    credit rejection is at :285-288 and the in-flight rejection at :294.
+  why: >-
+    Same measured run as M16. Deterministically, with no race involved: the arbiter cycles
+    IDLE(1) -> PORT_SCAN(4) -> TENANT_SCAN(6) -> SQ_SCAN(8) -> STALL(1) and repeats every 20 cycles
+    while T0 is credit-blocked, recording `eligibility_rejections: 3` and `no_tenant_pending_stalls: 3`
+    at t=20, 40, 60. Under the declared structure that candidate is rejected in TENANT_SCAN, so the
+    model charges 14 cycles per poll that the contract does not place there - a 20-cycle retry period
+    against a declared 6 - and a credit-blocked or in-flight tenant is re-polled three times more
+    slowly than the template says. `python tools/check_declared_transitions.py arbitration_ip` reports
+    `UNDECLARED arbiter_main: SQ_SCAN -> STALL`, which I reproduced directly from the recorded
+    assignments above rather than taking on trust. Two further consequences a reader is misled by:
+    `no_tenant_pending_stalls` is incremented (:306) while `tenant_pending_bitmap` says the tenant IS
+    pending - it is the credit check, not the bitmap, that rejected it, and the template names a
+    different source for that stall reason - and `no_sq_pending_stalls` (:311) fires when the SQ is
+    pending but in flight. Deleting the `no_port_pending_stalls` increment added at :376 by round two's
+    M12 fix leaves all 15 tests passing, so none of this stall accounting is held by a test.
+- id: M18
+  class: test_asserts_wrong_thing
+  severity: medium
+  claim: >-
+    test_arbitration_issue_pipeline_charges_its_declared_latencies pins READ_PENDING_COUNT at 4 cycles
+    (selection_accept + pending_count_read), a figure the template does not state anywhere, and by
+    doing so rejects the placement the template does state - selection_accept on the
+    WAIT_SELECTION -> READ_PENDING_COUNT transition and 3 cycles in the state itself.
+  template: >-
+    templates/arbitration_ip.template.yaml:158-167 declares `from: WAIT_SELECTION, to:
+    READ_PENDING_COUNT, condition: selected_sq_valid, actions: [accept_selected_sq], latency_cycles: 1`
+    and `from: READ_PENDING_COUNT, to: READ_BURST, condition: pending_count_available, actions:
+    [read_pending_cmd_count], latency_cycles: 3`; :330-331 prices `selection_accept` at 1 cycle and
+    `pending_count_read` at 3. Both places put the accept cost on the edge into READ_PENDING_COUNT and
+    3 cycles inside it.
+  model: >-
+    tests/test_arbitration_ip.py:237-245 asserts `spans == {"READ_PENDING_COUNT": 1 + 3, "READ_BURST":
+    4, "CALC_ISSUE_COUNT": 2, "ISSUE_REQUEST": 3}`, and its docstring at :209-213 states the reason
+    outright: "selection_accept is charged inside READ_PENDING_COUNT rather than on the transition
+    into it ... this pins the shape actually implemented rather than asserting one it does not have".
+    The model shape it pins is src/ip_model_automation/arbitration_ip.py:402-404, which sets
+    READ_PENDING_COUNT and only then yields `selection_accept` and `pending_count`.
+  why: >-
+    Measured by mutation on a scratch copy with PYTHONDONTWRITEBYTECODE=1 and `__pycache__` removed
+    before and after: moving the single `yield self.env.timeout(self.latency["selection_accept"])`
+    above the `_set_fsm_state(... "READ_PENDING_COUNT")` call - which is exactly what the template
+    declares - fails one test and only one,
+    test_arbitration_issue_pipeline_charges_its_declared_latencies, with
+    `'READ_PENDING_COUNT': 3 != 'READ_PENDING_COUNT': 4`. So the suite now actively defends the
+    divergence. The end-to-end total is unaffected (both shapes measure the declared 38-cycle
+    new_command_to_issue path), which is why this is medium and not high: what it costs is that the
+    one test written to hold the issue pipeline to its declared timing model has written down a state
+    occupancy the template never states, and the next reader has to take the test's word over the
+    template's. Interpretive to the extent that one may read `latency_cycles` on a transition as
+    "somewhere around here"; the two independent template statements (:162 and :330-331) agreeing on
+    1 cycle for the accept are what makes me file it anyway.
+- id: M19
+  class: scenario_gap
+  severity: medium
+  claim: >-
+    The downstream_backpressure scenario is exercised only for issue_ready already low before the
+    selection is made; the whole ISSUE_REQUEST re-drive added by round two's M11 fix can be deleted
+    with all 15 tests still passing.
+  template: >-
+    templates/arbitration_ip.template.yaml:409-414 test_scenarios downstream_backpressure:
+    `description: Candidate remains queued when issue_ready is false`,
+    `expected_functional_behavior: [no_pop_until_ready]`, `expected_performance_properties:
+    [output_stall_incremented]`. :39-45 declares issue_if `wait_for_ack_inline` at
+    `issue_pipeline.ISSUE_REQUEST` with the note "while `issue_ready` is low the pipeline holds in
+    `ISSUE_STALL` and no command leaves the ingress queue"; :361 and :366 state the invariants
+    "Commands are popped only when issue_ready is true" and "Queue entries remain pending during
+    downstream backpressure".
+  model: >-
+    tests/test_arbitration_ip.py:390-420 - test_arbitration_downstream_backpressure_holds_selected_sq
+    calls `set_issue_ready(False)` at :402 before enqueueing, i.e. before the pipeline ever reaches
+    the request, and restores it at :416. No test anywhere lowers issue_ready after ISSUE_REQUEST has
+    been entered. The behaviour left untested is
+    src/ip_model_automation/arbitration_ip.py:427-439, the `while True` re-drive with its
+    `if self.output_ready: break`.
+  why: >-
+    Measured by mutation on a scratch copy with PYTHONDONTWRITEBYTECODE=1: replacing :427-439 with the
+    pre-fix form (test `output_ready` once, enter ISSUE_REQUEST, charge `issue`, pop) leaves all 15
+    tests passing. The mutation is not inert - with defaults and one command, ISSUE_REQUEST is
+    occupied t=32-35, and driving `set_issue_ready(False)` at t=33 leaving it low makes the fixed model
+    hold in ISSUE_STALL t=35-50, pop at 53 and count 15 output_backpressure_cycles, where the reverted
+    model pops at 35 with the queue emptied and output_backpressure_cycles at 0. So the invariant this
+    scenario exists to protect is satisfied today by code no test can hold in place, and a future
+    regression to the pre-fix shape is invisible to the suite.
+- id: M20
+  class: wait_model_impl
+  severity: medium
+  claim: >-
+    issue_ready that goes low and returns high strictly inside the 3-cycle ISSUE_REQUEST window is not
+    observed at all: the pipeline stays in ISSUE_REQUEST, pops the command, and records no
+    backpressure, so the declared "while issue_ready is low the pipeline holds in ISSUE_STALL" does not
+    hold for a dip shorter than the request.
+  template: >-
+    templates/arbitration_ip.template.yaml:39-45 declares issue_if `mode: wait_for_ack_inline`,
+    `wait_points: [issue_pipeline.ISSUE_REQUEST]`, `resumes_on: issue_ready`, with the note "while
+    `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue";
+    :291-293 declares the gating relationship `source: issue_if.issue_ready, stall_reason:
+    output_backpressure` - its `gates:` names arbiter_main.ISSUE, a state arbiter_main does not
+    declare, so the wait point at :42 is the only usable placement - and :380 lists
+    `output_backpressure_cycles` among the declared metrics.
+  model: >-
+    src/ip_model_automation/arbitration_ip.py:435-438 - `output_ready` is read once before the request
+    and once after `yield self.env.timeout(self.latency["issue"])`; nothing samples it during the
+    three cycles the request spans.
+  why: >-
+    Measured at defaults with one command in port0/T0/SQ0 (ISSUE_REQUEST occupies t=32-35), driving
+    `set_issue_ready(False)` at t=33 and `True` at t=34: the recorded issue_pipeline states are
+    ... CALC_ISSUE_COUNT(30) -> ISSUE_REQUEST(32) -> UPDATE_BURST(35) with no ISSUE_STALL at all, the
+    command is popped at t=35, and `output_backpressure_cycles` is 0. The same stimulus against the
+    pre-M11 model gives byte-identical results, which is how I established that this window survived
+    that fix rather than being introduced by it. UNCERTAIN / INTERPRETIVE: a defensible reading of a
+    valid_ready handshake is that the requester holds `valid` for the request and samples `ready` at
+    its end, in which case a sub-request dip is below the model's chosen time resolution and nothing is
+    wrong. I file it because the template's own note is written in terms of "while issue_ready is low",
+    not "if issue_ready is low at the end of the request", and because the declared
+    output_backpressure_cycles metric silently reads 0 for a stall that happened. If a person rules the
+    coarser sampling correct, that reading belongs in decisions/arbitration_ip.md, because nothing in
+    the template says it today.
+- id: M21
+  class: timing_mismatch
+  severity: low
+  claim: >-
+    The issue_slots resource declares latency_cycles: 1 and the model charges it nowhere; the declared
+    end-to-end path has no room for it either, so the two declarations cannot both be satisfied on the
+    path as written.
+  template: >-
+    templates/arbitration_ip.template.yaml:221-227 declares `- name: issue_slots, type: issue_port,
+    capacity: 1, bandwidth: one_command_per_dispatch_tick, latency_cycles: 1`, and :150-152 and
+    :193-195 name issue_slots in `resources_used` for both arbiter_main and issue_pipeline.
+    :351-354 declares new_command_to_issue at 38 cycles over the eleven named operations, which sum to
+    exactly 38 with nothing left for the resource.
+  model: >-
+    src/ip_model_automation/arbitration_ip.py:111-128 - the latency table has no entry for issue_slots,
+    and no `timeout` anywhere in the file is attributable to it. The resource's capacity of 1 *is*
+    modelled, by `self.selected_sq_q = simpy.Store(env, capacity=1)` at :130, which is why this is a
+    timing finding and not a capacity one.
+  why: >-
+    Measured by stepping the environment at defaults with a command arriving at t=100: the arbiter
+    enters IDLE at t=103 with the bitmaps dirty, and the downstream request is recorded at t=141 -
+    38 cycles, exactly bitmap_update 3 + port_scan 4 + tenant_scan 6 + sq_scan 8 + grant_selected_sq 2
+    + selection_accept 1 + pending_count_read 3 + burst_read 4 + min_burst_calculation 2 +
+    downstream_issue_request 3 + burst_debit 2. There is no spare cycle, and adding one (mutation:
+    `timeout(self.latency["issue"] + 1)`) fails
+    test_arbitration_issue_pipeline_charges_its_declared_latencies. This is the same shape as
+    completion_ip's M14, which was ruled by charging the port's declared cycle off the critical path
+    rather than deleting it, so the precedent for this IP's sibling is that the declared cost is real.
+    INTERPRETIVE on the remedy, not on the measurement: whether the cycle belongs off the path, on it
+    with the 38 restated, or struck from the template is a person's call and possibly
+    review_normalization's. Severity low because no currently declared path or scenario measures wrong
+    today.

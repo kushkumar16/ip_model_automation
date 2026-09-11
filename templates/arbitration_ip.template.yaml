@@ -337,7 +337,17 @@ timing_model:
     - name: no_stall_command_issue
       cycles: 23
       ns: 46
-      path: [port_scan, tenant_scan, sq_scan, grant_selected_sq]
+      path: [bitmap_update, port_scan, tenant_scan, sq_scan, grant_selected_sq]
+      note: >-
+        bitmap_update was missing from this list while the 23-cycle total
+        included it: the four operations named summed to 20, which is what the
+        model charges from PORT_SCAN to the end of GRANT. The total was right
+        and the path was incomplete, so the operation is added rather than the
+        figure reduced -- a scan reaches a new command only after the bitmaps
+        that made it visible were refreshed, so the refresh belongs on the path.
+        The model charges bitmap_update only when the bitmaps are actually
+        dirty, which is the case this path describes; an idle re-scan with
+        nothing to refresh pays the 1-cycle retry instead and is not this path.
     - name: new_command_to_issue
       cycles: 38
       ns: 76
@@ -371,8 +381,16 @@ performance_model:
 
 test_scenarios:
   - name: weighted_order_four_tenants
-    description: Weights 1,4,2,1 select T0,T1,T1,T1,T1,T2,T2,T3 when all queues are non-empty.
-    input_sequence: [port0_T0_SQ0_READ, port0_T1_SQ0_READ, port1_T2_SQ0_READ, port1_T3_SQ0_READ]
+    description: >-
+      With one command in every SQ, tenant weights 1,4,2,1 select
+      T0,T2,T1,T2,T1,T3,T1,T1,T0 - port alternation first, tenant weighting within a port.
+      Equal tenant weights give T0,T2,T1,T3,T0,T2,T1,T1,T1 instead, which is what makes this
+      scenario able to fail. The previous description claimed T0,T1,T1,T1,T1,T2,T2,T3 and was
+      wrong twice: it ignored the port level of this template's own
+      arbitration.hierarchy [port, tenant, sq] with equal port weights, and it declared eight
+      selections from an input_sequence of four commands, which can only produce four.
+    input_sequence: [port0_T0_SQ0_READ, port0_T0_SQ1_READ, port0_T1_SQ0_READ, port0_T1_SQ1_READ,
+      port0_T1_SQ2_READ, port0_T1_SQ3_READ, port1_T2_SQ0_READ, port1_T2_SQ1_READ, port1_T3_SQ0_READ]
     expected_functional_behavior: [weighted_order_respected]
     expected_performance_properties: [no_output_stall]
     fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]

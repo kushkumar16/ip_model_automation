@@ -17,6 +17,12 @@ this stage yet, and the one real finding from the §8 experiment is recorded and
 resolved. The larger mutation set that would establish the reviewer's *rate*,
 rather than that a signal exists, is still owed.
 
+**Note added 2026-09-10:** `sram_ctrl_ip`, the IP this proposal was written
+from and whose review it quotes, has since been retired. The example findings and
+the worked pair below are left exactly as they were: they record a review that
+happened, and restating them against a repo that no longer holds their subject
+would falsify it. The stage, its contract and its gate are unaffected.
+
 **Problem it addresses:** one class of error survives everything the pipeline
 currently checks. `check_dld_normalization.py` proves nothing was dropped,
 altered, or invented — every measurement conserved, every identifier conserved,

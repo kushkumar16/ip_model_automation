@@ -255,6 +255,17 @@ resources:
     capacity: 1
     bandwidth: one_command_per_dispatch_tick
     latency_cycles: 1
+    note: >-
+      This cycle is charged off the command's critical path, not on it:
+      end_to_end_paths.new_command_to_issue names eleven operations summing to
+      exactly 38 and this port is not among them, so charging it inline would
+      make that path 39 and break a figure the model matches. The pipeline holds
+      the slot across the downstream request and releases it one cycle later
+      from a background process, so the command leaves at the end of the request
+      while the port stays busy for its own latency -- which is where a capacity
+      of 1 is meant to be felt. Same ruling as completion_ip's
+      completion_output_port. See decisions/arbitration_ip.md.
+
     arbitration: configured_policy
     sharing_scope: global
 

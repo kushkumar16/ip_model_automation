@@ -50,6 +50,7 @@ class ArbitrationIpModel:
         burst_debit_latency: int = 2,
         weighted_order_rebuild_latency: int = 8,
         reset_latency: int = 1,
+        issue_slot_latency: int = 1,
         log_level: str = "WARNING",
         log_file: str = "run.log",
     ):
@@ -128,6 +129,16 @@ class ArbitrationIpModel:
         }
 
         self._arbiter_wake = None
+        self.issue_slot_latency = issue_slot_latency
+        # issue_slots: declared capacity 1 with latency_cycles 1. The capacity
+        # was already modelled by the depth-1 handoff store below, which limits
+        # the arbiter to one selection ahead; the port's own latency was charged
+        # nowhere. It is charged in the background, as ruled for completion_ip's
+        # output port: the pipeline holds the slot across the downstream request
+        # and hands the release to a process that lets the port's latency elapse
+        # first, so the declared 38-cycle path is unchanged while the port stays
+        # busy a cycle longer -- which is where a capacity of 1 is felt.
+        self.issue_slots = simpy.Resource(env, capacity=1)
         self.selected_sq_q = simpy.Store(env, capacity=1)
         self.policy_update_q = simpy.Store(env)
         self.queues: Dict[str, Dict[str, Dict[str, Deque[Command]]]] = defaultdict(
@@ -338,6 +349,15 @@ class ArbitrationIpModel:
             self.sq_burst_available[tenant_id][sq_id],
         )
 
+    def _release_issue_slot(self, slot):
+        """Let the issue port's declared latency elapse, then release it.
+
+        Runs off the pipeline's critical path deliberately: the cost belongs to
+        the port, not to the command that just left it.
+        """
+        yield self.env.timeout(self.issue_slot_latency)
+        self.issue_slots.release(slot)
+
     def _wake_arbiter(self) -> None:
         """Tell an arbiter blocked in IDLE that work may now exist."""
         if self._arbiter_wake is not None and not self._arbiter_wake.triggered:
@@ -492,6 +512,8 @@ class ArbitrationIpModel:
             # the commands were popped anyway, with output_backpressure_cycles
             # left at 0. The request is now re-driven until it completes with
             # issue_ready still high, so nothing leaves the queue during a stall.
+            slot = self.issue_slots.request()
+            yield slot
             while True:
                 while not self.output_ready:
                     self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
@@ -511,6 +533,8 @@ class ArbitrationIpModel:
                 command = queue.popleft()
                 issued_cmds.append(command)
                 self.issued.append((self.env.now, command))
+
+            self.env.process(self._release_issue_slot(slot))
 
             self.device_burst_available -= issue_count
             self.tenant_burst_available[selection["tenant_id"]] -= issue_count

@@ -306,6 +306,80 @@ class TestArbitrationIpModel(unittest.TestCase):
         env.run(until=200)
         self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"], "the command never issued")
 
+    def test_arbitration_issue_slots_serialises_competing_requesters(self):
+        """issue_slots is declared capacity 1, and must enforce it.
+
+        Mirrors completion_ip's output port test. A capacity is only observable
+        when something contends for it, so this drives a second requester of the
+        declared port and asserts it waits; raising the capacity makes this test
+        fail, which is the property a single-process timing assertion lacks.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        holds = []
+
+        def requester(name, hold):
+            with model.issue_slots.request() as slot:
+                yield slot
+                holds.append((name, env.now))
+                yield env.timeout(hold)
+
+        env.process(requester("first", 5))
+        env.process(requester("second", 5))
+        env.run(until=100)
+
+        self.assertEqual([name for name, _ in holds], ["first", "second"])
+        self.assertEqual(holds[0][1], 0)
+        self.assertEqual(holds[1][1], 5, "the second requester did not wait for the issue slot")
+
+    def test_arbitration_issue_slot_latency_is_charged_off_the_critical_path(self):
+        """issue_slots' declared latency_cycles: 1, which was charged nowhere.
+
+        The declared new_command_to_issue path names eleven operations summing
+        to exactly 38 and the port is not among them, so charging it inline
+        would make the path 39. It is charged in the background instead, as
+        ruled for completion_ip's output port: the command leaves at the end of
+        the request, and the port stays busy one cycle longer. Both halves are
+        pinned -- a port latency that changed nothing observable would be no
+        better than the uncharged one it replaced.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+
+        def arrive():
+            yield env.timeout(100)
+            model.enqueue(Command("c", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        env.process(arrive())
+        busy = []
+
+        def watcher():
+            while True:
+                busy.append((env.now, model.issue_slots.count))
+                yield env.timeout(1)
+
+        env.process(watcher())
+
+        entered = {}
+        previous = None
+        while env.peek() < 400:
+            env.step()
+            state = model.fsm_state["arbiter_main"]
+            if state != previous and env.now >= 100:
+                entered.setdefault(state, env.now)
+                previous = state
+            if model.downstream_requests:
+                break
+        env.run(until=200)
+
+        self.assertEqual(model.downstream_requests[0]["time"] - entered["IDLE"], 38, "the declared 38-cycle path moved")
+        held = [now for now, count in busy if count]
+        self.assertEqual(
+            len(held),
+            model.latency["issue"] + model.issue_slot_latency,
+            "the issue slot was not busy for its own latency beyond the request",
+        )
+
     def test_arbitration_idle_arbiter_waits_instead_of_scanning(self):
         """An idle arbiter costs nothing and records nothing.
 

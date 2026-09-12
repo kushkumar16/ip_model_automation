@@ -144,13 +144,29 @@ class TestArbitrationIpModel(unittest.TestCase):
         within a port. The scenario used to declare T0,T1,T1,T1,T1,T2,T2,T3,
         which ignored the port level entirely and asked for eight selections
         from four queued commands.
+
+        Round ten's M42: the scenario also declares
+        expected_performance_properties: [no_output_stall], which nothing here
+        checked -- every command is fully eligible from t=0 with issue_ready
+        never lowered, so the arbiter's own output path should never record a
+        stall either way the weights are set.
         """
-        weighted = self._four_tenant_sequence({"T0": 1, "T1": 4, "T2": 2, "T3": 1})
-        equal = self._four_tenant_sequence({"T0": 1, "T1": 1, "T2": 1, "T3": 1})
+        weighted, weighted_model = self._four_tenant_sequence({"T0": 1, "T1": 4, "T2": 2, "T3": 1})
+        equal, equal_model = self._four_tenant_sequence({"T0": 1, "T1": 1, "T2": 1, "T3": 1})
 
         self.assertEqual(weighted, ["T0", "T2", "T1", "T2", "T1", "T3", "T1", "T1", "T0"])
         self.assertEqual(equal, ["T0", "T2", "T1", "T3", "T0", "T2", "T1", "T1", "T1"])
         self.assertNotEqual(weighted, equal, "tenant weights made no difference to the order")
+
+        for model in (weighted_model, equal_model):
+            self.assertEqual(
+                model.metrics["output_stalls"], 0, "no_output_stall: a fully eligible burst should not stall"
+            )
+            self.assertEqual(
+                model.metrics["output_backpressure_cycles"],
+                0,
+                "no_output_stall: a fully eligible burst should not stall",
+            )
 
     def _four_tenant_sequence(self, tenant_weights):
         env = simpy.Environment()
@@ -170,7 +186,7 @@ class TestArbitrationIpModel(unittest.TestCase):
                         Command(f"{tenant_id}_{sq_id}", "READ", port_id=port_id, tenant_id=tenant_id, sq_id=sq_id)
                     )
         env.run(until=2000)
-        return [entry["tenant_id"] for entry in model.selection_trace]
+        return [entry["tenant_id"] for entry in model.selection_trace], model
 
     def test_arbitration_charges_its_declared_latencies_at_defaults(self):
         """The declared timing model, which no test exercised.

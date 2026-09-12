@@ -1,63 +1,44 @@
 ip: arbitration_ip
 kind: model
 template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
-model_sha256: a3125e19382d056d2378e0ef3299ef07018c0adbc3f29e70457e9023b85a7580
-tests_sha256: ec43a6128411339396fc927fc7c23f985f51ffd2ad5436012577d7036ba50f38
+model_sha256: 1353e5b146182ddbeb529cb0f849cdcaa82705340c62b01ca307ed932c1bfa71
+tests_sha256: 2e510e38b4ed5a0289bd17621c1ea1dea10b08bbb35ef640fc2708244d7edd59
 findings:
-  - id: M41
-    class: fsm_structure
-    severity: high
+  - id: M42
+    class: scenario_gap
+    severity: low
     claim: >-
-      When TENANT_SCAN's weighted-order pick for a port is a tenant whose only
-      pending SQ(s) are already claimed in inflight_sqs, SQ_SCAN's failure for
-      that one tenant marks the *entire port* tried for the rest of the sweep
-      (arbiter_main.py's outer loop) instead of trying a different, actually
-      eligible tenant on the same port -- so a genuinely grantable tenant can
-      be starved indefinitely behind another tenant's stalled in-flight SQ,
-      even while _has_actionable_work() correctly reports that real work
-      exists the whole time.
+      The weighted_order_four_tenants test_scenario's declared
+      expected_performance_properties: [no_output_stall] is never checked by
+      the test written for it, and no other test in the suite covers a
+      sustained multi-tenant weighted-load configuration for this property
+      either.
     template: >-
-      templates/arbitration_ip.template.yaml:132-136 declares
-      "TENANT_SCAN -> SQ_SCAN, condition: eligible_tenant_found", and
-      templates/arbitration_ip.template.yaml:152-156 declares
-      "SQ_SCAN -> STALL, condition: no_eligible_sq" as the failure edge for
-      one candidate tenant, not for the whole port; qos.weights
-      (templates/arbitration_ip.template.yaml:315-318) assigns unequal
-      per-tenant weights to tenants that share a port (e.g. port0's T0 and
-      T1), so a port-level FSM whose "no_eligible_sq" for its top-weighted
-      tenant permanently forecloses that port's other, lower-weighted but
-      genuinely eligible tenants is not what the declared per-candidate
-      hierarchy (qos.hierarchy: [port, tenant, sq]) describes.
+      templates/arbitration_ip.template.yaml test_scenarios[0]
+      (weighted_order_four_tenants), expected_performance_properties:
+      [no_output_stall]
     model: >-
-      src/ip_model_automation/arbitration_ip.py:366-378 (_select_tenant picks
-      a tenant using only tenant_pending_bitmap and credit eligibility, with
-      no check that the tenant has any non-inflight SQ) together with
-      src/ip_model_automation/arbitration_ip.py:587-590 (`if sq_id is None:
-      tried_ports.add(port_id); yield from self._stall(...); continue` --
-      this marks the whole port tried and never retries _select_tenant for a
-      different tenant of the same port, and never resets tried_ports even
-      when this was the only pending port, unlike the analogous
-      "tenant_id is None" branch a few lines above it).
+      tests/test_arbitration_ip.py
+      test_arbitration_weighted_order_across_four_tenants (its docstring
+      names this scenario by name: "The weighted_order_four_tenants
+      scenario, which no test drove"); it and its helper
+      _four_tenant_sequence (lines ~138-173) assert only selection_trace
+      tenant order and never read model.metrics["output_stalls"] or
+      model.metrics["output_backpressure_cycles"]. The only two assertions
+      on output_backpressure_cycles in the whole file are in
+      test_arbitration_downstream_backpressure_holds_selected_sq and
+      test_arbitration_issue_ready_dropping_during_the_request_holds_the_command
+      (lines 312 and 985), both single-tenant backpressure scenarios
+      unrelated to this one.
     why: >-
-      Reproduced empirically: with weights={"T0": 4, "T1": 1} on a single
-      port, enqueue one T0/SQ0 command while issue_ready is held false (so
-      once granted, (T0, SQ0) sits in inflight_sqs, unresolved, for a long
-      bounded window), then enqueue a second T0/SQ0 command and a fully
-      independent, fully-eligible T1/SQ0 command on the same port. Because
-      T0's weighted-round-robin pointer only advances on an actual grant (via
-      policy_update), and T0 was never actually re-granted (SQ_SCAN keeps
-      failing for it), TENANT_SCAN keeps re-selecting T0 every sweep. Over a
-      390-cycle window the model recorded grants stuck at 1 (only the
-      original T0 grant), stalls climbing to 26 (13 no_sq_pending_stalls, 13
-      no_port_pending_stalls) from the repeating
-      PORT_SCAN -> TENANT_SCAN(T0) -> SQ_SCAN(fail) -> STALL ->
-      PORT_SCAN(fails, port already tried) -> STALL cycle, and T1's command
-      was never even looked at by TENANT_SCAN -- despite
-      model._has_actionable_work() correctly returning True the entire time
-      (it does exclude in-flight SQs from "actionable", but that exclusion
-      never reaches _select_tenant/_select_sq's per-sweep candidate choice).
-      T1 was granted only once T0's in-flight SQ finally cleared externally.
-      A weighted arbiter that can indefinitely starve one fully-eligible
-      tenant behind a different tenant's stalled in-flight SQ, on the very
-      same port, is simulating the wrong arbitration outcome for exactly the
-      qos.weights/qos.hierarchy this template declares.
+      A reader relying on test_scenarios to know what the suite verifies
+      would believe the no-stall claim for this weighted, multi-tenant,
+      multi-port scenario had been checked; it has not. The underlying
+      behaviour is very likely correct (issue_ready is never lowered in
+      this test), so this does not look like a live bug, but it is exactly
+      the kind of declared-but-unexercised property this stage exists to
+      surface, and the same repo's own test history shows this class of gap
+      (a declared expected_performance_property nothing checked) has been
+      treated as worth a dedicated fix before, e.g. the timing assertions
+      later added in test_arbitration_charges_its_declared_latencies_at_defaults
+      and test_arbitration_issue_pipeline_charges_its_declared_latencies.

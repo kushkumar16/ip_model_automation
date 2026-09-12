@@ -498,6 +498,41 @@ class TestArbitrationIpModel(unittest.TestCase):
         env.run(until=520)
         self.assertEqual([command.cmd_id for _, command in model.issued], ["a"], "the command never issued")
 
+    def test_arbitration_partial_issue_wakes_the_arbiter_for_the_residue(self):
+        """A burst-limited partial issue must wake an arbiter blocked in IDLE.
+
+        Round seven's M38: the fix for M36 made IDLE genuinely block on
+        `_arbiter_wake` rather than busy-polling, woken only by `enqueue()`.
+        But a partial issue -- burst covers some of an SQ's pending count,
+        not all -- discards that SQ from `inflight_sqs` while real work is
+        still queued behind it, which is exactly when `_has_actionable_work`
+        would now say yes. Nothing called `_wake_arbiter()` there, so an
+        arbiter already blocked in IDLE never re-checked and the residue
+        waited forever -- reproduced with no API but enqueue and
+        configure_burst, no misuse.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.configure_burst(sqs={"T0": {"SQ0": 3}})
+        for i in range(8):
+            model.enqueue(Command(f"c{i}", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=100)
+
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            ["c0", "c1", "c2"],
+            "the burst-covered portion did not issue",
+        )
+        self.assertGreater(model.metrics["burst_stalls"], 0, "the residue never even reached a burst stall")
+
+        model.configure_burst(sqs={"T0": {"SQ0": 1024}})
+        env.run(until=200)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            [f"c{i}" for i in range(8)],
+            "the residue behind the partial issue was never granted",
+        )
+
     def test_arbitration_burst_stall_retries_in_place_rather_than_re_arbitrating(self):
         """ISSUE_STALL -> READ_PENDING_COUNT on a burst stall, not a discard.
 
@@ -914,6 +949,13 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 1)
         self.assertGreater(model.metrics["output_backpressure_cycles"], 0)
         self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
+        # The granted SQ is inflight, so arbiter_main finds no other
+        # actionable work and blocks in IDLE rather than stalling itself --
+        # the backpressure hold is entirely issue_pipeline's, matching this
+        # scenario's fsm_coverage (round seven's M39: this used to declare
+        # arbiter_main.STALL, a state the in-flight exclusion makes
+        # unreachable here).
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
 
         model.set_issue_ready(True)
         env.run(until=30)

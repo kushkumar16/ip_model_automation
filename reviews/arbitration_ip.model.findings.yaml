@@ -1,86 +1,89 @@
 ip: arbitration_ip
 kind: model
-template_sha256: a2bdf51f3f327b4a9c1b084837350a639054028cb3a354c80ca6b6b49d3e4f96
-model_sha256: d8ff64aae2d1dbac56cac6b58ffb9a9f5f88858dba2394d820372064cd365a68
-tests_sha256: da6d31c6cf6848917ed9b275412796bd68fed23f01577c9a65c46631e9708466
+template_sha256: 121ed1efed9e0179dbbb462ad79a7408a67adcba43fe16e9abdab980d42f6d7b
+model_sha256: 503e56eeda162129e6fe4b1f39e30af3568c3fdc1a913af4821329a127785ee9
+tests_sha256: 0fd181e788117f3ac7b8dbff9ba5125a61fd1d36fb78bbd4a3e709d046b9a848
 findings:
-  - id: M36
+  - id: M38
     class: fsm_structure
     severity: high
     claim: >-
-      Once a candidate has been granted and handed to issue_pipeline but is
-      still awaiting downstream issue_ready (or is stuck on a burst stall),
-      its SQ stays marked pending in the bitmaps arbiter_main scans, so the
-      arbiter repeatedly re-runs PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL
-      on that same already-granted candidate every cycle for the entire
-      length of the stall, instead of taking the template's declared
-      issue_ready-gated stall path or sitting idle.
+      arbiter_main is only ever woken by enqueue(); when a burst-limited
+      partial issue frees an SQ's in-flight claim while genuine pending work
+      remains in it, or when configure_burst() later replenishes the burst
+      that was limiting it, nothing wakes the blocked arbiter, so the
+      declared IDLE -> PORT_SCAN transition on any_port_pending is never
+      taken and the residual commands are never granted.
     template: >-
-      templates/arbitration_ip.template.yaml:333-336 declares
-      `gating_relationships: - source: issue_if.issue_ready, gates:
-      arbiter_main.ISSUE, stall_reason: output_backpressure` -- issue_ready is
-      meant to gate the arbiter itself with its own distinct stall reason --
-      and templates/arbitration_ip.template.yaml:103 describes IDLE as "Wait
-      for queue activity or downstream availability."
+      templates/arbitration_ip.template.yaml:102-103 (arbiter_main.IDLE:
+      "Wait for queue activity or downstream availability.") and its
+      transition at templates/arbitration_ip.template.yaml:122-126 (from:
+      IDLE, to: PORT_SCAN, condition: any_port_pending).
     model: >-
-      src/ip_model_automation/arbitration_ip.py:268-284 (`_update_pending_bitmaps`
-      marks an SQ pending from queue occupancy alone, never checking
-      `self.inflight_sqs`) together with lines 442-452 (the IDLE wait loop
-      blocks only on `any(self.port_pending_bitmap.values())`, with no check
-      of downstream/issue readiness or in-flight status). Confirmed by
-      grep that arbiter_main never records an `output_backpressure` stall
-      reason anywhere: `output_backpressure_cycles` is only incremented inside
-      `issue_pipeline`, at lines 595 and 642.
+      src/ip_model_automation/arbitration_ip.py:407-410 defines
+      _wake_arbiter(), which is called from exactly one site: enqueue() at
+      :198. issue_pipeline's inflight release and bitmap refresh at :701-702
+      (after a partial, burst-limited issue) and configure_burst() at
+      :201-214 both change whether any_port_pending should now hold for a
+      port the arbiter has already given up on, but neither calls
+      _wake_arbiter(); arbiter_main blocks solely on that event at :481-491.
     why: >-
-      Verified by tracing arbiter_main's FSM state with two commands already
-      granted and in flight while issue_ready stayed low: the arbiter looped
-      PORT_SCAN(4) -> TENANT_SCAN(6) -> SQ_SCAN(8) -> STALL(1) ->
-      PORT_SCAN(4) -> STALL(1) continuously for the whole backpressure window,
-      producing (after ~59 cycles of backpressure) stalls=15,
-      no_sq_pending_stalls=8, no_port_pending_stalls=7, even though every
-      pending SQ was already granted and nothing new could be selected. This
-      charges the declared per-scan cycle costs repeatedly for no reason and
-      inflates `stalls`/`no_sq_pending_stalls`/`no_port_pending_stalls` --
-      metrics performance_model.metrics lists as arbitration-health counters
-      -- under a condition (output backpressure, and equally a burst stall,
-      since a burst-stalled SQ is left in `inflight_sqs` the same way) the
-      template explicitly separates out with its own `output_backpressure`
-      stall reason that the model never produces. None of the existing
-      backpressure/burst-stall tests
-      (tests/test_arbitration_ip.py:286-334, :410-436, :470-498, :861-891)
-      check arbiter_main's own stall metrics during the hold, only the
-      eventual outcome and issue_pipeline's stall counters, so this churn
-      goes unnoticed. In a longer stall or a busier queue this scales with
-      the stall duration and misrepresents both simulated arbitration timing
-      and the reported stall-reason breakdown.
-  - id: M37
+      Once a candidate is granted, its SQ is marked inflight (:379) so IDLE
+      correctly stops re-scanning it while it is genuinely in flight -- the
+      round-six fix holds. But when issue_pipeline can only issue part of
+      that SQ's backlog because a burst counter (device, tenant, or SQ) is
+      below the pending count, it discards the SQ from inflight_sqs and
+      refreshes the bitmaps at :701-702 while real pending work is still
+      sitting there, unclaimed -- exactly the state any_port_pending's
+      declared transition exists to catch. Because nothing wakes the
+      arbiter at that point (or later, when configure_burst() replenishes
+      the exhausted counter), it never re-checks, and the remaining
+      commands sit in their queue forever with no stall recorded and no
+      error raised. Verified empirically: enqueuing 8 commands into one SQ
+      with sq_burst=3 (device and tenant burst left ample) issues exactly 3
+      commands (grants stays at 1) and then issues none of the remaining 5
+      even after running to t=1000 and separately replenishing that SQ's
+      burst back to 1024 afterward; only an unrelated enqueue() on a
+      different port -- which happens to call _wake_arbiter() as a side
+      effect -- lets the arbiter notice the same untouched residual work
+      and drain it. The full suite in tests/test_arbitration_ip.py passes
+      throughout (30/30), and no existing test drives a burst limit low
+      enough, relative to pending count, to leave residual work behind a
+      completed grant.
+  - id: M39
     class: scenario_gap
-    severity: low
+    severity: medium
     claim: >-
-      The weighted_order_four_tenants test_scenario's declared fsm_coverage
-      names `arbiter_main.ISSUE`, a state that does not exist anywhere in
-      arbiter_main's declared `states` list or in the model's `fsm_state`
-      tracking, so the test written for this scenario neither exercises nor
-      could exercise it.
+      The downstream_backpressure test_scenario declares fsm_coverage:
+      [arbiter_main.STALL], but neither the model nor the test written for
+      it ever puts arbiter_main into STALL for this scenario: the granted
+      SQ becomes inflight and IDLE's own in-flight exclusion keeps
+      arbiter_main parked in IDLE for the whole backpressure period
+      instead.
     template: >-
-      templates/arbitration_ip.template.yaml:439 (`fsm_coverage: [...
-      arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]`)
-      names `arbiter_main.ISSUE`; arbiter_main's actual declared states, at
-      templates/arbitration_ip.template.yaml:99-115, are `RESET, IDLE,
-      PORT_SCAN, TENANT_SCAN, CREDIT_REFILL, SQ_SCAN, GRANT, STALL` -- no
-      `ISSUE` among them. The same phantom state also appears in
-      `gating_relationships` (line 335) and `sequential_paths.policy_update_path`
-      (line 331), suggesting a state was renamed (to GRANT) without these
-      three references being updated to match.
+      templates/arbitration_ip.template.yaml:452-457 (test_scenarios ->
+      downstream_backpressure), specifically fsm_coverage:
+      [arbiter_main.STALL] at line 457.
     model: >-
-      tests/test_arbitration_ip.py:138-153
-      (test_arbitration_weighted_order_across_four_tenants, the test written
-      for this scenario) records only `selection_trace`, never
-      `fsm_state["arbiter_main"]`, and could not check ISSUE coverage even if
-      it tried to: `self.fsm_state` at src/ip_model_automation/arbitration_ip.py:162-166
-      only ever takes the eight states the template itself declares for
-      arbiter_main.
+      tests/test_arbitration_ip.py:892-922
+      (test_arbitration_downstream_backpressure_holds_selected_sq, the test
+      named for this scenario) never asserts or reaches
+      arbiter_main.STALL. tests/test_arbitration_ip.py:470-495
+      (test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq)
+      explicitly asserts model.metrics["stalls"] == 0 and
+      model.fsm_state["arbiter_main"] == "IDLE" for the same shape of
+      scenario, confirming arbiter_main.STALL is unreachable here.
     why: >-
-      A reader consulting this scenario's fsm_coverage to see what a passing
-      test verifies is told it touches a state that has never existed in the
-      model, silently overstating this scenario's coverage.
+      A reader trusting the template's fsm_coverage claim would believe
+      this scenario exercises arbiter_main.STALL; it does not, and given
+      the in-flight exclusion the model correctly implements
+      (_has_actionable_work at src/ip_model_automation/arbitration_ip.py:286-313),
+      it cannot: once the single candidate is granted and marked inflight,
+      the arbiter finds no other actionable work and blocks in IDLE rather
+      than entering PORT_SCAN/TENANT_SCAN/SQ_SCAN and stalling. Verified
+      empirically by instrumenting transition_counts for arbiter_main.STALL
+      across the scenario's own input_sequence (T0_READ then
+      issue_ready_low, and the reverse ordering): it stays at 0 in both
+      orderings for the whole run while the command remains correctly
+      queued, so the declared fsm_coverage line is stale against the
+      model's current, correct behaviour.

@@ -700,6 +700,15 @@ class ArbitrationIpModel:
             yield self.env.timeout(self.latency["burst_debit"])
             self.inflight_sqs.discard((selection["tenant_id"], selection["sq_id"]))
             self._update_pending_bitmaps()
+            # A burst limit below the pending count leaves real, unclaimed
+            # work behind: this SQ just left inflight_sqs, but the queue
+            # this popleft() loop did not fully drain is still sitting
+            # there. _has_actionable_work() would now say yes for it, but
+            # arbiter_main only ever re-tests that while something wakes it
+            # -- enqueue() is the only other caller of _wake_arbiter(), so
+            # without this call an arbiter already blocked in IDLE never
+            # notices and the residual commands wait forever.
+            self._wake_arbiter()
             self.downstream_requests.append(
                 {
                     "time": self.env.now,

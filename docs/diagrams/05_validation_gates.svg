@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 1002" font-family="Segoe UI, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 1160" font-family="Segoe UI, Arial, sans-serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
@@ -7,61 +7,75 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#34a853"/>
     </marker>
   </defs>
-  <rect width="760" height="1002" fill="#ffffff"/>
-  <text x="380" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The gate chain: what "validated" means</text>
-  <text x="380" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Nothing advances until its gate is green. One command runs them all.</text>
+  <rect width="760" height="1160" fill="#ffffff"/>
+  <text x="380" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The repo-wide gate chain: what "green" means</text>
+  <text x="380" y="66" text-anchor="middle" font-size="14" fill="#5f6368">python tools/run_ci.py runs all nine, once, after every changed IP completes its own pipeline.</text>
 
-    <!-- Gate 0 (conditional) -->
-  <rect x="100" y="95" width="560" height="80" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 4"/>
-  <text x="380" y="122" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">0. check_dld_normalization.py</text>
-  <text x="380" y="144" text-anchor="middle" font-size="13" fill="#9a6400">only when the DLD has a .src.md: nothing dropped, altered or invented</text>
-  <text x="380" y="164" text-anchor="middle" font-size="12" fill="#9a6400">+ the human stamp that the meaning survived</text>
-
-  <line x1="380" y1="175" x2="380" y2="192" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-
-<!-- Gate 1 -->
-  <rect x="100" y="197" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="380" y="226" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">1. template_lint.py</text>
-  <text x="380" y="250" text-anchor="middle" font-size="13" fill="#9a6400">template matches the schema / contract shape</text>
+  <!-- Gate 1 -->
+  <rect x="100" y="96" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="125" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">1. coverage_report — report_model_coverage.py</text>
+  <text x="380" y="149" text-anchor="middle" font-size="13" fill="#9a6400">every declared FSM has test-scenario coverage</text>
 
   <!-- Gate 2 -->
-  <rect x="100" y="299" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="380" y="328" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">2. check_template_coverage.py --strict</text>
-  <text x="380" y="352" text-anchor="middle" font-size="13" fill="#9a6400">every DLD FSM + count captured, zero TODO_REVIEW, normalization stamped</text>
+  <rect x="100" y="196" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="225" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">2. wait_model_coverage — check_wait_model_coverage.py</text>
+  <text x="380" y="249" text-anchor="middle" font-size="13" fill="#9a6400">every declared interface wait point is a state the model actually enters</text>
 
   <!-- Gate 3 -->
-  <rect x="100" y="401" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="380" y="430" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">3. report_model_coverage.py</text>
-  <text x="380" y="454" text-anchor="middle" font-size="13" fill="#9a6400">every FSM has a test scenario</text>
+  <rect x="100" y="296" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="325" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">3. code_style — check_code_style.py</text>
+  <text x="380" y="349" text-anchor="middle" font-size="13" fill="#9a6400">ruff lint + format clean (--fix auto-repairs)</text>
 
   <!-- Gate 4 -->
-  <rect x="100" y="503" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="380" y="532" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">4. generate_model_scaffold.py</text>
-  <text x="380" y="556" text-anchor="middle" font-size="13" fill="#9a6400">model shape: one class + one process per FSM</text>
+  <rect x="100" y="396" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="425" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">4. code_coverage — run_code_coverage.py</text>
+  <text x="380" y="449" text-anchor="middle" font-size="13" fill="#9a6400">95%+ line coverage, total and per model file</text>
 
   <!-- Gate 5 -->
-  <rect x="100" y="605" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="380" y="634" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">5. unit tests</text>
-  <text x="380" y="658" text-anchor="middle" font-size="13" fill="#9a6400">functional + timing assertions pass</text>
+  <rect x="100" y="496" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="380" y="525" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">5. full_validation — validate_dld_flow.py</text>
+  <text x="380" y="549" text-anchor="middle" font-size="13" fill="#9a6400">DLD -&gt; template coverage, then the model/test flow, for every IP</text>
+
+  <!-- Divider: pipeline stages vs. artifact guards -->
+  <line x1="380" y1="568" x2="380" y2="586" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="140" y1="586" x2="620" y2="586" stroke="#9a6400" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <text x="380" y="606" text-anchor="middle" font-size="12" fill="#5f6368">gates 1-5 are harness pipeline stages (scope: repo); gates 6-9 guard artifacts the pipeline produces</text>
+
+  <!-- Gate 6 -->
+  <rect x="100" y="620" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="380" y="649" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">6. model_provenance — check_model_provenance.py</text>
+  <text x="380" y="673" text-anchor="middle" font-size="13" fill="#9a6400">every model is stamped against the template revision it was built from</text>
+
+  <!-- Gate 7 -->
+  <rect x="100" y="720" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="380" y="749" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">7. dld_normalization — check_dld_normalization.py</text>
+  <text x="380" y="773" text-anchor="middle" font-size="13" fill="#9a6400">every normalized DLD is faithful to its author source, and human-stamped</text>
+
+  <!-- Gate 8 -->
+  <rect x="100" y="820" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="380" y="849" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">8. overview_sync — check_overview_sync.py</text>
+  <text x="380" y="873" text-anchor="middle" font-size="13" fill="#9a6400">the Word overview has not drifted from project_overview.md</text>
+
+  <!-- Gate 9 -->
+  <rect x="100" y="920" width="560" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="380" y="949" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">9. review_findings — check_review_findings.py</text>
+  <text x="380" y="973" text-anchor="middle" font-size="13" fill="#9a6400">every recorded model or normalization review finding fixed or dismissed by name</text>
 
   <!-- OK -->
-  <rect x="100" y="727" width="560" height="64" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
-  <text x="380" y="754" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e7e34">validate_dld_flow.py: OK</text>
-  <text x="380" y="776" text-anchor="middle" font-size="13" fill="#1e7e34">one green result proves the whole repo is consistent</text>
+  <rect x="100" y="1030" width="560" height="64" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
+  <text x="380" y="1057" text-anchor="middle" font-size="16" font-weight="bold" fill="#1e7e34">run_ci.py: CI (9 of 9 gate(s))</text>
+  <text x="380" y="1079" text-anchor="middle" font-size="13" fill="#1e7e34">one green result across every gate proves the whole repo is consistent</text>
 
   <!-- Arrows -->
-  <line x1="380" y1="269" x2="380" y2="294" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="380" y1="371" x2="380" y2="396" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="380" y1="473" x2="380" y2="498" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="380" y1="575" x2="380" y2="600" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="380" y1="677" x2="380" y2="722" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <line x1="380" y1="168" x2="380" y2="192" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="268" x2="380" y2="292" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="368" x2="380" y2="392" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="468" x2="380" y2="492" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="692" x2="380" y2="716" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="792" x2="380" y2="816" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="892" x2="380" y2="916" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="380" y1="992" x2="380" y2="1025" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
 
-  <!-- Repo-wide hard gates (automated pipeline) -->
-  <line x1="380" y1="791" x2="380" y2="816" stroke="#9a6400" stroke-width="2" stroke-dasharray="6 5"/>
-  <rect x="100" y="821" width="560" height="92" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 5"/>
-  <text x="380" y="849" text-anchor="middle" font-size="15" font-weight="bold" fill="#9a6400">+ two repo-wide hard gates in the automated pipeline</text>
-  <text x="380" y="872" text-anchor="middle" font-size="13" fill="#9a6400">check_code_style.py — ruff lint + format clean</text>
-  <text x="380" y="894" text-anchor="middle" font-size="13" fill="#9a6400">run_code_coverage.py — 95%+ line coverage, total and per model file</text>
-
-  <text x="380" y="958" text-anchor="middle" font-size="13" fill="#5f6368">Run all gates for every IP in the repo:  python tools\validate_dld_flow.py</text>
+  <text x="380" y="1120" text-anchor="middle" font-size="13" fill="#5f6368">Run every gate:  python tools\run_ci.py     (installed as the pre-push hook: .githooks/pre-push)</text>
+  <text x="380" y="1142" text-anchor="middle" font-size="13" fill="#5f6368">Each IP's own path to gate 5 is a ~20-stage pipeline of its own — see 06_auto_pipeline.svg</text>
 </svg>

@@ -16,9 +16,10 @@ It reports in both directions, because a contract can be broken either way:
   and the second is a coverage gap rather than a defect.
 
 Neither is automatically a bug. A template can be wrong and the model right —
-that is how four of the six transition findings on ``sram_ctrl_ip`` were
-resolved. This tool says *these two documents disagree here*; which side to
-change is a person's call, as it is for the review stage.
+round five's `arbitration_ip` M30 is exactly that: a declared `latency_cycles: 1`
+compared against the wrong of two separate timing mechanisms, not a real defect.
+This tool says *these two documents disagree here*; which side to change is a
+person's call, as it is for the review stage.
 
 **This is a report, not a gate.** It exits 0 whatever it finds unless ``--strict``
 is passed. The point of the first run is to learn the size of the problem across
@@ -27,7 +28,7 @@ all the IPs before deciding what a gate should refuse.
 Usage::
 
     python tools/check_declared_transitions.py                 # every IP
-    python tools/check_declared_transitions.py sram_ctrl_ip    # one
+    python tools/check_declared_transitions.py arbitration_ip  # one
     python tools/check_declared_transitions.py --strict        # exit 1 on undeclared
 
 A note on what "taken" means here. This tool used to count any assignment to
@@ -343,9 +344,12 @@ def finding_for(ip: str, kind: str, fsm: str, source: str, target: str, declared
     """One disagreement, written as a finding a person has to resolve.
 
     The tool states what it saw and refuses to guess which side is wrong. That is
-    not modesty — on sram_ctrl_ip the answer split both ways across six
-    transitions of this exact shape, and the one time an agent picked for itself
-    the author reversed it.
+    not modesty — `arbitration_ip`'s credit-refill placement was picked once,
+    measured, and found to invert the starvation fix it sat next to (refilling as
+    soon as one port came up exhausted let that port's tenant issue *first*, ahead
+    of an eligible command waiting on another port); the fix moved to refilling
+    only after a full scan across every pending port fails. Confident does not
+    mean correct, on either side of a disagreement like this.
     """
     exits = ", ".join(declared_exits) or "(none)"
     if kind == "undeclared":

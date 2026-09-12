@@ -467,6 +467,37 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
         self.assertEqual(model.issued, [])
 
+    def test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq(self):
+        """A port whose only pending work is already granted stays quiet.
+
+        Once a candidate is granted it is claimed in `inflight_sqs`, but the
+        command it came from is not popped from its queue until
+        issue_pipeline actually issues it -- so the port/tenant/SQ pending
+        bitmaps stay set from queue occupancy alone for as long as a
+        downstream (`issue_ready`) or burst stall holds it. Before this fix,
+        IDLE used that raw bitmap directly: with nothing else queued, it kept
+        finding a port "pending", entering PORT_SCAN, TENANT_SCAN, SQ_SCAN --
+        which always refused the same in-flight candidate -- and STALL,
+        every cycle for the whole stall, growing `stalls` without bound.
+        `_has_actionable_work` excludes an in-flight SQ the same way
+        `_select_sq` already does, so IDLE recognizes there is nothing new
+        and genuinely waits instead of spinning.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_issue_ready(False)
+        model.enqueue(Command("a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=500)
+
+        self.assertEqual(model.metrics["grants"], 1, "the candidate was granted more than once")
+        self.assertIn(("T0", "SQ0"), model.inflight_sqs, "the SQ was released while still legitimately in flight")
+        self.assertEqual(model.metrics["stalls"], 0, "arbiter_main kept re-scanning an already-granted candidate")
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
+
+        model.set_issue_ready(True)
+        env.run(until=520)
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["a"], "the command never issued")
+
     def test_arbitration_burst_stall_retries_in_place_rather_than_re_arbitrating(self):
         """ISSUE_STALL -> READ_PENDING_COUNT on a burst stall, not a discard.
 

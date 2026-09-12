@@ -283,6 +283,35 @@ class ArbitrationIpModel:
         self.bitmap_dirty = False
         self.metrics["bitmap_updates"] += 1
 
+    def _has_actionable_work(self) -> bool:
+        """Whether some pending SQ is not already claimed by an in-flight grant.
+
+        `port_pending_bitmap` answers "is the queue non-empty" -- exactly
+        what its declared action (`update_pending_bitmaps`) computes, and
+        exactly what TENANT_SCAN and SQ_SCAN still key off, unchanged. It
+        does not answer whether any of that queued work is new: a port whose
+        only queued commands are already granted and awaiting issue is
+        bitmap-pending but has nothing for a scan to find, since
+        `_select_sq` already refuses every one of them (M31-M33's
+        `inflight_sqs` exclusion). IDLE uses this instead of the raw bitmap
+        so it does not pay a full PORT_SCAN -> TENANT_SCAN -> SQ_SCAN ->
+        STALL cycle -- charging real declared scan costs -- on a port that
+        can only ever end in that same refusal; PORT_SCAN's own candidate
+        list and TENANT_SCAN/SQ_SCAN's own stalls are untouched, so a port
+        with a genuine mix of in-flight and fresh work still reaches and
+        stalls at exactly the level that is actually short.
+        """
+        for port_id, port_cfg in self.topology.items():
+            if self.port_mode == "single" and port_id != "port0":
+                continue
+            if not self.port_pending_bitmap.get(port_id, False):
+                continue
+            for tenant_id, sqs in port_cfg["tenants"].items():
+                for sq_id in sqs:
+                    if self.queues[port_id][tenant_id][sq_id] and (tenant_id, sq_id) not in self.inflight_sqs:
+                        return True
+        return False
+
     def _active_tenants(self, port_id: str) -> list:
         """Tenants under this port with pending work and a live status.
 
@@ -436,6 +465,16 @@ class ArbitrationIpModel:
             # arbitration events. An idle arbiter now costs nothing and records
             # nothing.
             #
+            # Round six's M36 found the same waste one level up: a port whose
+            # entire pending queue was already granted, and just awaiting issue
+            # or a burst retry, is still bitmap-pending (nothing popped the
+            # queue yet), so this used the raw bitmap and paid the full
+            # PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL cycle every retry for
+            # as long as a downstream stall lasted, on a candidate SQ_SCAN was
+            # always going to refuse. `_has_actionable_work` checks the same
+            # `inflight_sqs` exclusion SQ_SCAN's own refusal already uses,
+            # without changing what the bitmap itself means.
+            #
             # The wait is armed before the condition is re-tested and no
             # simulated time passes between the two, so an enqueue cannot slip
             # into the gap and be missed.
@@ -444,7 +483,7 @@ class ArbitrationIpModel:
                 if self.bitmap_dirty:
                     yield self.env.timeout(self.latency["bitmap"])
                     self._update_pending_bitmaps()
-                if any(self.port_pending_bitmap.values()):
+                if self._has_actionable_work():
                     break
                 self._arbiter_wake = self.env.event()
                 yield self._arbiter_wake

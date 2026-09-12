@@ -61,3 +61,24 @@ than an atomic cost — neither of which the design calls for.
 A deassertion that *persists* to the end of a request is a different case and is
 modelled: see the `ISSUE_REQUEST -> ISSUE_STALL` transition and its retry from
 `READ_PENDING_COUNT`.
+
+## The transition metadata that no edge in this FSM implements
+
+**M30 dismissed:** the declared `CREDIT_REFILL -> TENANT_SCAN` `latency_cycles: 1`
+is compared against the wrong field. `transitions[...].latency_cycles` is
+uniform boilerplate across the entire `arbiter_main` FSM — 1 on every edge
+except `GRANT -> IDLE` (0) and `TENANT_SCAN -> CREDIT_REFILL` (10, matching the
+real `credit_refill` operation) — and no state in this model charges it. Every
+state's real cost comes from a separate, named entry in
+`timing_model.fsm_process_delays[arbiter_main].operations`
+(`port_scan: 4, tenant_scan: 6, sq_scan: 8, ...`), which is what
+`self.latency[...]` is keyed from and what every entry into every state pays,
+including the very first `PORT_SCAN -> TENANT_SCAN` that no round has ever
+flagged. Charging `CREDIT_REFILL -> TENANT_SCAN`'s literal `1` instead would
+single out this one retry to skip the real cost of re-evaluating a tenant,
+while every other entry into `TENANT_SCAN` — including this same edge's own
+first cousin, the normal `PORT_SCAN -> TENANT_SCAN` — pays the real six.
+
+What was real underneath this finding, and is fixed: the retry into
+`TENANT_SCAN` this edge leads to used to be charged *some* cost and then
+discarded without ever calling `_select_tenant()` again — see M31.

@@ -467,6 +467,197 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
         self.assertEqual(model.issued, [])
 
+    def test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq(self):
+        """A port whose only pending work is already granted stays quiet.
+
+        Once a candidate is granted it is claimed in `inflight_sqs`, but the
+        command it came from is not popped from its queue until
+        issue_pipeline actually issues it -- so the port/tenant/SQ pending
+        bitmaps stay set from queue occupancy alone for as long as a
+        downstream (`issue_ready`) or burst stall holds it. Before this fix,
+        IDLE used that raw bitmap directly: with nothing else queued, it kept
+        finding a port "pending", entering PORT_SCAN, TENANT_SCAN, SQ_SCAN --
+        which always refused the same in-flight candidate -- and STALL,
+        every cycle for the whole stall, growing `stalls` without bound.
+        `_has_actionable_work` excludes an in-flight SQ the same way
+        `_select_sq` already does, so IDLE recognizes there is nothing new
+        and genuinely waits instead of spinning.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_issue_ready(False)
+        model.enqueue(Command("a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=500)
+
+        self.assertEqual(model.metrics["grants"], 1, "the candidate was granted more than once")
+        self.assertIn(("T0", "SQ0"), model.inflight_sqs, "the SQ was released while still legitimately in flight")
+        self.assertEqual(model.metrics["stalls"], 0, "arbiter_main kept re-scanning an already-granted candidate")
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
+
+        model.set_issue_ready(True)
+        env.run(until=520)
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["a"], "the command never issued")
+
+    def test_arbitration_burst_stall_retries_in_place_rather_than_re_arbitrating(self):
+        """ISSUE_STALL -> READ_PENDING_COUNT on a burst stall, not a discard.
+
+        A selection with issue_count <= 0 used to be dropped outright --
+        inflight_sqs released, the whole thing discarded back to
+        WAIT_SELECTION -- abandoning a candidate arbiter_main had already paid
+        a full scan and grant for (23+ cycles). It still eventually issued in
+        a run with nothing else pending, but only via a *second* grant: the
+        arbiter re-scanned and re-selected the same SQ from scratch once burst
+        was replenished. `grants` is the discriminator -- it now stays at 1
+        across the whole stall-and-replenish cycle.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.configure_burst(device=0)
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=50)
+
+        self.assertGreater(model.metrics["burst_stalls"], 0, "the burst stall was never taken")
+        self.assertEqual(model.issued, [], "the command issued before burst was ever replenished")
+        self.assertIn(("T0", "SQ0"), model.inflight_sqs, "the SQ was released while still legitimately in flight")
+        self.assertEqual(model.metrics["grants"], 1, "the selection was discarded and re-arbitrated")
+
+        model.configure_burst(device=1024, tenants={"T0": 1024}, sqs={"T0": {"SQ0": 1024}})
+        env.run(until=100)
+
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["c0"])
+        self.assertEqual(model.metrics["grants"], 1, "a second grant means the selection was re-arbitrated")
+
+    def test_arbitration_credit_refill_retry_actually_re_scans_the_tenant(self):
+        """CREDIT_REFILL -> TENANT_SCAN must retry, not restart the whole sweep.
+
+        The retry used to hold TENANT_SCAN for its full cost and then discard
+        it -- `continue` targeted the outer loop, whose first statement is
+        IDLE, so the port was re-picked from scratch and paid a second real
+        PORT_SCAN + TENANT_SCAN the declared retry does not describe. Pinned
+        here by the exact cycle count from CREDIT_REFILL's start to GRANT:
+        credit_refill(10) + tenant_scan(6) + sq_scan(8) + grant(2) = 26, with
+        no room for a repeated port_scan or tenant_scan in between.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("only", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        entered = {}
+        previous = None
+        while env.peek() < 300:
+            env.step()
+            state = model.fsm_state["arbiter_main"]
+            if state != previous:
+                entered.setdefault(state, env.now)
+                previous = state
+            if model.issued:
+                break
+
+        self.assertEqual(model.issued[0][1].cmd_id, "only")
+        grant_completed = entered["GRANT"] + model.latency["grant"]
+        self.assertEqual(
+            grant_completed - entered["CREDIT_REFILL"],
+            10 + 6 + 8 + 2,
+            "the refill retry paid for a repeated scan the declared edge does not describe",
+        )
+
+    def test_arbitration_refill_scope_covers_every_exhausted_port_in_one_pass(self):
+        """CREDIT_REFILL's scope is every exhausted tenant across all pending ports.
+
+        templates/arbitration_ip.template.yaml declares
+        `all_active_tenants_out_of_credit_across_all_pending_ports` as the
+        TENANT_SCAN -> CREDIT_REFILL condition -- the whole pending set, not
+        just the port under scan. Every other exhaustion test here blocks
+        only one port at a time, so narrowing the scope to the first
+        candidate port alone still passes all of them; only a scenario with
+        two ports exhausted at once, both commands enqueued together, tells
+        the declared scope apart from the narrower one: the declared scope
+        refills both tenants in a single combined CREDIT_REFILL, where a
+        first-port-only scope would need two sequential ones.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.set_tenant_credit("T2", read_iops_credit=False)
+        model.enqueue(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("c1", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+        env.run(until=300)
+
+        self.assertEqual(
+            sorted(command.cmd_id for _, command in model.issued),
+            ["c0", "c1"],
+            "exhaustion never cleared for one of the two simultaneously blocked ports",
+        )
+        self.assertEqual(
+            model.metrics["credit_refills"],
+            1,
+            "two ports exhausted at once took two separate refills instead of one combined pass",
+        )
+
+    def test_arbitration_second_candidate_port_is_reached_through_port_scan(self):
+        """No TENANT_SCAN -> TENANT_SCAN or SQ_SCAN -> TENANT_SCAN.
+
+        Trying a second port after the first fails used to skip straight back
+        into TENANT_SCAN, taking edges the declared FSM does not have. Each
+        candidate now gets its own PORT_SCAN dwell, so PORT_SCAN is observed
+        between the first port's failure and the second port's evaluation.
+
+        Recording every *assignment* to arbiter_main, not just value changes,
+        is what this needs: two separate TENANT_SCAN dwells back to back are
+        two assignments of the same string, invisible to a tracker that only
+        appends on a changed value -- which is exactly the shape of the bug
+        this test exists to catch, and the first version of this test used
+        such a tracker and could not see it.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", read_iops_credit=False)
+        model.enqueue(Command("blocked", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("ready", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+
+        seen = []
+        original = model._set_fsm_state
+
+        def recording_set_fsm_state(fsm, state):
+            if fsm == "arbiter_main":
+                seen.append(state)
+            original(fsm, state)
+
+        model._set_fsm_state = recording_set_fsm_state
+        env.run(until=100)
+
+        first_tenant_scan = seen.index("TENANT_SCAN")
+        second_tenant_scan = seen.index("TENANT_SCAN", first_tenant_scan + 1)
+        self.assertIn(
+            "PORT_SCAN",
+            seen[first_tenant_scan + 1 : second_tenant_scan],
+            "the second port was reached without its own PORT_SCAN dwell",
+        )
+
+    def test_arbitration_each_port_is_stalled_under_its_own_true_reason(self):
+        """The stall reason reflects the candidate that actually produced it.
+
+        Two ports failing for two different, genuine reasons in the same
+        sweep used to record only the last one tried: the loop kept
+        `tenant_id`/`sq_id` as variables overwritten on every candidate, and
+        branched on their final values alone. port0's tenant is genuinely
+        dead (a real no_tenant_with_active_traffic) and port1's SQ is
+        genuinely already in flight (a real no_eligible_sq); both reasons
+        must be counted, not just whichever was tried last.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", tenant_alive=False)
+        model.enqueue(Command("a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("b", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
+        model.inflight_sqs.add(("T2", "SQ0"))
+
+        env.run(until=60)
+
+        self.assertGreater(model.metrics["no_tenant_pending_stalls"], 0, "port0's true stall reason went uncounted")
+        self.assertGreater(model.metrics["no_sq_pending_stalls"], 0, "port1's true stall reason went uncounted")
+
     def test_arbitration_idle_arbiter_waits_instead_of_scanning(self):
         """An idle arbiter costs nothing and records nothing.
 

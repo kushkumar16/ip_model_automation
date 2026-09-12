@@ -49,3 +49,65 @@ What a reader must not take from this: the port's declared
 against a measured back-to-back spacing of 17 — a figure no reading of the
 17-cycle path can satisfy either. That contradiction is left standing rather than
 resolved in the model's favour.
+
+## Reset, and the part of it that is not modelled
+
+`ip.reset.behavior` is `clear_pending_queues_tokens_and_metrics`, and `accept`
+now holds `RESET` for a cycle before taking the declared `RESET -> READY`. Two
+of the three are cleared there: pending queues and metrics, along with the
+window snapshots, the completed list and the eligible-tenant set.
+
+**Token state is not cleared, deliberately.** In this model `tokens` is written
+by `configure_tenant` over `qos_config_if`, and callers apply that before the
+simulation starts. A runtime reset that zeroed it would discard the
+configuration the run was set up with; one that restored it from `base_tokens`
+would undo a caller that had deliberately drained a tenant to exercise
+starvation. Either way the reset would be overwriting configuration rather than
+modelling a reset, and both were tried before this was written down — the first
+emptied every budget in the suite, the second silently refilled tenants that
+tests had drained on purpose.
+
+What a reader must not take from this: a reset in the model does not return
+token budgets to a known state. If a future DLD separates the reset value of a
+token budget from the value configuration supplies, that distinction has to
+exist in the model before this can be closed.
+
+## qos_config_if's wait point is not modelled
+
+**M33 dismissed:** `configure_tenant` applies its values at the instant it is
+called, not at `refill.REFILL_BASE` as `qos_config_if`'s wait model declares.
+This is a real gap between the DLD and the model, not a misreading of either —
+but closing it literally breaks the interface it is meant to describe.
+
+`refill_process` only runs when a caller opts in (`start_refill_process`
+defaults `False`), and `refill.REFILL_BASE` is reached only once per
+`refill_window` — 5,000,000 cycles by default. A literal implementation gates
+every `configure_tenant` call behind that: in a run that does not start the
+refill process, the wait point is never reached at all, and configuration
+never takes effect, silently, forever — not delayed, gone. That is true of
+every test in the suite but the two refill-specific ones, and of the pattern
+every caller in this codebase uses configure_tenant for: set up tenant state
+before `env.run()`, so it is in effect from t=0. `submit()` gates its own
+effect on its wait point the same way (`accepted_cmd_if`'s `accept.ENQUEUE`)
+and that works, because `accept_process` always runs; there is no equivalent
+always-on process for `qos_config_if` to wait on.
+
+The comment this finding quotes, attached to `refill_process`'s `REFILL_BASE`
+assignment, claimed to describe this: "the configured budgets take effect
+here." It does not — it sits next to `_restore_base_tokens()`, the periodic
+top-up that re-copies `base_tokens` into `tokens` for tenants already
+configured, unrelated to whether a `configure_tenant` call is pending. Fixed:
+the comment now says what the code there actually does.
+
+What a reader must not take from this: `configure_tenant` still has no wait
+model at all, and a caller cannot observe when a configuration is "applied"
+the way `submit()`'s returned event lets one observe an accept. If a future
+DLD gives `qos_config_if` its own always-running acknowledger — not tied to
+the refill window a caller may never start — that is what would need to exist
+before this can be closed for real.
+
+**M36 dismissed:** the same finding as M33 above, re-filed by a fresh
+reviewer pass that (correctly, per its contract) does not read this file. Same
+gap, same reasoning, same conclusion — `credit_tokens` and `set_tenant_alive`,
+added since M33 was written, apply synchronously for the same reason
+`configure_tenant` does, and are named in this round's version alongside it.

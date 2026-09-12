@@ -328,11 +328,11 @@ fsm_relationships:
       path: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, issue_pipeline.READ_PENDING_COUNT, issue_pipeline.READ_BURST, issue_pipeline.CALC_ISSUE_COUNT, issue_pipeline.ISSUE_REQUEST]
       description: Pipeline 1 selects one SQ; pipeline 2 computes issue_count and sends downstream request.
     - name: policy_update_path
-      path: [arbiter_main.ISSUE, policy_update.UPDATE_POINTER]
+      path: [arbiter_main.GRANT, policy_update.UPDATE_POINTER]
       description: Accepted grant updates policy state for the next scan.
   gating_relationships:
     - source: issue_if.issue_ready
-      gates: arbiter_main.ISSUE
+      gates: issue_pipeline.ISSUE_REQUEST
       stall_reason: output_backpressure
     - source: port_pending_bitmap
       gates: arbiter_main.PORT_SCAN
@@ -436,7 +436,7 @@ test_scenarios:
       port0_T1_SQ2_READ, port0_T1_SQ3_READ, port1_T2_SQ0_READ, port1_T2_SQ1_READ, port1_T3_SQ0_READ]
     expected_functional_behavior: [weighted_order_respected]
     expected_performance_properties: [no_output_stall]
-    fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]
+    fsm_coverage: [arbiter_main.PORT_SCAN, arbiter_main.TENANT_SCAN, arbiter_main.SQ_SCAN, arbiter_main.GRANT, policy_update.UPDATE_POINTER]
   - name: hierarchical_bitmap_selection
     description: Port, tenant, and SQ bitmaps drive hierarchical selection from pending command to issued command.
     input_sequence: [port1_T2_SQ1_READ]

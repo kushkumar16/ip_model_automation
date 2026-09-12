@@ -43,6 +43,94 @@ class TestCompletionIpModel(unittest.TestCase):
         env.run(until=24)
         self.assertEqual(model.completed[0][1].cmd_id, "w0")
 
+    def test_completion_accept_holds_reset_before_it_accepts(self):
+        """RESET -> READY, which was never taken because RESET was never entered.
+
+        ip.reset.behavior is clear_pending_queues_tokens_and_metrics, and the
+        constructor did that work while accept_process opened in READY -- so the
+        reset was implemented as construction rather than modelled, and a
+        command handed to the IP at t=0 was accepted as though no reset existed.
+        arbitration_ip holds its RESET; this now does too.
+
+        The middle check used to be `env.run(until=model.reset_latency);
+        assertEqual(accepted_commands, 0)`, which does not discriminate whether
+        RESET actually costs `reset_latency`: with `service_latency` at its
+        class default of 4, `accepted_commands` stays 0 past either a 1-cycle
+        or a 0-cycle RESET, since ENQUEUE's own cost outlasts either. Pinned
+        instead with a `reset_latency` distinct from every other configured
+        latency and a `fsm_state["accept"]` trace taken with `env.step()`:
+        READY is entered for no simulated time here (a command is already
+        queued, so ENQUEUE is assigned in the same instant), so a single
+        `env.run(until=...)` snapshot cannot catch it, but the first state the
+        trace records after RESET pins exactly when and to what RESET exits.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, reset_latency=5, log_level="CRITICAL")
+        self.assertEqual(model.fsm_state["accept"], "RESET", "accept did not start in reset")
+
+        model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        trace = []
+        previous = None
+        while env.peek() < 60:
+            env.step()
+            state = model.fsm_state["accept"]
+            if state != previous:
+                trace.append((env.now, state))
+                previous = state
+            if model.metrics["accepted_commands"]:
+                break
+
+        self.assertEqual(trace[0], (0, "RESET"), "accept did not start in reset")
+        self.assertEqual(
+            trace[1], (5, "READY"), "RESET did not hold for exactly its declared latency before RESET -> READY"
+        )
+        self.assertEqual(model.metrics["accepted_commands"], 1)
+
+    def test_completion_backpressure_resumes_through_ready(self):
+        """BACKPRESSURE -> READY -> ENQUEUE, not BACKPRESSURE -> ENQUEUE.
+
+        The template declares the resumption on queue_space_available and the
+        enqueue on incoming_valid_and_queue_space, so a command held by a full
+        queue passes back through READY. The model used to fall straight from
+        BACKPRESSURE into ENQUEUE, skipping the state that says "ready to
+        accept" on exactly the pass where a producer is watching for it, and the
+        test that claimed to check the resumption could not tell the two apart.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, pending_depth=1, log_level="CRITICAL")
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+        model.submit(Command("a", "READ", tenant_id="T0", size_kb=1))
+        model.submit(Command("b", "READ", tenant_id="T0", size_kb=1))
+
+        seen = []
+        previous = None
+
+        def watcher():
+            nonlocal previous
+            while True:
+                state = model.fsm_state["accept"]
+                if state != previous:
+                    seen.append(state)
+                    previous = state
+                yield env.timeout(1)
+
+        env.process(watcher())
+        env.run(until=40)
+        self.assertEqual(model.fsm_state["accept"], "BACKPRESSURE", "the second command was not held")
+
+        model.pending["T0"].clear()
+        env.run(until=80)
+
+        resumption = seen[seen.index("BACKPRESSURE") :]
+        self.assertIn("READY", resumption, "BACKPRESSURE -> READY was never taken")
+        self.assertLess(
+            resumption.index("READY"),
+            resumption.index("ENQUEUE"),
+            "the queue-full command went straight to ENQUEUE",
+        )
+
     def test_completion_idle_scheduler_waits_instead_of_selecting(self):
         """An idle scheduler costs nothing, and the declared path is phase-flat.
 
@@ -77,12 +165,12 @@ class TestCompletionIpModel(unittest.TestCase):
             model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
 
             def arrive(at=phase, target=model):
-                yield env.timeout(at)
+                yield env.timeout(target.reset_latency + at)
                 target.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
 
             env.process(arrive())
             env.run(until=300)
-            latencies.append(model.completed[0][0] - phase)
+            latencies.append(model.completed[0][0] - model.reset_latency - phase)
 
         self.assertEqual(set(latencies), {4 + 8 + 5 + 4}, "the declared path still varies with arrival phase")
 
@@ -144,6 +232,34 @@ class TestCompletionIpModel(unittest.TestCase):
         self.assertGreater(model.metrics["tenant_inactive_stalls"], 0)
         self.assertEqual(len(model.pending["T0"]), 1)
 
+    def test_completion_select_tenant_returns_to_idle_when_candidate_loses_eligibility(self):
+        """SELECT_TENANT -> IDLE on candidate_lost_eligibility, via a declared API.
+
+        tenant_select costs 8 cycles at model defaults, and any_eligible_tenant
+        is sampled against live, mutable state a caller can legitimately change
+        through configure_tenant while a select is already in flight. Reached
+        here with no misuse -- no direct dict write -- to show the edge is
+        inherent to the design: the candidate the select was chasing can
+        evaporate out from under it before the select completes.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, log_level="CRITICAL")
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        env.run(until=9)
+        self.assertEqual(model.fsm_state["completion_scheduler"], "SELECT_TENANT", "select had not yet started")
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+
+        env.run(until=20)
+        self.assertEqual(model.completed, [], "the command completed despite losing eligibility mid-select")
+        self.assertEqual(model.metrics["stalls"], 1)
+        self.assertEqual(model.fsm_state["completion_scheduler"], "IDLE")
+
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        env.run(until=60)
+        self.assertEqual([command.cmd_id for _, command in model.completed], ["r0"], "eligibility never recovered")
+
     def test_completion_scheduler_stalls_when_tenant_goes_inactive(self):
         env = simpy.Environment()
         model = CompletionIpModel(
@@ -151,13 +267,74 @@ class TestCompletionIpModel(unittest.TestCase):
         )
         model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
         model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
-        env.run(until=2)
+        env.run(until=2 + model.reset_latency)
         self.assertEqual(model.metrics["accepted_commands"], 1)
-        model.tenant_alive["T0"] = False
+        model.set_tenant_alive("T0", False)
         env.run(until=12)
         self.assertEqual(model.completed, [])
         self.assertGreater(model.metrics["tenant_inactive_stalls"], 0)
         self.assertEqual(len(model.pending["T0"]), 1)
+
+    def test_completion_set_tenant_alive_stops_the_spin_a_raw_write_would_leave(self):
+        """set_tenant_alive keeps eligible_tenants in sync, so IDLE stays quiescent.
+
+        A raw `model.tenant_alive[tenant_id] = False` bypasses eligibility
+        refresh entirely: eligible_tenants keeps a phantom True entry, and the
+        scheduler spins IDLE -> SELECT_TENANT -> IDLE forever, re-taking the
+        tenant_inactive_stalls increment on every poll -- reviewer's round-five
+        repro measured 1998 of them by t=2000 with no API but configure_tenant
+        and a raw write. set_tenant_alive refreshes eligibility, so the one
+        select already in flight when liveness changes is the last one: after
+        it, T0 is out of eligible_tenants and the scheduler is genuinely idle,
+        not polling.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+        )
+        model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
+        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=4))
+        env.run(until=2 + model.reset_latency)
+        model.set_tenant_alive("T0", False)
+
+        env.run(until=2000)
+        self.assertNotIn("T0", model.eligible_tenants, "a dead tenant was left in the eligible set")
+        self.assertLessEqual(
+            model.metrics["tenant_inactive_stalls"],
+            2,
+            "the scheduler kept polling a tenant eligibility should have excluded",
+        )
+        self.assertEqual(model.fsm_state["completion_scheduler"], "IDLE")
+
+    def test_completion_credit_tokens_makes_a_now_eligible_tenant_selectable_again(self):
+        """credit_tokens keeps eligible_tenants in sync in the other direction.
+
+        A raw `model.tokens[tenant_id][...] = ...` write bypasses eligibility
+        refresh the same way a raw tenant_alive write does: eligible_tenants
+        keeps a phantom False entry, and a command that should now complete
+        per qos.insufficient_token_behavior (command_remains_pending_until_refill)
+        never does, because IDLE -> SELECT_TENANT is never retaken for a
+        tenant nothing ever re-evaluated. credit_tokens refreshes eligibility,
+        so the pending command completes once enough tokens are back on every
+        axis it needs.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(
+            env, service_latency=1, tenant_select_latency=1, token_check_latency=1, emit_latency=1
+        )
+        model.configure_tenant("T0", read=2, write=0, read_bw=8, write_bw=0)
+        model.submit(Command("w0", "WRITE", tenant_id="T0", size_kb=4))
+        env.run(until=20)
+        self.assertEqual(model.completed, [], "a command completed without the tokens it needed")
+        self.assertNotIn("T0", model.eligible_tenants, "a tenant with no write tokens was still eligible")
+
+        model.credit_tokens("T0", write=5.0, write_bw=20.0)
+        env.run(until=40)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.completed],
+            ["w0"],
+            "the command never completed after tokens were restored",
+        )
 
     def test_completion_step_functional_debits_and_pops_ready_command(self):
         env = simpy.Environment()
@@ -181,11 +358,11 @@ class TestCompletionIpModel(unittest.TestCase):
         model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
         model.pending["T0"].append(Command("r0", "READ", tenant_id="T0", size_kb=4))
 
-        model.tenant_alive["T0"] = False
+        model.set_tenant_alive("T0", False)
         self.assertIsNone(model.step_functional())
         self.assertEqual(model.metrics["tenant_inactive_stalls"], 1)
 
-        model.tenant_alive["T0"] = True
+        model.set_tenant_alive("T0", True)
         model.set_completion_ready(False)
         self.assertIsNone(model.step_functional())
         self.assertEqual(model.metrics["output_stalls"], 1)
@@ -311,8 +488,16 @@ class TestCompletionIpModel(unittest.TestCase):
         env = simpy.Environment()
         model = CompletionIpModel(env, log_level="CRITICAL")
         model.configure_tenant("T0", read=9, write=9, read_bw=90, write_bw=90)
-        model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
 
+        # Submitted once reset has deasserted. The declared path is measured
+        # "after command becomes service-ready", and a command handed to an IP
+        # still in RESET waits for it -- that cycle is the reset's, not the
+        # path's.
+        def submit_after_reset():
+            yield env.timeout(model.reset_latency)
+            model.submit(Command("r0", "READ", tenant_id="T0", size_kb=1))
+
+        env.process(submit_after_reset())
         busy = []
 
         def watcher():
@@ -325,12 +510,13 @@ class TestCompletionIpModel(unittest.TestCase):
 
         self.assertEqual(len(model.completed), 1)
         completed_at = model.completed[0][0]
+        path_cost = completed_at - model.reset_latency
         # enqueue 4 + tenant_select 8 + token_check 5 + emit 4 = 21, the figure
         # the DLD states in its end-to-end table and again in its sequential
         # dependency. The enqueue is on the critical path because the scheduler
         # waits in IDLE until a tenant is eligible, and a tenant cannot become
         # eligible before its command has been enqueued.
-        self.assertEqual(completed_at, 4 + 8 + 5 + 4)
+        self.assertEqual(path_cost, 4 + 8 + 5 + 4)
 
         held = [now for now, count in busy if count]
         self.assertEqual(
@@ -422,7 +608,7 @@ class TestCompletionIpModel(unittest.TestCase):
             log_level="CRITICAL",
         )
         model.configure_tenant("T0", read=2, write=2, read_bw=8, write_bw=8)
-        model.tokens["T0"].update({"read": 0.0, "write": 0.0, "read_bw": 0.0, "write_bw": 0.0})
+        model.credit_tokens("T0", read=0.0, write=0.0, read_bw=0.0, write_bw=0.0)
 
         # restore_base_tokens is declared on ASSESS_USAGE -> REFILL_BASE, which
         # completes at window + usage_assessment = 120.

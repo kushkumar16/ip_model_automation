@@ -122,6 +122,11 @@ fsm_processes:
         condition: candidate_found
         actions: [peek_candidate]
         latency_cycles: 1
+      - from: SELECT_TENANT
+        to: IDLE
+        condition: candidate_lost_eligibility
+        actions: [increment_stall]
+        latency_cycles: 1
       - from: CHECK_TOKENS
         to: EMIT
         condition: required_tokens_available_and_output_ready
@@ -136,6 +141,16 @@ fsm_processes:
         to: SELECT_TENANT
         condition: more_candidates
         actions: [pop_candidate, publish_completion, update_metrics]
+        latency_cycles: 1
+      - from: EMIT
+        to: IDLE
+        condition: no_more_candidates
+        actions: []
+        latency_cycles: 1
+      - from: STALL_OUTPUT
+        to: EMIT
+        condition: output_ready
+        actions: []
         latency_cycles: 1
       - from: EMIT
         to: STALL_OUTPUT
@@ -315,11 +330,17 @@ test_scenarios:
     expected_performance_properties: [write_iops_tokens_reduced, read_iops_tokens_unchanged]
     fsm_coverage: [accept.ENQUEUE, completion_scheduler.CHECK_TOKENS, completion_scheduler.EMIT]
   - name: token_starvation_blocks_completion
-    description: A tenant with insufficient base tokens cannot complete until refill.
+    description: A tenant with zero tokens on every axis its traffic needs is not selected until eligible again.
     input_sequence: [T0_WRITE_4K_WITH_ZERO_TOKENS]
     expected_functional_behavior: [completion_not_emitted]
+    expected_performance_properties: [tenant_excluded_from_eligible_set]
+    fsm_coverage: [completion_scheduler.IDLE]
+  - name: partial_tokens_reach_wait_tokens
+    description: A tenant holding some tokens, but not enough for its head command, is selected and stalls at the token check.
+    input_sequence: [T0_READ_8K_WITH_PARTIAL_BW_TOKENS]
+    expected_functional_behavior: [completion_not_emitted]
     expected_performance_properties: [token_stall_incremented]
-    fsm_coverage: [completion_scheduler.WAIT_TOKENS]
+    fsm_coverage: [completion_scheduler.CHECK_TOKENS, completion_scheduler.WAIT_TOKENS]
   - name: output_backpressure_holds_completion
     description: Ready completion remains pending while completion output is blocked.
     input_sequence: [T0_READ_4K, cpl_ready_low]

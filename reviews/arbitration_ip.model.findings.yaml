@@ -1,254 +1,86 @@
 ip: arbitration_ip
 kind: model
-template_sha256: adfdea8a3317a0728292db9e69f5ba19c76a65bd8efc02b1e17e65b2cee2dc63
-model_sha256: fd5dafdc6a8351fc54208f05e240d976fddc4f644c0214d4e94ccc5719d9eee5
-tests_sha256: 0c182e1d2e49004f23f4c9c15f0b9c57f16f420ddbd39ff94170377503535a9f
+template_sha256: a2bdf51f3f327b4a9c1b084837350a639054028cb3a354c80ca6b6b49d3e4f96
+model_sha256: d8ff64aae2d1dbac56cac6b58ffb9a9f5f88858dba2394d820372064cd365a68
+tests_sha256: da6d31c6cf6848917ed9b275412796bd68fed23f01577c9a65c46631e9708466
 findings:
-- id: M22
-  class: fsm_structure
-  severity: high
-  claim: >-
-    PORT_SCAN commits to the first *pending* port and never reconsiders it, so a port whose only
-    pending tenant is ineligible blocks the other port forever: with port0/T0 credit-blocked and an
-    eligible command sitting in port1/T2/SQ0, the model ran 400 cycles with zero grants and issued
-    nothing at all until T0's credit was restored.
-  template: >-
-    templates/arbitration_ip.template.yaml:125-129 declares PORT_SCAN -> TENANT_SCAN with
-    `condition: eligible_port_found`, not `port_pending`; :73 and :81 give every command
-    `valid_conditions: [port_pending, tenant_pending, sq_pending, tenant_alive, downstream_ready]`, so
-    tenant liveness/credit is part of what makes a candidate valid, and :51-61 makes arbitration_ip
-    the checker of it (`qos_credit_if ... the eligibility result decides whether the candidate may be
-    granted`, `eligibility_owner: arbitration_ip_check_only` at :276). :238-241 declares
-    `port_mode: dual` with both ports carrying commands, :271-273 declares
-    `hierarchy: [port, tenant, sq]` with `ports: {port0: 1, port1: 1}`, and :365 declares the
-    invariant "Weighted round-robin order is deterministic for equal bitmap availability".
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:272-276 - `_select_port` returns the first port whose
-    *bitmap* is set and knows nothing about tenant eligibility. :393-396 then stalls the whole pass
-    when `_select_tenant` (:278-290, which does correctly pass over an ineligible tenant *within* a
-    port) returns None, and :361 restarts the loop, which calls `_select_port` again. The port pointer
-    only moves in policy_update (:507) and policy_update only runs on a grant (:501), so a port that
-    can never grant is also a port whose pointer never advances.
-  why: >-
-    Measured by execution on a scratch copy (PYTHONDONTWRITEBYTECODE=1, `__pycache__` cleared), model
-    defaults, `fsm_state` replaced by a dict recording every assignment against `env.now`. Stimulus:
-    `set_tenant_credit("T0", read_iops_credit=False)`, one command in port0/T0/SQ0 and one in
-    port1/T2/SQ0. Result at t=400: `selection_trace` empty, `issued` empty, metrics
-    `{eligibility_rejections: 33, stalls: 33, no_tenant_pending_stalls: 33}`, the arbiter cycling
-    IDLE(1) -> PORT_SCAN(4) -> TENANT_SCAN(6) -> STALL(1) on port0 thirty-three times and never once
-    reaching port1. Restoring T0's credit at t=400 released both commands (issued t=431 and t=452),
-    which is what proves the port1 command was eligible and merely unreachable. Head-of-line blocking
-    of one port by another is not something the template describes anywhere: the declared edge out of
-    PORT_SCAN is conditioned on an *eligible* port, and a scan that gave up on port0 would have found
-    port1 eligible on the same pass. No test covers this because every eligibility test
-    (tests/test_arbitration_ip.py:354-391) uses `port_mode="single"` with both tenants on port0, which
-    exercises exactly the level where the model does fall through. Mutation check that the port level
-    is otherwise held: making `_select_port` return the *last* pending port fails
-    test_arbitration_weighted_order_across_four_tenants, so port ordering is tested - only this
-    fall-through is not.
-- id: M23
-  class: fsm_structure
-  severity: medium
-  claim: >-
-    arbiter_main takes the declared IDLE -> PORT_SCAN edge with its declared condition
-    `any_port_pending` false, so an idle model spins IDLE -> PORT_SCAN -> STALL every 6 cycles, paying
-    the 4-cycle port_scan to discover what the bitmap it just refreshed already said, and the declared
-    `stalls` / `no_port_pending_stalls` metrics count elapsed idle time rather than arbitration events.
-  template: >-
-    templates/arbitration_ip.template.yaml:120-124 declares `from: IDLE, to: PORT_SCAN,
-    condition: any_port_pending, actions: [update_pending_bitmaps], latency_cycles: 1`, and :102-103
-    describes IDLE as "Wait for queue activity or downstream availability". IDLE has no other declared
-    exit and no declared self-loop. :294-296 declares `source: port_pending_bitmap, gates:
-    arbiter_main.PORT_SCAN, stall_reason: no_port_pending` - the bitmap is declared as the *gate* on
-    entering the scan, not as something the scan discovers. :380 lists `stalls` and
-    `no_port_pending_stalls` among the declared metrics, and :316 prices port_scan at 4 cycles.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:369-383 - IDLE is entered, one of two timeouts is
-    charged, and PORT_SCAN is entered unconditionally; `self.port_pending_bitmap` is not consulted
-    until `_select_port()` at :384, after `port_scan` has been charged at :383. The stall then runs
-    through `_stall("no eligible port", "no_port_pending_stalls")` at :388, incrementing both `stalls`
-    and `no_port_pending_stalls` (:341-342).
-  why: >-
-    Measured by execution with the recording `fsm_state` described in M22. Empty model, defaults, 60
-    cycles: RESET(0-1), IDLE(1-2), then PORT_SCAN(2-6) STALL(6-7) IDLE(7-8) PORT_SCAN(8-12)
-    STALL(12-13) ... - a 6-cycle period, 10 PORT_SCAN entries, 40 of the 60 simulated cycles spent
-    inside PORT_SCAN with `port_pending_bitmap == {'port0': False, 'port1': False}` and
-    `bitmap_dirty == False`, ending at `{stalls: 10, no_port_pending_stalls: 10}`. One command over 200
-    cycles gives `{grants: 1, issued_commands: 1, stalls: 27, no_port_pending_stalls: 26}` - twenty-six
-    of the twenty-seven stalls are idling, not backpressure or contention, so a reader comparing
-    `stalls` to `grants` reads a 27:1 stall ratio for a model that never contended for anything. The
-    same shape was filed and fixed one level down (round three's TENANT_SCAN -> SQ_SCAN taken with
-    `eligible_tenant_found` unevaluated; this round's commit moved each decision into its own state
-    and left IDLE's). INTERPRETIVE on the remedy, not the measurement: a free-running poll is a normal
-    way to model an arbiter, and ingress_queue_if (:14-25, `mode: wait_for_response`,
-    `wait_points: [arbiter_main.SQ_SCAN]`, `resumes_on: queue_valid`, `timeout: indefinite`) is the
-    declaration a blocking implementation would rest on - but nothing in the model blocks on a queue
-    event anywhere, and `tools/check_wait_model_coverage.py` cannot see that, because it passes as soon
-    as the model *assigns* the wait-point state. If the polling shape is correct, the template's IDLE
-    condition and the stall metric it feeds need to say so.
-- id: M24
-  class: test_asserts_wrong_thing
-  severity: medium
-  claim: >-
-    test_arbitration_issue_pipeline_charges_its_declared_latencies documents and reasons about the
-    1-cycle selection_accept but measures no span that contains it: deleting the
-    `yield self.env.timeout(self.latency["selection_accept"])` from the model entirely leaves all 16
-    tests green, and with it the declared 38-cycle new_command_to_issue path becomes 37 unobserved.
-  template: >-
-    templates/arbitration_ip.template.yaml:158-162 declares `from: WAIT_SELECTION, to:
-    READ_PENDING_COUNT, condition: selected_sq_valid, actions: [accept_selected_sq],
-    latency_cycles: 1`; :330 prices `selection_accept` at 1 cycle / 2 ns; :351-354 declares
-    new_command_to_issue at 38 cycles over eleven operations of which selection_accept is one.
-  model: >-
-    tests/test_arbitration_ip.py:235-253 measures four spans, all of them between `entered[...]`
-    timestamps from READ_PENDING_COUNT onward, and closes with
-    `downstream_requests[0]["time"] - entered["READ_PENDING_COUNT"] == 3 + 4 + 2 + 3 + 2`. Neither
-    `entered["WAIT_SELECTION"]` nor the grant time appears in any assertion, so the one cycle the
-    docstring at :212-217 calls out ("the 1-cycle selection_accept sits on the edge *into* it, leaving
-    WAIT_SELECTION") and the comment at :250-252 relies on ("selection_accept is already paid by
-    then") is never read back. The model charges it correctly at
-    src/ip_model_automation/arbitration_ip.py:424.
-  why: >-
-    Mutation on a scratch copy, PYTHONDONTWRITEBYTECODE=1 with `__pycache__` removed before each run
-    and the edit asserted to be present in the file on disk before running: deleting line 424 outright
-    leaves `Ran 16 tests ... OK`. Raising the default from 1 to 9 does fail five tests, but not one of
-    them is the latency test - they are tests whose `env.run(until=...)` windows are simply too short
-    (`0 not greater than 0`, `0 != 1`, an SQ ordering list), so the value is fenced in by unrelated
-    deadlines rather than pinned by an assertion, and any change that shortens it is invisible. The
-    contrast that makes this checkable: moving the accept back inside READ_PENDING_COUNT (round three's
-    M18 shape) *does* fail this test, and only this test, with
-    `'READ_PENDING_COUNT': 4 != 'READ_PENDING_COUNT': 3` - so the round-three fix landed the placement
-    and the state span, and left the cycle itself unheld. The end-to-end declared path is where it
-    matters: the suite currently pins 23 cycles of arbiter (:158-196) and 14 cycles of pipeline from
-    READ_PENDING_COUNT, and nothing joins them, so 37 and 38 are indistinguishable to the tests.
-- id: M25
-  class: fsm_structure
-  severity: low
-  claim: >-
-    The pipeline takes an undeclared ISSUE_REQUEST -> ISSUE_STALL transition when issue_ready is low at
-    the end of the request; ISSUE_REQUEST's only declared exit is to UPDATE_BURST.
-  template: >-
-    templates/arbitration_ip.template.yaml:183-187 declares `from: ISSUE_REQUEST, to: UPDATE_BURST,
-    condition: downstream_accepts_request, actions: [pop_issue_count_commands], latency_cycles: 3` and
-    nothing else out of ISSUE_REQUEST. The only declared way into ISSUE_STALL is :178-182,
-    `from: CALC_ISSUE_COUNT, condition: issue_count_zero, actions: [increment_burst_stall]` - a
-    different reason with a different metric. The interface note at :45 does describe the behaviour in
-    prose ("while `issue_ready` is low the pipeline holds in `ISSUE_STALL`"), and :303-305 declares
-    `min_burst_and_pending_count gates issue_pipeline.ISSUE_REQUEST`; the transition list was never
-    updated to match.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:449-461 - the re-drive loop added by round two's M11 fix
-    re-tests `self.output_ready` after the request completes and, when it is low, falls back into the
-    `while not self.output_ready` head at :450-455, which sets ISSUE_STALL.
-  why: >-
-    Reproduced from my own recorded trace rather than taken from the tool: defaults, one command,
-    `set_issue_ready(False)` while the pipeline is in ISSUE_REQUEST gives ISSUE_REQUEST(32-35) ->
-    ISSUE_STALL(35-36-...-52) -> ISSUE_REQUEST(52-55) -> UPDATE_BURST(55-57).
-    `python tools/check_declared_transitions.py arbitration_ip` now reports
-    `UNDECLARED issue_pipeline: ISSUE_REQUEST -> ISSUE_STALL` unstarred - i.e. out of a state that
-    *does* have a declared exit, unlike the ISSUE_STALL -> * edges it stars. It appears in that output
-    for the first time this round only because round four's new test is the first stimulus that drives
-    it; the edge itself has existed since the M11 fix. Low severity because the model's behaviour is
-    what the interface note asks for and what the invariants at :361 and :366 require - the
-    disagreement is almost certainly the template's transition list to repair, not the model - but it
-    is a real disagreement between the two documents and the tool now reports it on every run.
-- id: M26
-  class: fsm_structure
-  severity: low
-  claim: >-
-    policy_update charges 2 cycles in UPDATE_AGE for the declared `age_unselected_queues` action and
-    performs no ageing: no age state exists anywhere in the model or its Command type.
-  template: >-
-    templates/arbitration_ip.template.yaml:206-210 declares `from: UPDATE_POINTER, to: UPDATE_AGE,
-    condition: pointer_updated, actions: [age_unselected_queues]`; :325 prices `age_update` at 2
-    cycles / 4 ns; :196-197 gives policy_update the purpose "Maintains round-robin, weighted order, and
-    age metadata"; :28 declares `age` among the fields of the ingress_queue_if `command_peek` transaction.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:513-515 - UPDATE_AGE is entered, `age_update` is charged,
-    `metrics["age_updates"]` is incremented, and nothing else happens. `grep -n age
-    src/ip_model_automation/arbitration_ip.py` returns only the latency entry (:125), that timeout
-    (:514) and that counter (:515); `Command` (src/ip_model_automation/common.py:36-48) has no `age`
-    field, and no selection path reads one.
-  why: >-
-    This is the same shape as round two's M12 (`PORT_SCAN -> STALL taken without its declared
-    increment_no_eligible_stall action`), which was accepted and fixed, so a declared action the model
-    never performs is treated as reportable in this IP. Measured: with unique per-operation latencies
-    the UPDATE_AGE span is exactly `age_update` and the selection order is identical whether ages exist
-    or not, because nothing consumes them. Low severity and I nearly did not file it: no declared
-    scenario, invariant or state variable reads an age (:358 lists no age variable), so nothing
-    observable changes today - what it costs is that `policy_update`'s stated purpose is two-thirds
-    implemented and the 2 cycles are charged for an action that is not taken.
-- id: M27
-  class: fsm_structure
-  severity: medium
-  claim: >-
-    A candidate rejected on credit leaves TENANT_SCAN by an undeclared TENANT_SCAN -> STALL edge and
-    one whose SQ is in flight leaves SQ_SCAN by an undeclared SQ_SCAN -> STALL edge; the template
-    declares STALL only from PORT_SCAN and gives the other two scans no exit but forward. The stall is
-    also counted under the bitmap's name (`no_tenant_pending_stalls` / `no_sq_pending_stalls`) while
-    that bitmap says the tenant or SQ *is* pending.
-  template: >-
-    templates/arbitration_ip.template.yaml:125-144 declares three forward edges out of the scan chain
-    and exactly one stall edge, `PORT_SCAN -> STALL` on `no_eligible_port` with
-    `actions: [increment_no_eligible_stall]`. :297-302 ties `stall_reason: no_tenant_pending` to
-    `source: tenant_pending_bitmap` and `stall_reason: no_sq_pending` to `source: sq_pending_bitmap`;
-    :380 declares both counters as metrics.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:393-396 and :400-403 - both call the new `_stall()`
-    helper (:330-344), which sets `arbiter_main = STALL` from whichever scan state was current, and
-    both pass a metric named for a bitmap that is not what rejected the candidate.
-  why: >-
-    Unchanged since round three (M17's structural half); re-filed for a ruling, not re-derived. The
-    timing half of M17 *is* fixed - a credit-blocked candidate now stalls after port_scan + tenant_scan
-    = 10 cycles instead of paying all three scans - and the model's own `_stall` docstring (:331-338)
-    now records the gap as a contract gap. I confirmed only that both edges are still taken
-    (TENANT_SCAN -> STALL at t=12, 24, 36 ... with `tenant_pending_bitmap["port0"]["T0"] == True`, and
-    SQ_SCAN -> STALL at t=145 with `sq_pending_bitmap["T0"]["SQ0"] == True` while the SQ was in flight)
-    and that `tools/check_declared_transitions.py arbitration_ip` still reports both as UNDECLARED.
-- id: M28
-  class: wait_model_impl
-  severity: medium
-  claim: >-
-    An `issue_ready` dip that goes low and returns high strictly inside the 3-cycle ISSUE_REQUEST
-    window is invisible: no ISSUE_STALL, the command is popped on schedule and
-    `output_backpressure_cycles` stays 0.
-  template: >-
-    templates/arbitration_ip.template.yaml:39-45 declares issue_if `mode: wait_for_ack_inline`,
-    `wait_points: [issue_pipeline.ISSUE_REQUEST]`, `resumes_on: issue_ready`, with the note "while
-    `issue_ready` is low the pipeline holds in `ISSUE_STALL` and no command leaves the ingress queue";
-    :291-293 declares `source: issue_if.issue_ready ... stall_reason: output_backpressure`; :380 lists
-    `output_backpressure_cycles`.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:449-461 - `output_ready` is sampled at the top of the
-    re-drive loop and again after `yield self.env.timeout(self.latency["issue"])`, and nowhere in
-    between.
-  why: >-
-    Unchanged since round three (M20); re-filed for a ruling, not re-derived. Confirmed still true by
-    one trace at defaults: ISSUE_REQUEST occupies t=32-35, driving `set_issue_ready(False)` at t=32 and
-    `True` at t=33 gives states ... CALC_ISSUE_COUNT(30-32) -> ISSUE_REQUEST(32-35) ->
-    UPDATE_BURST(35-37) with no ISSUE_STALL, the command popped at t=35 and
-    `output_backpressure_cycles == 0`. Same UNCERTAIN / INTERPRETIVE caveat as round three: sampling
-    `ready` at the end of a held request is a defensible reading of a valid_ready handshake, and if a
-    person rules that reading correct it needs to be written down, because the template's note is
-    phrased "while `issue_ready` is low".
-- id: M29
-  class: timing_mismatch
-  severity: low
-  claim: >-
-    The issue_slots resource declares `latency_cycles: 1` and the model charges it nowhere, and the
-    declared 38-cycle end-to-end path has no room for it either.
-  template: >-
-    templates/arbitration_ip.template.yaml:221-227 declares `issue_slots` with `capacity: 1` and
-    `latency_cycles: 1`; :152 and :195 name it in `resources_used` for both processes; :351-354
-    declares new_command_to_issue at 38 cycles over eleven operations that already sum to 38.
-  model: >-
-    src/ip_model_automation/arbitration_ip.py:111-128 - no latency-table entry for issue_slots and no
-    timeout attributable to it. The capacity of 1 *is* modelled, by `simpy.Store(env, capacity=1)` at
-    :130, which is why this is a timing finding and not a capacity one.
-  why: >-
-    Unchanged since round three (M21); re-filed for a ruling, not re-derived. Re-measured once to
-    confirm the path still leaves no room: a command arriving at t=100 at defaults gives IDLE at t=103
-    and the downstream request recorded at t=141 - exactly 38 cycles, and the per-operation charge map
-    (measured by giving every declared operation a distinct prime latency) accounts for all 38 with
-    nothing spare. Whether the cycle belongs off the critical path, on it with the 38 restated, or
-    struck from the template is a person's call, as it was for completion_ip's M14.
+  - id: M36
+    class: fsm_structure
+    severity: high
+    claim: >-
+      Once a candidate has been granted and handed to issue_pipeline but is
+      still awaiting downstream issue_ready (or is stuck on a burst stall),
+      its SQ stays marked pending in the bitmaps arbiter_main scans, so the
+      arbiter repeatedly re-runs PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL
+      on that same already-granted candidate every cycle for the entire
+      length of the stall, instead of taking the template's declared
+      issue_ready-gated stall path or sitting idle.
+    template: >-
+      templates/arbitration_ip.template.yaml:333-336 declares
+      `gating_relationships: - source: issue_if.issue_ready, gates:
+      arbiter_main.ISSUE, stall_reason: output_backpressure` -- issue_ready is
+      meant to gate the arbiter itself with its own distinct stall reason --
+      and templates/arbitration_ip.template.yaml:103 describes IDLE as "Wait
+      for queue activity or downstream availability."
+    model: >-
+      src/ip_model_automation/arbitration_ip.py:268-284 (`_update_pending_bitmaps`
+      marks an SQ pending from queue occupancy alone, never checking
+      `self.inflight_sqs`) together with lines 442-452 (the IDLE wait loop
+      blocks only on `any(self.port_pending_bitmap.values())`, with no check
+      of downstream/issue readiness or in-flight status). Confirmed by
+      grep that arbiter_main never records an `output_backpressure` stall
+      reason anywhere: `output_backpressure_cycles` is only incremented inside
+      `issue_pipeline`, at lines 595 and 642.
+    why: >-
+      Verified by tracing arbiter_main's FSM state with two commands already
+      granted and in flight while issue_ready stayed low: the arbiter looped
+      PORT_SCAN(4) -> TENANT_SCAN(6) -> SQ_SCAN(8) -> STALL(1) ->
+      PORT_SCAN(4) -> STALL(1) continuously for the whole backpressure window,
+      producing (after ~59 cycles of backpressure) stalls=15,
+      no_sq_pending_stalls=8, no_port_pending_stalls=7, even though every
+      pending SQ was already granted and nothing new could be selected. This
+      charges the declared per-scan cycle costs repeatedly for no reason and
+      inflates `stalls`/`no_sq_pending_stalls`/`no_port_pending_stalls` --
+      metrics performance_model.metrics lists as arbitration-health counters
+      -- under a condition (output backpressure, and equally a burst stall,
+      since a burst-stalled SQ is left in `inflight_sqs` the same way) the
+      template explicitly separates out with its own `output_backpressure`
+      stall reason that the model never produces. None of the existing
+      backpressure/burst-stall tests
+      (tests/test_arbitration_ip.py:286-334, :410-436, :470-498, :861-891)
+      check arbiter_main's own stall metrics during the hold, only the
+      eventual outcome and issue_pipeline's stall counters, so this churn
+      goes unnoticed. In a longer stall or a busier queue this scales with
+      the stall duration and misrepresents both simulated arbitration timing
+      and the reported stall-reason breakdown.
+  - id: M37
+    class: scenario_gap
+    severity: low
+    claim: >-
+      The weighted_order_four_tenants test_scenario's declared fsm_coverage
+      names `arbiter_main.ISSUE`, a state that does not exist anywhere in
+      arbiter_main's declared `states` list or in the model's `fsm_state`
+      tracking, so the test written for this scenario neither exercises nor
+      could exercise it.
+    template: >-
+      templates/arbitration_ip.template.yaml:439 (`fsm_coverage: [...
+      arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]`)
+      names `arbiter_main.ISSUE`; arbiter_main's actual declared states, at
+      templates/arbitration_ip.template.yaml:99-115, are `RESET, IDLE,
+      PORT_SCAN, TENANT_SCAN, CREDIT_REFILL, SQ_SCAN, GRANT, STALL` -- no
+      `ISSUE` among them. The same phantom state also appears in
+      `gating_relationships` (line 335) and `sequential_paths.policy_update_path`
+      (line 331), suggesting a state was renamed (to GRANT) without these
+      three references being updated to match.
+    model: >-
+      tests/test_arbitration_ip.py:138-153
+      (test_arbitration_weighted_order_across_four_tenants, the test written
+      for this scenario) records only `selection_trace`, never
+      `fsm_state["arbiter_main"]`, and could not check ISSUE coverage even if
+      it tried to: `self.fsm_state` at src/ip_model_automation/arbitration_ip.py:162-166
+      only ever takes the eight states the template itself declares for
+      arbiter_main.
+    why: >-
+      A reader consulting this scenario's fsm_coverage to see what a passing
+      test verifies is told it touches a state that has never existed in the
+      model, silently overstating this scenario's coverage.

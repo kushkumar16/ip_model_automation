@@ -32,7 +32,7 @@ the stronger one. The normalization stamp remains the human judgement.
 Usage::
 
     python tools/check_review_findings.py                # every IP with findings
-    python tools/check_review_findings.py sram_ctrl_ip   # one IP
+    python tools/check_review_findings.py arbitration_ip # one IP
     python tools/check_review_findings.py --list         # what is outstanding
 """
 
@@ -347,7 +347,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.list:
-        print("normalization reviews:")
+        print("review findings:")
         for line in outstanding_summary():
             print(line)
         return 0

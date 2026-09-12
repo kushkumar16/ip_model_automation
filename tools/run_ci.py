@@ -70,7 +70,7 @@ EXTRA_CHECKS: list[tuple[str, str, str]] = [
     (
         "review_findings",
         "python tools/check_review_findings.py",
-        "every recorded normalization review finding is fixed or dismissed by name",
+        "every recorded model or normalization review finding is fixed or dismissed by name",
     ),
 ]
 

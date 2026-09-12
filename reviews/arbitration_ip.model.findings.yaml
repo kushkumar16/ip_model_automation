@@ -1,44 +1,63 @@
 ip: arbitration_ip
 kind: model
 template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
-model_sha256: 72169824bb52b15e3ea2751076292abfc2645c7ed84355439ff255305ddc97b2
-tests_sha256: ca044288a45e36f36e5850976f9f396b2ce383b1e214e18d265b1eac1f8f1bea
+model_sha256: a3125e19382d056d2378e0ef3299ef07018c0adbc3f29e70457e9023b85a7580
+tests_sha256: ec43a6128411339396fc927fc7c23f985f51ffd2ad5436012577d7036ba50f38
 findings:
-  - id: M40
+  - id: M41
     class: fsm_structure
     severity: high
     claim: >-
-      _has_actionable_work only excludes SQs already claimed in inflight_sqs; it does not
-      exclude SQs whose only pending tenant is permanently ineligible (tenant_alive false,
-      or otherwise never self-clearing), so IDLE's wait never actually blocks for that
-      candidate. The arbiter instead retakes the declared IDLE -> PORT_SCAN -> TENANT_SCAN
-      -> STALL -> IDLE cycle forever, contradicting STALL -> IDLE's declared
-      returns_to_the_wait semantics and the documented invariant that an idle arbiter
-      "costs nothing and records nothing".
+      When TENANT_SCAN's weighted-order pick for a port is a tenant whose only
+      pending SQ(s) are already claimed in inflight_sqs, SQ_SCAN's failure for
+      that one tenant marks the *entire port* tried for the rest of the sweep
+      (arbiter_main.py's outer loop) instead of trying a different, actually
+      eligible tenant on the same port -- so a genuinely grantable tenant can
+      be starved indefinitely behind another tenant's stalled in-flight SQ,
+      even while _has_actionable_work() correctly reports that real work
+      exists the whole time.
     template: >-
-      templates/arbitration_ip.template.yaml arbiter_main transitions: STALL -> IDLE
-      (condition returns_to_the_wait, line 157-161) and IDLE's own description "Wait for
-      queue activity or downstream availability" (line 102-103); performance_model.metrics
-      declares stalls/no_tenant_pending_stalls (line 423) as meaningful counters, not an
-      unbounded polling artifact.
+      templates/arbitration_ip.template.yaml:132-136 declares
+      "TENANT_SCAN -> SQ_SCAN, condition: eligible_tenant_found", and
+      templates/arbitration_ip.template.yaml:152-156 declares
+      "SQ_SCAN -> STALL, condition: no_eligible_sq" as the failure edge for
+      one candidate tenant, not for the whole port; qos.weights
+      (templates/arbitration_ip.template.yaml:315-318) assigns unequal
+      per-tenant weights to tenants that share a port (e.g. port0's T0 and
+      T1), so a port-level FSM whose "no_eligible_sq" for its top-weighted
+      tenant permanently forecloses that port's other, lower-weighted but
+      genuinely eligible tenants is not what the declared per-candidate
+      hierarchy (qos.hierarchy: [port, tenant, sq]) describes.
     model: >-
-      src/ip_model_automation/arbitration_ip.py:286-313 (_has_actionable_work, keys only on
-      inflight_sqs, never on tenant_credit/tenant_alive) and the IDLE loop at
-      arbitration_ip.py:481-491 that blocks on _arbiter_wake only while
-      _has_actionable_work() is false. Verified empirically on a scratch run: enqueuing one
-      command for a tenant with tenant_alive=False (matching
-      tests/test_arbitration_ip.py:459-468's test_arbitration_dead_tenant_does_not_trigger_a_refill
-      setup, which asserts only credit_refills==0 and issued==[] and never checks stalls)
-      gives metrics["stalls"] == 37 at t=300, 124 at t=1000, 374 at t=3000 -- growing
-      linearly and unboundedly instead of the arbiter genuinely blocking in IDLE.
+      src/ip_model_automation/arbitration_ip.py:366-378 (_select_tenant picks
+      a tenant using only tenant_pending_bitmap and credit eligibility, with
+      no check that the tenant has any non-inflight SQ) together with
+      src/ip_model_automation/arbitration_ip.py:587-590 (`if sq_id is None:
+      tried_ports.add(port_id); yield from self._stall(...); continue` --
+      this marks the whole port tried and never retries _select_tenant for a
+      different tenant of the same port, and never resets tried_ports even
+      when this was the only pending port, unlike the analogous
+      "tenant_id is None" branch a few lines above it).
     why: >-
-      A permanently ineligible tenant's queued work should leave the arbiter genuinely
-      idle (as the fixed-for-inflight case in round six/seven already does for
-      already-granted candidates) rather than repeatedly paying real declared port_scan +
-      tenant_scan + backpressure_retry cycles and inflating stall metrics without bound.
-      Any consumer reading stalls/no_tenant_pending_stalls as arbitration-event counts
-      (their declared purpose) is misled, and the simulated timing of a run containing a
-      dead tenant is wrong: cycles are spent scanning and stall counters accumulate for a
-      candidate the model itself has already determined can never be granted until an
-      external tenant_alive change, exactly the class of waste this stage's own history
-      (re-scanning a candidate that cannot proceed) was created to catch.
+      Reproduced empirically: with weights={"T0": 4, "T1": 1} on a single
+      port, enqueue one T0/SQ0 command while issue_ready is held false (so
+      once granted, (T0, SQ0) sits in inflight_sqs, unresolved, for a long
+      bounded window), then enqueue a second T0/SQ0 command and a fully
+      independent, fully-eligible T1/SQ0 command on the same port. Because
+      T0's weighted-round-robin pointer only advances on an actual grant (via
+      policy_update), and T0 was never actually re-granted (SQ_SCAN keeps
+      failing for it), TENANT_SCAN keeps re-selecting T0 every sweep. Over a
+      390-cycle window the model recorded grants stuck at 1 (only the
+      original T0 grant), stalls climbing to 26 (13 no_sq_pending_stalls, 13
+      no_port_pending_stalls) from the repeating
+      PORT_SCAN -> TENANT_SCAN(T0) -> SQ_SCAN(fail) -> STALL ->
+      PORT_SCAN(fails, port already tried) -> STALL cycle, and T1's command
+      was never even looked at by TENANT_SCAN -- despite
+      model._has_actionable_work() correctly returning True the entire time
+      (it does exclude in-flight SQs from "actionable", but that exclusion
+      never reaches _select_tenant/_select_sq's per-sweep candidate choice).
+      T1 was granted only once T0's in-flight SQ finally cleared externally.
+      A weighted arbiter that can indefinitely starve one fully-eligible
+      tenant behind a different tenant's stalled in-flight SQ, on the very
+      same port, is simulating the wrong arbitration outcome for exactly the
+      qos.weights/qos.hierarchy this template declares.

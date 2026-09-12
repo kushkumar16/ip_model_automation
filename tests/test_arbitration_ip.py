@@ -695,6 +695,37 @@ class TestArbitrationIpModel(unittest.TestCase):
             "the second port was reached without its own PORT_SCAN dwell",
         )
 
+    def test_arbitration_a_stalled_tenant_does_not_starve_a_sibling_on_the_same_port(self):
+        """SQ_SCAN's failure excludes the tenant it tried, not the whole port.
+
+        Round nine's M41: a heavily-weighted tenant whose only pending SQ is
+        in flight used to make the model mark the *entire port* tried for
+        the rest of the sweep, since a tenant's own weighted-round-robin
+        pointer only advances on a real grant -- so it keeps winning
+        TENANT_SCAN every sweep, and a lighter-weighted but genuinely
+        grantable sibling tenant on the same port is starved indefinitely,
+        even though the model's own accounting knows real work exists the
+        whole time.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(
+            env,
+            weights={"ports": {"port0": 1}, "tenants": {"T0": 4, "T1": 1}, "sqs": {}},
+            log_level="CRITICAL",
+        )
+        model.set_issue_ready(False)
+        model.enqueue(Command("t0a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=30)
+        self.assertEqual(model.metrics["grants"], 1, "T0's first command was not granted")
+
+        model.enqueue(Command("t0b", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("t1a", "READ", port_id="port0", tenant_id="T1", sq_id="SQ0"))
+        env.run(until=390)
+
+        self.assertEqual(
+            model.metrics["grants"], 2, "T1 was never granted while T0's in-flight SQ starved its own port"
+        )
+
     def test_arbitration_each_port_is_stalled_under_its_own_true_reason(self):
         """The stall reason reflects the candidate that actually produced it.
 

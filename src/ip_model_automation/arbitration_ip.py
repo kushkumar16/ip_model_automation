@@ -363,8 +363,10 @@ class ArbitrationIpModel:
         """
         return [port_id for port_id in self.port_policy.scan() if self.port_pending_bitmap.get(port_id, False)]
 
-    def _select_tenant(self, port_id: str) -> Optional[str]:
+    def _select_tenant(self, port_id: str, exclude: frozenset = frozenset()) -> Optional[str]:
         for tenant_id in self.tenant_policies[port_id].scan():
+            if tenant_id in exclude:
+                continue
             if not self.tenant_pending_bitmap[port_id].get(tenant_id, False):
                 continue
             # The sample taken at TENANT_SCAN. An ineligible tenant is passed
@@ -467,6 +469,14 @@ class ArbitrationIpModel:
         # permanently excluded), a refill changes credit (every port might
         # work now), and a grant changes queue/burst state.
         tried_ports: set = set()
+        # `tried_tenants` is the same idea one level down (M41): a tenant
+        # whose only pending SQ(s) are in-flight must not keep winning
+        # TENANT_SCAN for its port every time that port is retried this
+        # sweep, or its weighted-order pointer -- which only a real grant
+        # advances -- lets it starve every other, genuinely grantable tenant
+        # sharing the same port. Keyed per port_id (not shared across ports)
+        # and cleared at the exact same points as `tried_ports`.
+        tried_tenants: dict = {}
         while True:
             # IDLE is held on every pass, so it is occupied rather than merely
             # assigned, and the loop is re-entered here after a grant -- which is
@@ -509,6 +519,7 @@ class ArbitrationIpModel:
                 yield self._arbiter_wake
                 self._arbiter_wake = None
                 tried_ports = set()
+                tried_tenants = {}
 
             # Each scan decides its own level, in the state the template
             # declares that decision on: the port at the end of PORT_SCAN, the
@@ -536,10 +547,13 @@ class ArbitrationIpModel:
             # everything pending has already been tried and failed this sweep.
             if port_id is None:
                 tried_ports = set()
+                tried_tenants = {}
                 yield from self._stall("no eligible port", "no_port_pending_stalls")
                 continue
 
-            tenant_id, sq_id = yield from self._scan_candidate(port_id)
+            tenant_id, sq_id = yield from self._scan_candidate(
+                port_id, exclude_tenants=frozenset(tried_tenants.get(port_id, ()))
+            )
 
             if tenant_id is None:
                 tried_ports.add(port_id)
@@ -575,6 +589,7 @@ class ArbitrationIpModel:
                         tenant_id, sq_id = yield from self._scan_candidate(port_id)
                         if tenant_id is None:
                             tried_ports = set()
+                            tried_tenants = {}
                             yield from self._stall("no eligible tenant", "no_tenant_pending_stalls")
                             continue
                     else:
@@ -585,7 +600,13 @@ class ArbitrationIpModel:
                     continue
 
             if sq_id is None:
-                tried_ports.add(port_id)
+                # M41: this candidate tenant, not the whole port, is what
+                # just failed -- every one of its pending SQs is in flight.
+                # Excluding only the tenant (not tried_ports.add(port_id))
+                # lets the next pass at this same port try a different,
+                # perhaps genuinely grantable tenant instead of abandoning
+                # the port for the rest of the sweep.
+                tried_tenants.setdefault(port_id, set()).add(tenant_id)
                 yield from self._stall("no eligible sq", "no_sq_pending_stalls")
                 continue
 
@@ -596,8 +617,9 @@ class ArbitrationIpModel:
             yield self.policy_update_q.put(selection)
             self.metrics["grants"] += 1
             tried_ports = set()
+            tried_tenants = {}
 
-    def _scan_candidate(self, port_id: str):
+    def _scan_candidate(self, port_id: str, exclude_tenants: frozenset = frozenset()):
         """Evaluate one port's tenant and SQ, charging exactly their own costs.
 
         Returns `(tenant_id, sq_id)`: `tenant_id` is `None` if TENANT_SCAN
@@ -608,10 +630,16 @@ class ArbitrationIpModel:
         that dwell themselves, because CREDIT_REFILL -> TENANT_SCAN retries a
         tenant scan for the port already under consideration, without picking
         a new one.
+
+        `exclude_tenants` is M41's fix: a tenant this port has already tried
+        and failed at SQ_SCAN this sweep (every one of its pending SQs
+        in-flight) must not win TENANT_SCAN again on the next attempt at the
+        same port, or a heavily-weighted tenant stuck on one in-flight SQ
+        starves every other, genuinely grantable tenant sharing its port.
         """
         self._set_fsm_state("arbiter_main", "TENANT_SCAN")
         yield self.env.timeout(self.latency["tenant_scan"])
-        tenant_id = self._select_tenant(port_id)
+        tenant_id = self._select_tenant(port_id, exclude=exclude_tenants)
         if tenant_id is None:
             return None, None
 

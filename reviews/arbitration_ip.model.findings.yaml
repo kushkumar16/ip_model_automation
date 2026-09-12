@@ -1,89 +1,44 @@
 ip: arbitration_ip
 kind: model
-template_sha256: 121ed1efed9e0179dbbb462ad79a7408a67adcba43fe16e9abdab980d42f6d7b
-model_sha256: 503e56eeda162129e6fe4b1f39e30af3568c3fdc1a913af4821329a127785ee9
-tests_sha256: 0fd181e788117f3ac7b8dbff9ba5125a61fd1d36fb78bbd4a3e709d046b9a848
+template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
+model_sha256: 72169824bb52b15e3ea2751076292abfc2645c7ed84355439ff255305ddc97b2
+tests_sha256: ca044288a45e36f36e5850976f9f396b2ce383b1e214e18d265b1eac1f8f1bea
 findings:
-  - id: M38
+  - id: M40
     class: fsm_structure
     severity: high
     claim: >-
-      arbiter_main is only ever woken by enqueue(); when a burst-limited
-      partial issue frees an SQ's in-flight claim while genuine pending work
-      remains in it, or when configure_burst() later replenishes the burst
-      that was limiting it, nothing wakes the blocked arbiter, so the
-      declared IDLE -> PORT_SCAN transition on any_port_pending is never
-      taken and the residual commands are never granted.
+      _has_actionable_work only excludes SQs already claimed in inflight_sqs; it does not
+      exclude SQs whose only pending tenant is permanently ineligible (tenant_alive false,
+      or otherwise never self-clearing), so IDLE's wait never actually blocks for that
+      candidate. The arbiter instead retakes the declared IDLE -> PORT_SCAN -> TENANT_SCAN
+      -> STALL -> IDLE cycle forever, contradicting STALL -> IDLE's declared
+      returns_to_the_wait semantics and the documented invariant that an idle arbiter
+      "costs nothing and records nothing".
     template: >-
-      templates/arbitration_ip.template.yaml:102-103 (arbiter_main.IDLE:
-      "Wait for queue activity or downstream availability.") and its
-      transition at templates/arbitration_ip.template.yaml:122-126 (from:
-      IDLE, to: PORT_SCAN, condition: any_port_pending).
+      templates/arbitration_ip.template.yaml arbiter_main transitions: STALL -> IDLE
+      (condition returns_to_the_wait, line 157-161) and IDLE's own description "Wait for
+      queue activity or downstream availability" (line 102-103); performance_model.metrics
+      declares stalls/no_tenant_pending_stalls (line 423) as meaningful counters, not an
+      unbounded polling artifact.
     model: >-
-      src/ip_model_automation/arbitration_ip.py:407-410 defines
-      _wake_arbiter(), which is called from exactly one site: enqueue() at
-      :198. issue_pipeline's inflight release and bitmap refresh at :701-702
-      (after a partial, burst-limited issue) and configure_burst() at
-      :201-214 both change whether any_port_pending should now hold for a
-      port the arbiter has already given up on, but neither calls
-      _wake_arbiter(); arbiter_main blocks solely on that event at :481-491.
+      src/ip_model_automation/arbitration_ip.py:286-313 (_has_actionable_work, keys only on
+      inflight_sqs, never on tenant_credit/tenant_alive) and the IDLE loop at
+      arbitration_ip.py:481-491 that blocks on _arbiter_wake only while
+      _has_actionable_work() is false. Verified empirically on a scratch run: enqueuing one
+      command for a tenant with tenant_alive=False (matching
+      tests/test_arbitration_ip.py:459-468's test_arbitration_dead_tenant_does_not_trigger_a_refill
+      setup, which asserts only credit_refills==0 and issued==[] and never checks stalls)
+      gives metrics["stalls"] == 37 at t=300, 124 at t=1000, 374 at t=3000 -- growing
+      linearly and unboundedly instead of the arbiter genuinely blocking in IDLE.
     why: >-
-      Once a candidate is granted, its SQ is marked inflight (:379) so IDLE
-      correctly stops re-scanning it while it is genuinely in flight -- the
-      round-six fix holds. But when issue_pipeline can only issue part of
-      that SQ's backlog because a burst counter (device, tenant, or SQ) is
-      below the pending count, it discards the SQ from inflight_sqs and
-      refreshes the bitmaps at :701-702 while real pending work is still
-      sitting there, unclaimed -- exactly the state any_port_pending's
-      declared transition exists to catch. Because nothing wakes the
-      arbiter at that point (or later, when configure_burst() replenishes
-      the exhausted counter), it never re-checks, and the remaining
-      commands sit in their queue forever with no stall recorded and no
-      error raised. Verified empirically: enqueuing 8 commands into one SQ
-      with sq_burst=3 (device and tenant burst left ample) issues exactly 3
-      commands (grants stays at 1) and then issues none of the remaining 5
-      even after running to t=1000 and separately replenishing that SQ's
-      burst back to 1024 afterward; only an unrelated enqueue() on a
-      different port -- which happens to call _wake_arbiter() as a side
-      effect -- lets the arbiter notice the same untouched residual work
-      and drain it. The full suite in tests/test_arbitration_ip.py passes
-      throughout (30/30), and no existing test drives a burst limit low
-      enough, relative to pending count, to leave residual work behind a
-      completed grant.
-  - id: M39
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      The downstream_backpressure test_scenario declares fsm_coverage:
-      [arbiter_main.STALL], but neither the model nor the test written for
-      it ever puts arbiter_main into STALL for this scenario: the granted
-      SQ becomes inflight and IDLE's own in-flight exclusion keeps
-      arbiter_main parked in IDLE for the whole backpressure period
-      instead.
-    template: >-
-      templates/arbitration_ip.template.yaml:452-457 (test_scenarios ->
-      downstream_backpressure), specifically fsm_coverage:
-      [arbiter_main.STALL] at line 457.
-    model: >-
-      tests/test_arbitration_ip.py:892-922
-      (test_arbitration_downstream_backpressure_holds_selected_sq, the test
-      named for this scenario) never asserts or reaches
-      arbiter_main.STALL. tests/test_arbitration_ip.py:470-495
-      (test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq)
-      explicitly asserts model.metrics["stalls"] == 0 and
-      model.fsm_state["arbiter_main"] == "IDLE" for the same shape of
-      scenario, confirming arbiter_main.STALL is unreachable here.
-    why: >-
-      A reader trusting the template's fsm_coverage claim would believe
-      this scenario exercises arbiter_main.STALL; it does not, and given
-      the in-flight exclusion the model correctly implements
-      (_has_actionable_work at src/ip_model_automation/arbitration_ip.py:286-313),
-      it cannot: once the single candidate is granted and marked inflight,
-      the arbiter finds no other actionable work and blocks in IDLE rather
-      than entering PORT_SCAN/TENANT_SCAN/SQ_SCAN and stalling. Verified
-      empirically by instrumenting transition_counts for arbiter_main.STALL
-      across the scenario's own input_sequence (T0_READ then
-      issue_ready_low, and the reverse ordering): it stays at 0 in both
-      orderings for the whole run while the command remains correctly
-      queued, so the declared fsm_coverage line is stale against the
-      model's current, correct behaviour.
+      A permanently ineligible tenant's queued work should leave the arbiter genuinely
+      idle (as the fixed-for-inflight case in round six/seven already does for
+      already-granted candidates) rather than repeatedly paying real declared port_scan +
+      tenant_scan + backpressure_retry cycles and inflating stall metrics without bound.
+      Any consumer reading stalls/no_tenant_pending_stalls as arbitration-event counts
+      (their declared purpose) is misled, and the simulated timing of a run containing a
+      dead tenant is wrong: cycles are spent scanning and stall counters accumulate for a
+      candidate the model itself has already determined can never be granted until an
+      external tenant_alive change, exactly the class of waste this stage's own history
+      (re-scanning a candidate that cannot proceed) was created to catch.

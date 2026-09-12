@@ -467,6 +467,31 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
         self.assertEqual(model.issued, [])
 
+    def test_arbitration_idle_does_not_rescan_a_permanently_dead_tenant(self):
+        """A dead tenant's queue leaves the arbiter genuinely idle, not spinning.
+
+        Round eight's M40: `_has_actionable_work` excluded an in-flight SQ
+        but not a dead tenant's, so IDLE broke out of its wait every time,
+        paying a real port_scan + tenant_scan + backpressure_retry cycle
+        forever with nothing that could ever be granted -- `stalls` grew
+        without bound for as long as the run lasted. A dead tenant does not
+        self-clear on its own the way credit exhaustion does, so nothing
+        short of `set_tenant_credit(tenant_alive=True)` should ever wake
+        this arbiter for it, and once that happens it must actually notice.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", tenant_alive=False)
+        model.enqueue(Command("held", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=1000)
+
+        self.assertEqual(model.metrics["stalls"], 0, "arbiter_main kept re-scanning a permanently dead tenant")
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
+
+        model.set_tenant_credit("T0", tenant_alive=True)
+        env.run(until=1050)
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["held"], "reviving the tenant never woke it")
+
     def test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq(self):
         """A port whose only pending work is already granted stays quiet.
 
@@ -677,13 +702,23 @@ class TestArbitrationIpModel(unittest.TestCase):
         sweep used to record only the last one tried: the loop kept
         `tenant_id`/`sq_id` as variables overwritten on every candidate, and
         branched on their final values alone. port0's tenant is genuinely
-        dead (a real no_tenant_with_active_traffic) and port1's SQ is
-        genuinely already in flight (a real no_eligible_sq); both reasons
-        must be counted, not just whichever was tried last.
+        out of credit (a real no_tenant_with_active_traffic -- alive, so
+        `_has_actionable_work` still counts it, unlike a dead tenant) and
+        port1's SQ is genuinely already in flight (a real no_eligible_sq);
+        both reasons must be counted, not just whichever was tried last.
+
+        A dead tenant used to stand in for port0's failure here, before
+        round eight's M40: `_has_actionable_work` now excludes a dead
+        tenant's queue from "actionable" the same way it already excludes
+        an in-flight SQ's, so a genuinely dead port0 would leave nothing
+        actionable at all and the arbiter would never enter PORT_SCAN in
+        this scenario. Credit exhaustion is deliberately not excluded --
+        TENANT_SCAN reaching an exhausted tenant is what triggers
+        CREDIT_REFILL -- so it still reaches this stall for real.
         """
         env = simpy.Environment()
         model = ArbitrationIpModel(env, log_level="CRITICAL")
-        model.set_tenant_credit("T0", tenant_alive=False)
+        model.set_tenant_credit("T0", read_iops_credit=False)
         model.enqueue(Command("a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
         model.enqueue(Command("b", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
         model.inflight_sqs.add(("T2", "SQ0"))

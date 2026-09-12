@@ -226,6 +226,11 @@ class ArbitrationIpModel:
             raise ValueError(f"qos_credit_if declares no field(s) {sorted(unknown)}")
         self.tenant_credit[tenant_id].update(fields)
         self.logger.debug("credit status tenant=%s %s", tenant_id, dict(self.tenant_credit[tenant_id]))
+        # tenant_alive is the one field _has_actionable_work reads (M40):
+        # reviving a tenant can turn previously-inactionable, bitmap-pending
+        # work actionable again, and nothing else would wake an arbiter
+        # already blocked in IDLE to notice.
+        self._wake_arbiter()
 
     def sample_eligibility(self, tenant_id: str) -> bool:
         """The eligibility_check sample taken during candidate evaluation.
@@ -284,22 +289,35 @@ class ArbitrationIpModel:
         self.metrics["bitmap_updates"] += 1
 
     def _has_actionable_work(self) -> bool:
-        """Whether some pending SQ is not already claimed by an in-flight grant.
+        """Whether some pending SQ is not already claimed, and could be granted.
 
         `port_pending_bitmap` answers "is the queue non-empty" -- exactly
         what its declared action (`update_pending_bitmaps`) computes, and
         exactly what TENANT_SCAN and SQ_SCAN still key off, unchanged. It
-        does not answer whether any of that queued work is new: a port whose
-        only queued commands are already granted and awaiting issue is
-        bitmap-pending but has nothing for a scan to find, since
-        `_select_sq` already refuses every one of them (M31-M33's
-        `inflight_sqs` exclusion). IDLE uses this instead of the raw bitmap
-        so it does not pay a full PORT_SCAN -> TENANT_SCAN -> SQ_SCAN ->
-        STALL cycle -- charging real declared scan costs -- on a port that
-        can only ever end in that same refusal; PORT_SCAN's own candidate
-        list and TENANT_SCAN/SQ_SCAN's own stalls are untouched, so a port
-        with a genuine mix of in-flight and fresh work still reaches and
-        stalls at exactly the level that is actually short.
+        does not answer whether any of that queued work is new or ever
+        grantable:
+
+        - A port whose only queued commands are already granted and
+          awaiting issue is bitmap-pending but has nothing for a scan to
+          find, since `_select_sq` already refuses every one of them
+          (M31-M33's `inflight_sqs` exclusion).
+        - A port whose only queued commands belong to a tenant with
+          `tenant_alive` false is bitmap-pending but can never be granted
+          either, until an external `set_tenant_credit` call revives it --
+          `_active_tenants`/`_select_tenant` already refuse it the same
+          way. A tenant merely out of credit is different and stays
+          actionable: TENANT_SCAN reaching it is what triggers
+          CREDIT_REFILL, the self-clearing path M31-M33 fixed, and treating
+          it as inactionable here would stop that from ever running.
+
+        IDLE uses this instead of the raw bitmap so it does not pay a full
+        PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL cycle -- charging real
+        declared scan costs, without bound, since neither condition above
+        self-clears on its own -- on a port that can only ever end in the
+        same refusal. PORT_SCAN's own candidate list and TENANT_SCAN/
+        SQ_SCAN's own stalls are untouched, so a port with a genuine mix of
+        excluded and fresh work still reaches and stalls at exactly the
+        level that is actually short.
         """
         for port_id, port_cfg in self.topology.items():
             if self.port_mode == "single" and port_id != "port0":
@@ -307,6 +325,8 @@ class ArbitrationIpModel:
             if not self.port_pending_bitmap.get(port_id, False):
                 continue
             for tenant_id, sqs in port_cfg["tenants"].items():
+                if not self.tenant_credit[tenant_id]["tenant_alive"]:
+                    continue
                 for sq_id in sqs:
                     if self.queues[port_id][tenant_id][sq_id] and (tenant_id, sq_id) not in self.inflight_sqs:
                         return True

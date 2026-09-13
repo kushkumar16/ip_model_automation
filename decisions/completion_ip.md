@@ -111,3 +111,13 @@ reviewer pass that (correctly, per its contract) does not read this file. Same
 gap, same reasoning, same conclusion — `credit_tokens` and `set_tenant_alive`,
 added since M33 was written, apply synchronously for the same reason
 `configure_tenant` does, and are named in this round's version alongside it.
+
+**M37 dismissed:** the same finding as M33/M36 above, re-filed again by a
+fresh reviewer pass with no access to this file, this time also verified
+empirically (`configure_tenant` observed taking effect while `refill` sat in
+`WAIT_WINDOW`, nowhere near the declared `REFILL_BASE` wait point) and noting
+no test drives `configure_tenant`/`set_tenant_alive`/`credit_tokens`
+concurrently with a running refill process. Same gap, same reasoning, same
+conclusion as M33: closing it for real needs `qos_config_if` to have its own
+always-running acknowledger, independent of a refill window a caller may
+never start — nothing about that has changed since M33/M36.

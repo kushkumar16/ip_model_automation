@@ -1093,9 +1093,12 @@ the model and the tests that pass against it, which is exactly the blind spot
 means"). `completion_ip`'s own review history is real: round five filed six
 findings against it, all fixed or dismissed by name in
 `decisions/completion_ip.md`; a fresh reviewer with no memory of those fixes
-then filed one more against the result, dismissed by cross-reference to the
-finding it re-discovered. Nothing about steps 1–6 would have caught any of
-them.
+then filed one more against the result (round six's `M36`), dismissed by
+cross-reference to the finding it re-discovered. A third independent round
+(eleven) found the exact same gap yet again (`M37`), dismissed the same way —
+three separate reviewers, none aware of the others' work, landing on the same
+real, deliberately-unclosed gap. Nothing about steps 1–6 would have caught any
+of them.
 
 One footnote: this walkthrough shows the manual, stage-by-stage path so each
 artifact is visible. Today the automated runner does all of it from the DLD drop
@@ -1103,13 +1106,14 @@ onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
-*As of 2026-09-12: two review_model rounds have run against both IPs. Round
-five filed 12 findings and round six filed 3 more against the result; all 15
-are now fixed or dismissed by name in `decisions/<ip>.md`. `python
-tools/run_ci.py` runs all nine repo-wide gates in about a minute, and the
-pre-push hook runs it before anything leaves the machine — a fresh
-`review_model` pass is the one gate still owed at any given moment, since
-fixing a finding is what marks its review stale in the first place.*
+*As of 2026-09-13: `arbitration_ip` has been through `review_model` rounds
+five through ten, and `completion_ip` through rounds five, six, and eleven.
+Every finding any of these rounds filed is fixed or dismissed by name in
+`decisions/<ip>.md`, and both IPs' latest reviews are current — not stale —
+as of this writing. `python tools/run_ci.py` runs all nine repo-wide gates in
+about a minute, and the pre-push hook runs it before anything leaves the
+machine; fixing a finding is what marks its own review stale again, so that
+gate is only ever owed right after a fix lands, not as a standing debt.*
 
 ## Modeled IPs (2)
 
@@ -1128,12 +1132,14 @@ either one. The subsystem wiring stage inside `validate_dld_flow.py` also
 checks zero subsystems.
 
 `review_model` is a different story: both IPs have real review history now.
-`reviews/arbitration_ip.model.findings.yaml` and
-`reviews/completion_ip.model.findings.yaml` each carry a round-six pass — run
-as an isolated agent with no memory of the fixes that had just closed round
-five, and no access to `decisions/*.md` or round five's findings — and every
-finding either review filed, across both rounds, is fixed or dismissed by name
-in `decisions/<ip>.md`. That is not the same claim as "these models are
+`reviews/arbitration_ip.model.findings.yaml` carries round ten's pass and
+`reviews/completion_ip.model.findings.yaml` carries round eleven's —
+`arbitration_ip` has been through six independent rounds since round five
+(five through ten), `completion_ip` three (five, six, eleven), each run as an
+isolated agent with no memory of the session that had just fixed the round
+before it, and no access to `decisions/*.md` or any prior round's findings.
+Every finding any of these rounds filed is fixed or dismissed by name in
+`decisions/<ip>.md`. That is not the same claim as "these models are
 faithful": an empty findings list, or a fully-resolved one, records that a
 reviewer looked and reported nothing further, which is a weaker claim than
 "faithful" and must never be read as the stronger one. It is, at least, the

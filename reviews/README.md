@@ -87,15 +87,17 @@ line must not clear two different findings.
 
 ## Current contents
 
-`arbitration_ip.model.findings.yaml` and `completion_ip.model.findings.yaml`
-each carry a round-six `review_model` pass, run as an isolated subagent with no
-memory of the session that had just finished fixing round five and no access to
-`decisions/*.md` or round five's findings — reading the current template/model/
-tests for each IP cold. `completion_ip`'s one finding is dismissed (the same
-`qos_config_if` wait-model gap as round five's `M33`, re-filed under a fresh id
-by a reviewer that could not know it had already been litigated).
-`arbitration_ip`'s two findings have since been fixed, which marks that review
-stale — a fresh `review_model` pass is owed before
-`tools/check_review_findings.py` reports both IPs current.
+`arbitration_ip.model.findings.yaml` carries round ten's `review_model` pass
+(finding `M42`, a test coverage gap, fixed) and `completion_ip.model.findings.yaml`
+carries round eleven's (finding `M37`, dismissed by cross-reference — the same
+`qos_config_if` wait-model gap first filed as round five's `M33` and re-filed
+again at round six's `M36`, found a third time by a reviewer with no memory of
+either prior round). `arbitration_ip` has been through six independent rounds
+since round five (five through ten) and `completion_ip` three (five, six,
+eleven), each run as an isolated subagent with no memory of the session that
+had just fixed the round before it and no access to `decisions/*.md` or any
+prior round's findings. Every finding either IP's rounds have filed is fixed or
+dismissed by name in `decisions/<ip>.md`, and both files are current (not
+stale) as of the round each most recently ran.
 
 No `normalization` review has been run against either live IP yet.

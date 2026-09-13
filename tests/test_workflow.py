@@ -4,6 +4,7 @@ import importlib.util
 import io
 import logging
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -946,6 +947,126 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 prompt = pipeline.AGENT_PROMPT_BUILDERS[name]("probe_ip")
                 self.assertIn("probe_ip", prompt)
 
+    def _load_pipeline(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("auto_ip_pipeline", repo_root / "tools" / "auto_ip_pipeline.py")
+        pipeline = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline
+        spec.loader.exec_module(pipeline)
+        return pipeline
+
+    def test_next_finding_id_continues_the_shared_sequence(self):
+        """The id an isolated reviewer is handed, computed from the real checkout.
+
+        Ids share one numeric sequence across an ip's whole review history
+        (reviews/README.md), regardless of kind or prefix, so this must look at
+        decisions/<ip>.md *and* every reviews/<ip>.*.findings.yaml -- not just
+        the one for the kind about to run.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+            pipeline.REPO_ROOT = root
+
+            # No record at all: default to the kind's conventional prefix.
+            self.assertEqual(pipeline.next_finding_id("probe_ip", "model"), "M1")
+            self.assertEqual(pipeline.next_finding_id("probe_ip", "normalization"), "F1")
+
+            (root / "decisions" / "probe_ip.md").write_text(
+                "**M5 dismissed:** a synthetic fixture, not a real finding.\n", encoding="utf-8"
+            )
+            (root / "reviews" / "probe_ip.model.findings.yaml").write_text(
+                "ip: probe_ip\nkind: model\nfindings:\n  - {id: M7}\n", encoding="utf-8"
+            )
+            # The normalization kind's next id still continues from M7, the
+            # highest number on record for this ip under any prefix or kind.
+            self.assertEqual(pipeline.next_finding_id("probe_ip", "normalization"), "M8")
+            self.assertEqual(pipeline.next_finding_id("probe_ip", "model"), "M8")
+
+    def test_review_worktree_hides_only_this_ips_own_record(self):
+        """The mechanism review_model/review_normalization now run inside.
+
+        A real git worktree, not a mock: `git worktree add` needs an actual
+        repository, and the point being proven -- that a plain file read of
+        decisions/<ip>.md fails inside it -- is exactly the thing a mock would
+        paper over.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+            (root / "decisions" / "probe_ip.md").write_text("**M1 dismissed:** not real.\n", encoding="utf-8")
+            (root / "decisions" / "other_ip.md").write_text("unrelated ip, must survive.\n", encoding="utf-8")
+            (root / "reviews" / "probe_ip.model.findings.yaml").write_text("findings: []\n", encoding="utf-8")
+            (root / "reviews" / "README.md").write_text("not ip-specific, must survive.\n", encoding="utf-8")
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+
+            pipeline.REPO_ROOT = root
+            worktree_dir = pipeline.provision_review_worktree("probe_ip")
+            try:
+                self.assertFalse((worktree_dir / "decisions" / "probe_ip.md").exists())
+                self.assertFalse((worktree_dir / "reviews" / "probe_ip.model.findings.yaml").exists())
+                # Only this ip's own record is removed -- everything else survives.
+                self.assertTrue((worktree_dir / "decisions" / "other_ip.md").exists())
+                self.assertTrue((worktree_dir / "reviews" / "README.md").exists())
+            finally:
+                pipeline.cleanup_review_worktree(worktree_dir)
+            self.assertFalse(worktree_dir.exists())
+            listing = subprocess.run(
+                ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
+            ).stdout
+            self.assertNotIn(str(worktree_dir), listing)
+
+    def test_isolated_review_dispatch_copies_back_only_the_findings_file(self):
+        """End to end: dispatch writes into the worktree, only the findings file
+        returns to the real reviews/ directory, and the worktree is cleaned up."""
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            (root / "reviews" / ".gitkeep").write_text("", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+
+            pipeline.REPO_ROOT = root
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            fake_agent = (
+                "mkdir -p reviews && "
+                "printf 'ip: probe_ip\\nkind: model\\nfindings: []\\n' > reviews/probe_ip.model.findings.yaml"
+            )
+            dispatched = pipeline.dispatch_isolated_review(fake_agent, "probe_ip", "review_model", "model", "prompt")
+            self.assertTrue(dispatched)
+            self.assertEqual(
+                (root / "reviews" / "probe_ip.model.findings.yaml").read_text(encoding="utf-8"),
+                "ip: probe_ip\nkind: model\nfindings: []\n",
+            )
+            listing = subprocess.run(
+                ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
+            ).stdout
+            self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
+
     def test_a_reviewers_gate_is_not_satisfied_by_its_own_absence(self):
         """The gate driving a reviewer must fail when no review has been run.
 
@@ -1271,6 +1392,104 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # The docx must carry a source stamp matching the current Markdown, so a
         # Markdown edit that forgets to re-sync the Word copy fails here.
         self.assertEqual(tool.check(), [], "project_overview.docx has drifted from project_overview.md")
+
+    def _load_report_review_status(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "report_review_status", repo_root / "tools" / "report_review_status.py"
+        )
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        return tool
+
+    def test_review_status_docs_are_in_sync(self):
+        """The generated block in both managed docs must match reality right now.
+
+        This is the gate `run_ci.py` runs (review_status_sync) — asserting it
+        here means a doc edited by hand without re-running
+        `report_review_status.py --write` fails the suite, not just a future CI
+        run.
+        """
+        tool = self._load_report_review_status()
+        self.assertEqual(tool.check(), [], "a managed doc's review-status block has drifted from reality")
+
+    def test_review_status_reports_stale_and_dismissed_state(self):
+        """The generator's core claims: staleness and the dismissed ledger.
+
+        Built from a synthetic IP rather than the two live ones, so this proves
+        the mechanism -- not just that today's arbitration_ip/completion_ip
+        state happens to look right.
+        """
+        tool = self._load_report_review_status()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for sub in ("templates", "reviews", "decisions", "src/ip_model_automation", "tests"):
+                (root / sub).mkdir(parents=True)
+            template_text, model_text, tests_text = "template v1\n", "model v1\n", "tests v1\n"
+            (root / "templates" / "probe_ip.template.yaml").write_text(template_text, encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text(model_text, encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text(tests_text, encoding="utf-8")
+            (root / "reviews" / "probe_ip.model.findings.yaml").write_text(
+                "ip: probe_ip\n"
+                "kind: model\n"
+                f"template_sha256: {tool.sha256_text(template_text)}\n"
+                f"model_sha256: {tool.sha256_text(model_text)}\n"
+                f"tests_sha256: {tool.sha256_text(tests_text)}\n"
+                "findings:\n"
+                "  - id: P1\n"
+                "    class: fsm_structure\n",
+                encoding="utf-8",
+            )
+            (root / "decisions" / "probe_ip.md").write_text(
+                "**P1 dismissed:** synthetic fixture, not a real finding.\n", encoding="utf-8"
+            )
+            tool.REPO_ROOT, tool.REVIEWS_DIR, tool.DECISIONS_DIR = root, root / "reviews", root / "decisions"
+
+            current = tool.generate()
+            self.assertIn("| `probe_ip` | model | current | P1 (dismissed) |", current)
+            self.assertIn("`probe_ip`: P1", current)
+
+            # Editing the model after the review is what the stage exists to catch.
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text(model_text + "edit\n", encoding="utf-8")
+            stale = tool.generate()
+            self.assertIn("stale — probe_ip.py changed since this review", stale)
+            self.assertIn("P1 (superseded)", stale)
+            # The dismissed ledger is durable -- it does not depend on staleness.
+            self.assertIn("`probe_ip`: P1", stale)
+
+    def test_review_status_check_catches_a_stale_managed_doc(self):
+        """`--check` must fail a doc whose block has drifted, and `--write` must fix it."""
+        tool = self._load_report_review_status()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for sub in ("templates", "reviews", "decisions", "src/ip_model_automation", "tests", "docs"):
+                (root / sub).mkdir(parents=True)
+            template_text, model_text, tests_text = "template v1\n", "model v1\n", "tests v1\n"
+            (root / "templates" / "probe_ip.template.yaml").write_text(template_text, encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text(model_text, encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text(tests_text, encoding="utf-8")
+            (root / "reviews" / "probe_ip.model.findings.yaml").write_text(
+                "ip: probe_ip\n"
+                "kind: model\n"
+                f"template_sha256: {tool.sha256_text(template_text)}\n"
+                f"model_sha256: {tool.sha256_text(model_text)}\n"
+                f"tests_sha256: {tool.sha256_text(tests_text)}\n"
+                "findings: []\n",
+                encoding="utf-8",
+            )
+            doc = root / "docs" / "status.md"
+            doc.write_text(f"# Status\n\n{tool.START_MARKER}\nstale placeholder\n{tool.END_MARKER}\n", encoding="utf-8")
+            tool.REPO_ROOT, tool.REVIEWS_DIR, tool.DECISIONS_DIR = root, root / "reviews", root / "decisions"
+            tool.MANAGED_DOCS = (doc,)
+
+            errors = tool.check()
+            self.assertTrue(any("status.md" in e and "stale" in e for e in errors), errors)
+
+            tool.write()
+            self.assertEqual(tool.check(), [])
+            self.assertIn("| `probe_ip` | model | current | none |", doc.read_text(encoding="utf-8"))
 
     @staticmethod
     def _synthetic_subsystem(members: str, connections: str) -> str:

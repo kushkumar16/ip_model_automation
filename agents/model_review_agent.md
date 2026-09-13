@@ -47,6 +47,20 @@ The DLD is deliberately **not** an input. Once promoted, the template is the
 source of truth for generation; a disagreement between template and DLD is a
 different review's job (`review_normalization`).
 
+## Isolation, enforced by the harness
+
+When `tools/auto_ip_pipeline.py` dispatches this stage, it runs in a throwaway
+git worktree with `decisions/<ip>.md` and every `reviews/<ip>.*.findings.yaml`
+removed from the working copy — not merely asked not to be read. A reviewer
+that can see what a prior round already dismissed for this exact model is
+grading against its own answer key, which is the loop this stage exists to
+break. `tools/auto_ip_pipeline.py`'s `next_finding_id()` computes the id to
+start from beforehand, from the real checkout, so the isolated review never
+needs (and cannot reach) the files that would otherwise answer it. This does
+not block `git log`/`git show`/`git blame` against the repository's shared
+history — do not run them against this ip's subject files either; if either
+removed file is what you were looking for, its absence is by design.
+
 ## What to report
 
 | Class | The failure |

@@ -69,8 +69,8 @@ open it directly, or copy it into slides/documents. The full narrative lives in
 
 <section id="d5">
   <h2>5. The repo-wide gate chain</h2>
-  <p class="desc">All nine gates <code>tools/run_ci.py</code> runs once, after every changed IP completes its own pipeline: the five harness <code>scope: repo</code> stages, plus four artifact guards (model provenance, DLD normalization fidelity, the Word overview, and review findings) that are deliberately not pipeline stages of their own.</p>
-  <img src="05_validation_gates.svg" alt="The nine repo-wide gates run_ci.py checks">
+  <p class="desc">All ten gates <code>tools/run_ci.py</code> runs once, after every changed IP completes its own pipeline: the five harness <code>scope: repo</code> stages, plus five artifact guards (model provenance, DLD normalization fidelity, the Word overview, review findings, and the generated review-status sync) that are deliberately not pipeline stages of their own.</p>
+  <img src="05_validation_gates.svg" alt="The ten repo-wide gates run_ci.py checks">
 </section>
 
 <section id="d6">

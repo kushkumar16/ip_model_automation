@@ -53,9 +53,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -357,16 +359,25 @@ def complete_template_prompt(ip_name: str, extra_context: str = "") -> str:
     )
 
 
-def _review_prompt(ip_name: str, kind: str, contract: str, inputs: list[str], extra_context: str) -> str:
+def _review_prompt(ip_name: str, kind: str, contract: str, inputs: list[str], next_id: str, extra_context: str) -> str:
     """Shared body for the two reviewer stages.
 
     Both say the same things because both run under the same rule, and the parts
     that are mechanical — id collisions, folded scalars, verifying your own output
     — are the parts that go wrong in practice rather than the judgement.
+
+    Dispatched in an isolated worktree (see ``dispatch_isolated_review``) with
+    this ip's own ``decisions/{ip}.md`` and ``reviews/{ip}.*.findings.yaml``
+    removed from the working copy — a reviewer with no memory of the session
+    that fixed the round before it must not be able to read what that session
+    already decided. ``next_id`` is computed by the dispatcher from the *real*
+    checkout, before isolation, for exactly this reason: the id-uniqueness
+    check is mechanical and does not need the review itself to see the record
+    it must not see.
     """
     return "\n".join(
         [
-            f"Work in the repository at {REPO_ROOT}.",
+            "Work in this repository checkout.",
             f"Follow the contract in {contract}. It governs this stage; read it first.",
             "",
             f"Task: run the review_{kind} stage for `{ip_name}`. Read these in full:",
@@ -374,10 +385,18 @@ def _review_prompt(ip_name: str, kind: str, contract: str, inputs: list[str], ex
             "",
             f"Write your result to reviews/{ip_name}.{kind}.findings.yaml, overwriting what is there.",
             "",
+            "This is an isolated review, on purpose: you have no memory of any session that",
+            f"worked on {ip_name} before now, and decisions/{ip_name}.md and any other",
+            f"reviews/{ip_name}.*.findings.yaml have been removed from this checkout — a fresh",
+            "reviewer that could read what was already dismissed would not be independent. If",
+            "either is missing, that is by design, not something to recover via git log/git",
+            "show/git blame against this repo's history; do not run them on this ip's subject",
+            "files.",
+            "",
             "Mechanical requirements, which are what usually go wrong:",
-            f"1. Finding ids must be unique across ALL of {ip_name}'s reviews, not just this one -"
-            f" a dismissal names an id, and one line must not clear two findings. Check every"
-            f" reviews/{ip_name}.*.findings.yaml that already exists, and decisions/{ip_name}.md.",
+            f"1. Start finding ids at {next_id} — already checked against every existing record",
+            f" for {ip_name} by the dispatcher, so you do not need (and cannot reach) the files",
+            " that would otherwise answer this.",
             "2. Compute the sha256 of each subject file yourself. Read"
             " tools/check_review_findings.py and use exactly the normalisation it uses, or the"
             " review reads as stale the moment it is written.",
@@ -395,17 +414,18 @@ def _review_prompt(ip_name: str, kind: str, contract: str, inputs: list[str], ex
     )
 
 
-def normalization_review_prompt(ip_name: str, extra_context: str = "") -> str:
+def normalization_review_prompt(ip_name: str, next_id: str = "F1", extra_context: str = "") -> str:
     return _review_prompt(
         ip_name,
         "normalization",
         "agents/normalization_review_agent.md",
         [f"dlds/{ip_name}_dld.src.md  (the author's original)", f"dlds/{ip_name}_dld.md  (the normalized document)"],
+        next_id,
         extra_context,
     )
 
 
-def model_review_prompt(ip_name: str, extra_context: str = "") -> str:
+def model_review_prompt(ip_name: str, next_id: str = "M1", extra_context: str = "") -> str:
     return _review_prompt(
         ip_name,
         "model",
@@ -415,6 +435,7 @@ def model_review_prompt(ip_name: str, extra_context: str = "") -> str:
             f"src/ip_model_automation/{ip_name}.py  (the model)",
             f"tests/test_{ip_name}.py  (its tests)",
         ],
+        next_id,
         extra_context,
     )
 
@@ -554,6 +575,134 @@ def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str)
 
 
 # --------------------------------------------------------------------------- #
+# Isolated review dispatch (review_model, review_normalization)
+# --------------------------------------------------------------------------- #
+#
+# Every other agent stage runs with cwd=REPO_ROOT: the same session that wrote
+# a model is trusted to also write its tests, because the gates -- not the
+# agent's own say-so -- decide whether the result is any good. A reviewer is
+# different by contract (agents/model_review_agent.md, .../normalization_
+# review_agent.md): it exists to catch what an agent grading its own homework
+# would miss, which requires it to actually not be able to see that homework.
+# Dispatching it with cwd=REPO_ROOT like every other stage would hand it full
+# read access to decisions/<ip>.md and every prior reviews/<ip>.*.findings.yaml
+# for the ip it is about to review -- exactly the record a fresh reviewer must
+# not be able to consult. This is that isolation, made structural instead of a
+# prompt asking nicely.
+
+FINDING_ID_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+DISMISSAL_ID_RE = re.compile(r"\*\*\s*([A-Za-z][\w.-]*)\s+(?:dismissed|fixed)\s*:?\s*\*\*", re.IGNORECASE)
+REVIEW_STAGE_KINDS = {"review_model": "model", "review_normalization": "normalization"}
+
+
+def existing_finding_ids(ip_name: str) -> set[str]:
+    """Every finding id on record for this ip, from decisions/<ip>.md and every
+    reviews/<ip>.*.findings.yaml (any kind) -- read from the real checkout,
+    before the isolated worktree is provisioned, precisely so the isolated
+    review itself never has to (and cannot) look this up."""
+    ids: set[str] = set()
+    decisions_path = REPO_ROOT / "decisions" / f"{ip_name}.md"
+    if decisions_path.is_file():
+        for match in DISMISSAL_ID_RE.finditer(decisions_path.read_text(encoding="utf-8")):
+            ids.add(match.group(1))
+    for findings_path in sorted((REPO_ROOT / "reviews").glob(f"{ip_name}.*.findings.yaml")):
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(findings_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - an unreadable prior file must not block dispatch
+            continue
+        if isinstance(data, dict):
+            for finding in data.get("findings") or []:
+                if isinstance(finding, dict) and isinstance(finding.get("id"), str):
+                    ids.add(finding["id"])
+    return ids
+
+
+def next_finding_id(ip_name: str, kind: str) -> str:
+    """The next finding id to hand an isolated reviewer for this ip.
+
+    Ids share one numeric sequence across an ip's whole review history (model
+    and normalization alike -- see reviews/README.md), so this takes the
+    highest number used under any prefix and continues it, defaulting to the
+    kind's conventional prefix (M / F) only when the ip has no prior findings
+    at all.
+    """
+    best_prefix, best_n = ("M" if kind == "model" else "F"), 0
+    for finding_id in existing_finding_ids(ip_name):
+        match = FINDING_ID_RE.match(finding_id)
+        if match and int(match.group(2)) > best_n:
+            best_prefix, best_n = match.group(1), int(match.group(2))
+    return f"{best_prefix}{best_n + 1}"
+
+
+def provision_review_worktree(ip_name: str) -> Path:
+    """A throwaway git worktree at HEAD, with this ip's own review record
+    removed from the working copy, for one isolated review dispatch.
+
+    This blocks a plain file read of decisions/<ip>.md or reviews/<ip>.*
+    .findings.yaml by construction -- the files are not there to read. It does
+    NOT block `git log`/`git show`/`git blame` against the shared .git history
+    (a history-less export would, at the cost of losing incremental checkout
+    speed); the prompt asks the agent not to run them instead, the same rule
+    this project's manually-run review rounds have relied on throughout.
+    """
+    worktree_dir = Path(tempfile.mkdtemp(prefix=f"review-{ip_name}-"))
+    worktree_dir.rmdir()  # `git worktree add` must create this path itself
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree_dir), "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    decisions_file = worktree_dir / "decisions" / f"{ip_name}.md"
+    if decisions_file.is_file():
+        decisions_file.unlink()
+    for findings_file in worktree_dir.glob(f"reviews/{ip_name}.*.findings.yaml"):
+        findings_file.unlink()
+    return worktree_dir
+
+
+def cleanup_review_worktree(worktree_dir: Path) -> None:
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_dir)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def dispatch_isolated_review(agent_cmd: str | None, ip_name: str, stage: str, kind: str, prompt: str) -> bool:
+    """Like dispatch_agent, but runs the agent in an isolated worktree (see
+    provision_review_worktree) and copies back only the one findings file the
+    contract permits it to write.
+
+    Returns True if an agent actually ran (so gates should be re-checked)."""
+    AGENT_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    request_path = AGENT_REQUEST_DIR / f"{ip_name}.{stage}.prompt.md"
+    request_path.write_text(prompt, encoding="utf-8")
+    if not agent_cmd:
+        print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
+        return False
+    worktree_dir = provision_review_worktree(ip_name)
+    try:
+        print(f"  {stage}: running agent (isolated worktree, no memory of {ip_name}'s review history): {agent_cmd}")
+        result = subprocess.run(
+            agent_cmd, cwd=worktree_dir, input=prompt, text=True, encoding="utf-8", errors="replace", shell=True
+        )
+        print(f"  {stage}: agent exited {result.returncode}")
+        written = worktree_dir / "reviews" / f"{ip_name}.{kind}.findings.yaml"
+        if written.is_file():
+            dest = REPO_ROOT / "reviews" / f"{ip_name}.{kind}.findings.yaml"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(written.read_text(encoding="utf-8"), encoding="utf-8")
+    finally:
+        cleanup_review_worktree(worktree_dir)
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # Harness config
 # --------------------------------------------------------------------------- #
 
@@ -676,10 +825,18 @@ def run_agent_stage(
     build_prompt = AGENT_PROMPT_BUILDERS.get(name)
     if build_prompt is None:
         raise SystemExit(f"harness: no prompt builder registered for agent stage '{name}'")
+    review_kind = REVIEW_STAGE_KINDS.get(name)
     max_attempts = int(stage.get("max_attempts", default_attempts))
     for attempt in range(1, max_attempts + 1):
-        prompt = build_prompt(ctx["ip"], f"\nAttempt {attempt}. Current gate output:\n{out[-4000:]}")
-        if not dispatch_agent(agent_cmd, ctx["ip"], name, prompt):
+        extra_context = f"\nAttempt {attempt}. Current gate output:\n{out[-4000:]}"
+        if review_kind:
+            next_id = next_finding_id(ctx["ip"], review_kind)
+            prompt = build_prompt(ctx["ip"], next_id=next_id, extra_context=extra_context)
+            dispatched = dispatch_isolated_review(agent_cmd, ctx["ip"], name, review_kind, prompt)
+        else:
+            prompt = build_prompt(ctx["ip"], extra_context)
+            dispatched = dispatch_agent(agent_cmd, ctx["ip"], name, prompt)
+        if not dispatched:
             return "awaiting", ""
         ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results)
         if ok:

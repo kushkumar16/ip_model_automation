@@ -454,4 +454,4 @@ test_scenarios:
     input_sequence: [T0_READ, issue_ready_low]
     expected_functional_behavior: [no_pop_until_ready]
     expected_performance_properties: [output_stall_incremented]
-    fsm_coverage: [arbiter_main.STALL]
+    fsm_coverage: [arbiter_main.IDLE, issue_pipeline.ISSUE_STALL]

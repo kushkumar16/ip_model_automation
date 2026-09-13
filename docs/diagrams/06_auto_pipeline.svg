@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1510 680" font-family="Segoe UI, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1880 840" font-family="Segoe UI, Arial, sans-serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
@@ -10,9 +10,9 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#34a853"/>
     </marker>
   </defs>
-  <rect width="1510" height="680" fill="#ffffff"/>
-  <text x="755" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The automated pipeline runner (tools/auto_ip_pipeline.py)</text>
-  <text x="755" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Drop a DLD in dlds/ — a new IP is generated, an existing IP is amended from the template diff</text>
+  <rect width="1880" height="840" fill="#ffffff"/>
+  <text x="940" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#202124">The automated pipeline runner (tools/auto_ip_pipeline.py)</text>
+  <text x="940" y="66" text-anchor="middle" font-size="14" fill="#5f6368">Drop a DLD in dlds/ — a new IP is generated, an existing IP is amended from the template diff. Stage order: harness/ip_generation_loop.yaml.</text>
 
   <!-- Row 1 -->
   <rect x="40" y="110" width="210" height="70" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
@@ -23,42 +23,53 @@
   <text x="395" y="139" text-anchor="middle" font-size="14" fill="#202124">.docx to markdown</text>
   <text x="395" y="161" text-anchor="middle" font-size="12" fill="#5f6368">lands as the .src.md</text>
 
-  <rect x="540" y="110" width="210" height="70" rx="10" fill="#e8f0fe" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 4"/>
-  <text x="645" y="133" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent: normalize</text>
-  <text x="645" y="152" text-anchor="middle" font-size="11" fill="#174ea6">only if a .src.md exists</text>
-  <text x="645" y="169" text-anchor="middle" font-size="11" fill="#9a6400">fidelity gate + human stamp</text>
+  <rect x="540" y="110" width="220" height="70" rx="10" fill="#e8f0fe" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="650" y="133" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent: normalize_dld</text>
+  <text x="650" y="151" text-anchor="middle" font-size="11" fill="#174ea6">only if a .src.md exists</text>
+  <text x="650" y="167" text-anchor="middle" font-size="11" fill="#9a6400">gate: check_normalization</text>
 
-  <rect x="790" y="110" width="210" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
-  <text x="895" y="139" text-anchor="middle" font-size="14" fill="#202124">Extract draft</text>
-  <text x="895" y="161" text-anchor="middle" font-size="12" fill="#5f6368">+ gaps report</text>
+  <rect x="800" y="110" width="340" height="70" rx="10" fill="#e8f0fe" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="970" y="130" text-anchor="middle" font-size="13" font-weight="bold" fill="#174ea6">Agent: review_normalization</text>
+  <text x="970" y="147" text-anchor="middle" font-size="11" fill="#174ea6">adversarial read vs the source; fail-only</text>
+  <text x="970" y="163" text-anchor="middle" font-size="11" fill="#9a6400">then human stamp: check_normalization_stamp</text>
 
-  <rect x="1040" y="110" width="200" height="70" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="1140" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">Template gates</text>
-  <text x="1140" y="161" text-anchor="middle" font-size="12" fill="#9a6400">lint + coverage --strict</text>
+  <rect x="1180" y="110" width="190" height="70" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="1275" y="139" text-anchor="middle" font-size="14" fill="#202124">Extract draft</text>
+  <text x="1275" y="161" text-anchor="middle" font-size="12" fill="#5f6368">parse_dld: draft + gaps report</text>
 
-  <rect x="1280" y="110" width="190" height="70" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
-  <text x="1375" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent: review</text>
-  <text x="1375" y="161" text-anchor="middle" font-size="12" fill="#174ea6">promote the template</text>
+  <rect x="1410" y="110" width="200" height="70" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="1510" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">Template gates</text>
+  <text x="1510" y="161" text-anchor="middle" font-size="12" fill="#9a6400">lint + coverage --strict</text>
+
+  <rect x="1650" y="110" width="190" height="70" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="1745" y="139" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent: complete</text>
+  <text x="1745" y="161" text-anchor="middle" font-size="12" fill="#174ea6">promote the template</text>
 
   <!-- Fork -->
-  <rect x="1250" y="232" width="220" height="58" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5" stroke-dasharray="6 4"/>
-  <text x="1360" y="257" text-anchor="middle" font-size="14" font-weight="bold" fill="#202124">Model already exists?</text>
-  <text x="1360" y="277" text-anchor="middle" font-size="11" fill="#5f6368">snapshot taken at run start</text>
+  <rect x="1635" y="232" width="220" height="58" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="1745" y="257" text-anchor="middle" font-size="14" font-weight="bold" fill="#202124">Model already exists?</text>
+  <text x="1745" y="277" text-anchor="middle" font-size="11" fill="#5f6368">snapshot taken at run start</text>
 
   <!-- Greenfield -->
-  <rect x="620" y="330" width="340" height="72" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
-  <text x="790" y="358" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">no — generate (greenfield)</text>
-  <text x="790" y="379" text-anchor="middle" font-size="12" fill="#174ea6">scaffold + prompt pack · agent implements</text>
+  <rect x="880" y="330" width="340" height="72" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="1050" y="358" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">no — generate (greenfield)</text>
+  <text x="1050" y="379" text-anchor="middle" font-size="12" fill="#174ea6">scaffold + prompt pack · agent implements</text>
 
   <!-- Brownfield -->
-  <rect x="620" y="440" width="340" height="72" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
-  <text x="790" y="468" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">yes — amend (brownfield)</text>
-  <text x="790" y="489" text-anchor="middle" font-size="12" fill="#174ea6">template diff · agent edits in place</text>
+  <rect x="880" y="440" width="340" height="72" rx="10" fill="#e8f0fe" stroke="#4285f4" stroke-width="1.5"/>
+  <text x="1050" y="468" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">yes — amend (brownfield)</text>
+  <text x="1050" y="489" text-anchor="middle" font-size="12" fill="#174ea6">template diff · agent edits in place</text>
 
   <!-- Unit tests -->
-  <rect x="380" y="385" width="190" height="72" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
-  <text x="475" y="413" text-anchor="middle" font-size="14" fill="#202124">Unit tests</text>
-  <text x="475" y="434" text-anchor="middle" font-size="12" fill="#5f6368">per-IP suite (the gate)</text>
+  <rect x="640" y="385" width="190" height="72" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
+  <text x="735" y="413" text-anchor="middle" font-size="14" fill="#202124">Unit tests</text>
+  <text x="735" y="434" text-anchor="middle" font-size="12" fill="#5f6368">per-IP suite (the gate)</text>
+
+  <!-- Review model -->
+  <rect x="390" y="385" width="200" height="72" rx="10" fill="#e8f0fe" stroke="#f5a623" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="490" y="408" text-anchor="middle" font-size="14" font-weight="bold" fill="#174ea6">Agent: review_model</text>
+  <text x="490" y="425" text-anchor="middle" font-size="11" fill="#174ea6">adversarial read vs template</text>
+  <text x="490" y="441" text-anchor="middle" font-size="11" fill="#9a6400">gate: check_review_findings</text>
 
   <!-- Stamp provenance -->
   <rect x="150" y="385" width="190" height="72" rx="10" fill="#ffffff" stroke="#5f6368" stroke-width="1.5"/>
@@ -66,44 +77,49 @@
   <text x="245" y="434" text-anchor="middle" font-size="12" fill="#5f6368">model_baselines.json</text>
 
   <!-- Repo-wide gates -->
-  <rect x="110" y="500" width="270" height="66" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
-  <text x="245" y="527" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">Repo-wide gates</text>
-  <text x="245" y="548" text-anchor="middle" font-size="11" fill="#9a6400">style · coverage 95/95 · validate_dld_flow.py</text>
+  <rect x="90" y="500" width="310" height="72" rx="10" fill="#fff4e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="245" y="524" text-anchor="middle" font-size="14" font-weight="bold" fill="#9a6400">5 repo-wide gates (scope: repo)</text>
+  <text x="245" y="544" text-anchor="middle" font-size="10" fill="#9a6400">coverage · wait-model · style · 95% coverage · full_validation</text>
+  <text x="245" y="561" text-anchor="middle" font-size="9" fill="#9a6400">+ 4 more artifact guards outside the pipeline — see 05_validation_gates.svg</text>
 
   <!-- Done -->
-  <rect x="130" y="600" width="230" height="58" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
-  <text x="245" y="624" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e7e34">IP marked processed</text>
-  <text x="245" y="645" text-anchor="middle" font-size="11" fill="#1e7e34">reports/.dld_pipeline_state.json</text>
+  <rect x="130" y="620" width="230" height="58" rx="10" fill="#e6f4ea" stroke="#34a853" stroke-width="2"/>
+  <text x="245" y="644" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e7e34">IP marked processed</text>
+  <text x="245" y="665" text-anchor="middle" font-size="11" fill="#1e7e34">reports/.dld_pipeline_state.json</text>
 
   <!-- Row 1 arrows -->
   <line x1="250" y1="145" x2="285" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
   <line x1="500" y1="145" x2="535" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="750" y1="145" x2="785" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="1000" y1="145" x2="1035" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="1240" y1="145" x2="1275" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="760" y1="145" x2="795" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1140" y1="145" x2="1175" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1370" y1="145" x2="1405" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1610" y1="145" x2="1645" y2="145" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Skipped entirely when the DLD is already in shape -->
-  <path d="M 395 110 L 395 92 L 895 92 L 895 105" fill="none" stroke="#5f6368" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
-  <text x="645" y="86" text-anchor="middle" font-size="11" fill="#5f6368">no .src.md — normalization is skipped entirely</text>
+  <path d="M 395 110 L 395 90 L 1275 90 L 1275 105" fill="none" stroke="#5f6368" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+  <text x="835" y="84" text-anchor="middle" font-size="11" fill="#5f6368">no .src.md — normalize_dld and review_normalization are both skipped</text>
 
   <!-- Down into the fork -->
-  <line x1="1375" y1="180" x2="1365" y2="227" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1745" y1="180" x2="1745" y2="227" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Fork -> greenfield / brownfield -->
-  <path d="M 1360 290 L 1360 366 L 965 366" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M 1360 290 L 1360 476 L 965 476" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 1745 290 L 1745 366 L 1225 366" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 1745 290 L 1745 476 L 1225 476" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Both paths -> unit tests -->
-  <path d="M 620 366 L 595 366 L 595 421 L 575 421" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <path d="M 620 476 L 595 476 L 595 421 L 575 421" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 880 366 L 855 366 L 855 421 L 835 421" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 880 476 L 855 476 L 855 421 L 835 421" fill="none" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
 
-  <!-- Tail: tests -> stamp -> repo gates -> done -->
-  <line x1="380" y1="421" x2="345" y2="421" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
-  <text x="362" y="410" text-anchor="middle" font-size="11" fill="#1e7e34">pass</text>
+  <!-- Tail: tests -> review_model -> stamp -> repo gates -> done -->
+  <line x1="640" y1="421" x2="595" y2="421" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="617" y="410" text-anchor="middle" font-size="11" fill="#1e7e34">pass</text>
+  <line x1="390" y1="421" x2="345" y2="421" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
   <line x1="245" y1="457" x2="245" y2="495" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="245" y1="566" x2="245" y2="595" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <line x1="245" y1="572" x2="245" y2="615" stroke="#34a853" stroke-width="2" marker-end="url(#arrowGreen)"/>
 
   <!-- Fail retry loop back to the fork -->
-  <path d="M 475 385 L 475 310 L 1360 310 L 1360 295" fill="none" stroke="#ea4335" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrowRed)"/>
-  <text x="905" y="302" text-anchor="middle" font-size="12" fill="#ea4335">fail: re-invoke the agent with the failure log (up to loop_policy.max_iterations)</text>
+  <path d="M 735 385 L 735 310 L 1745 310 L 1745 295" fill="none" stroke="#ea4335" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrowRed)"/>
+  <text x="1240" y="302" text-anchor="middle" font-size="12" fill="#ea4335">fail: re-invoke the agent with the failure log (up to loop_policy.max_iterations)</text>
+
+  <text x="940" y="815" text-anchor="middle" font-size="12" fill="#5f6368">review_normalization and review_model may fail an IP; neither may pass one. Both are gated by check_review_findings — a finding blocks the human stamp / stamp_provenance, not the retry loop above.</text>
 </svg>

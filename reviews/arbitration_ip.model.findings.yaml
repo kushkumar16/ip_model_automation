@@ -1,86 +1,44 @@
 ip: arbitration_ip
 kind: model
-template_sha256: a2bdf51f3f327b4a9c1b084837350a639054028cb3a354c80ca6b6b49d3e4f96
-model_sha256: d8ff64aae2d1dbac56cac6b58ffb9a9f5f88858dba2394d820372064cd365a68
-tests_sha256: da6d31c6cf6848917ed9b275412796bd68fed23f01577c9a65c46631e9708466
+template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
+model_sha256: 1353e5b146182ddbeb529cb0f849cdcaa82705340c62b01ca307ed932c1bfa71
+tests_sha256: 2e510e38b4ed5a0289bd17621c1ea1dea10b08bbb35ef640fc2708244d7edd59
 findings:
-  - id: M36
-    class: fsm_structure
-    severity: high
-    claim: >-
-      Once a candidate has been granted and handed to issue_pipeline but is
-      still awaiting downstream issue_ready (or is stuck on a burst stall),
-      its SQ stays marked pending in the bitmaps arbiter_main scans, so the
-      arbiter repeatedly re-runs PORT_SCAN -> TENANT_SCAN -> SQ_SCAN -> STALL
-      on that same already-granted candidate every cycle for the entire
-      length of the stall, instead of taking the template's declared
-      issue_ready-gated stall path or sitting idle.
-    template: >-
-      templates/arbitration_ip.template.yaml:333-336 declares
-      `gating_relationships: - source: issue_if.issue_ready, gates:
-      arbiter_main.ISSUE, stall_reason: output_backpressure` -- issue_ready is
-      meant to gate the arbiter itself with its own distinct stall reason --
-      and templates/arbitration_ip.template.yaml:103 describes IDLE as "Wait
-      for queue activity or downstream availability."
-    model: >-
-      src/ip_model_automation/arbitration_ip.py:268-284 (`_update_pending_bitmaps`
-      marks an SQ pending from queue occupancy alone, never checking
-      `self.inflight_sqs`) together with lines 442-452 (the IDLE wait loop
-      blocks only on `any(self.port_pending_bitmap.values())`, with no check
-      of downstream/issue readiness or in-flight status). Confirmed by
-      grep that arbiter_main never records an `output_backpressure` stall
-      reason anywhere: `output_backpressure_cycles` is only incremented inside
-      `issue_pipeline`, at lines 595 and 642.
-    why: >-
-      Verified by tracing arbiter_main's FSM state with two commands already
-      granted and in flight while issue_ready stayed low: the arbiter looped
-      PORT_SCAN(4) -> TENANT_SCAN(6) -> SQ_SCAN(8) -> STALL(1) ->
-      PORT_SCAN(4) -> STALL(1) continuously for the whole backpressure window,
-      producing (after ~59 cycles of backpressure) stalls=15,
-      no_sq_pending_stalls=8, no_port_pending_stalls=7, even though every
-      pending SQ was already granted and nothing new could be selected. This
-      charges the declared per-scan cycle costs repeatedly for no reason and
-      inflates `stalls`/`no_sq_pending_stalls`/`no_port_pending_stalls` --
-      metrics performance_model.metrics lists as arbitration-health counters
-      -- under a condition (output backpressure, and equally a burst stall,
-      since a burst-stalled SQ is left in `inflight_sqs` the same way) the
-      template explicitly separates out with its own `output_backpressure`
-      stall reason that the model never produces. None of the existing
-      backpressure/burst-stall tests
-      (tests/test_arbitration_ip.py:286-334, :410-436, :470-498, :861-891)
-      check arbiter_main's own stall metrics during the hold, only the
-      eventual outcome and issue_pipeline's stall counters, so this churn
-      goes unnoticed. In a longer stall or a busier queue this scales with
-      the stall duration and misrepresents both simulated arbitration timing
-      and the reported stall-reason breakdown.
-  - id: M37
+  - id: M42
     class: scenario_gap
     severity: low
     claim: >-
-      The weighted_order_four_tenants test_scenario's declared fsm_coverage
-      names `arbiter_main.ISSUE`, a state that does not exist anywhere in
-      arbiter_main's declared `states` list or in the model's `fsm_state`
-      tracking, so the test written for this scenario neither exercises nor
-      could exercise it.
+      The weighted_order_four_tenants test_scenario's declared
+      expected_performance_properties: [no_output_stall] is never checked by
+      the test written for it, and no other test in the suite covers a
+      sustained multi-tenant weighted-load configuration for this property
+      either.
     template: >-
-      templates/arbitration_ip.template.yaml:439 (`fsm_coverage: [...
-      arbiter_main.GRANT, arbiter_main.ISSUE, policy_update.UPDATE_POINTER]`)
-      names `arbiter_main.ISSUE`; arbiter_main's actual declared states, at
-      templates/arbitration_ip.template.yaml:99-115, are `RESET, IDLE,
-      PORT_SCAN, TENANT_SCAN, CREDIT_REFILL, SQ_SCAN, GRANT, STALL` -- no
-      `ISSUE` among them. The same phantom state also appears in
-      `gating_relationships` (line 335) and `sequential_paths.policy_update_path`
-      (line 331), suggesting a state was renamed (to GRANT) without these
-      three references being updated to match.
+      templates/arbitration_ip.template.yaml test_scenarios[0]
+      (weighted_order_four_tenants), expected_performance_properties:
+      [no_output_stall]
     model: >-
-      tests/test_arbitration_ip.py:138-153
-      (test_arbitration_weighted_order_across_four_tenants, the test written
-      for this scenario) records only `selection_trace`, never
-      `fsm_state["arbiter_main"]`, and could not check ISSUE coverage even if
-      it tried to: `self.fsm_state` at src/ip_model_automation/arbitration_ip.py:162-166
-      only ever takes the eight states the template itself declares for
-      arbiter_main.
+      tests/test_arbitration_ip.py
+      test_arbitration_weighted_order_across_four_tenants (its docstring
+      names this scenario by name: "The weighted_order_four_tenants
+      scenario, which no test drove"); it and its helper
+      _four_tenant_sequence (lines ~138-173) assert only selection_trace
+      tenant order and never read model.metrics["output_stalls"] or
+      model.metrics["output_backpressure_cycles"]. The only two assertions
+      on output_backpressure_cycles in the whole file are in
+      test_arbitration_downstream_backpressure_holds_selected_sq and
+      test_arbitration_issue_ready_dropping_during_the_request_holds_the_command
+      (lines 312 and 985), both single-tenant backpressure scenarios
+      unrelated to this one.
     why: >-
-      A reader consulting this scenario's fsm_coverage to see what a passing
-      test verifies is told it touches a state that has never existed in the
-      model, silently overstating this scenario's coverage.
+      A reader relying on test_scenarios to know what the suite verifies
+      would believe the no-stall claim for this weighted, multi-tenant,
+      multi-port scenario had been checked; it has not. The underlying
+      behaviour is very likely correct (issue_ready is never lowered in
+      this test), so this does not look like a live bug, but it is exactly
+      the kind of declared-but-unexercised property this stage exists to
+      surface, and the same repo's own test history shows this class of gap
+      (a declared expected_performance_property nothing checked) has been
+      treated as worth a dedicated fix before, e.g. the timing assertions
+      later added in test_arbitration_charges_its_declared_latencies_at_defaults
+      and test_arbitration_issue_pipeline_charges_its_declared_latencies.

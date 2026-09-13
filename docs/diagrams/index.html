@@ -68,15 +68,15 @@ open it directly, or copy it into slides/documents. The full narrative lives in
 </section>
 
 <section id="d5">
-  <h2>5. The validation gate chain</h2>
-  <p class="desc">The gate chain behind a green <code>validate_dld_flow.py</code> — starting with the normalization fidelity gate for DLDs that needed reshaping, plus the repo-wide code style and coverage hard gates the automated pipeline adds.</p>
-  <img src="05_validation_gates.svg" alt="Gate chain from lint to unit tests">
+  <h2>5. The repo-wide gate chain</h2>
+  <p class="desc">All nine gates <code>tools/run_ci.py</code> runs once, after every changed IP completes its own pipeline: the five harness <code>scope: repo</code> stages, plus four artifact guards (model provenance, DLD normalization fidelity, the Word overview, and review findings) that are deliberately not pipeline stages of their own.</p>
+  <img src="05_validation_gates.svg" alt="The nine repo-wide gates run_ci.py checks">
 </section>
 
 <section id="d6">
   <h2>6. The automated pipeline runner</h2>
-  <p class="desc">How <code>auto_ip_pipeline.py</code> drives the whole chain from a DLD drop — including the optional normalization stage for a DLD written in another shape, the greenfield/brownfield fork (generate a new model vs. amend an existing one from the template diff) and the agent retry loop.</p>
-  <img src="06_auto_pipeline.svg" alt="Automated pipeline runner flow">
+  <p class="desc">How <code>auto_ip_pipeline.py</code> drives one IP's whole chain from a DLD drop — the optional normalization stage and its adversarial review for a DLD written in another shape, the greenfield/brownfield fork (generate a new model vs. amend an existing one from the template diff), the adversarial model review before provenance is stamped, and the agent retry loop.</p>
+  <img src="06_auto_pipeline.svg" alt="Automated pipeline runner flow, including both review stages">
 </section>
 
 <section id="d7">

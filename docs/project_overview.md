@@ -535,7 +535,8 @@ the model/test flow, and regenerates the readable template docs. A single
 green result proves the whole repo is consistent.
 
 To run *every* repo-wide gate, not just that chain — style, code coverage,
-provenance, normalization fidelity, and the Word-overview sync as well:
+provenance, normalization fidelity, the Word-overview sync, and every recorded
+review finding fixed or dismissed by name:
 
 ```powershell
 python tools\run_ci.py                 # about a minute
@@ -557,6 +558,19 @@ coding style guide's mechanical half) and `python tools\run_code_coverage.py
 unit tests actually execute (coverage.py, table + optional `--html` report in
 `reports\code_coverage\`), enforced at 95%+ both in total and per model file.
 
+Beyond those, `run_ci.py` runs four further checks that are deliberately **not**
+pipeline stages — they guard artifacts the pipeline produces rather than steps
+it runs, so they have no place in the per-IP stage sequence, but a push that
+breaks one is exactly as broken as a failing test: `check_model_provenance.py`
+(every model still matches the template revision it was last amended against),
+`check_dld_normalization.py` (every normalized DLD is still faithful to its
+author source, and human-stamped), `check_overview_sync.py` (this Word document
+has not drifted from `project_overview.md`), and `check_review_findings.py`
+(every finding either review stage has filed — `review_normalization` or
+`review_model` — is fixed or dismissed by name in `decisions\<ip>.md`). Nine
+gates in total; `python tools\run_ci.py --list` prints all of them with their
+commands.
+
 ## The automated pipeline runner
 
 `tools/auto_ip_pipeline.py` is the orchestrator that strings all of the above
@@ -570,7 +584,8 @@ the pipeline. Changing the pipeline is a YAML edit, not a runner change:
 flowchart LR
     WATCH["watch dlds/<br/>(content-hash change detection)"]
     CONV["docx → markdown<br/>(lands as the .src.md)"]
-    NORM["off-shape? agent: normalize<br/>+ fidelity gate + human stamp"]
+    NORM["off-shape? agent: normalize<br/>+ fidelity gate"]
+    RNORM["agent: review_normalization<br/>+ human stamp: check_normalization_stamp"]
     EXT["extract draft<br/>+ gaps report"]
     GATES["template gates"]
     REVIEW["agent: review template"]
@@ -578,22 +593,24 @@ flowchart LR
     GEN["no → scaffold + prompt pack<br/>agent: implement"]
     AMEND["yes → template diff<br/>agent: amend in place"]
     TESTS["unit tests"]
+    RMODEL["agent: review_model<br/>+ check_review_findings"]
     STAMP["stamp provenance<br/>baseline"]
     REPO["repo-wide gates:<br/>style · coverage · full validation"]
 
-    WATCH --> CONV --> NORM --> EXT --> GATES --> REVIEW --> FORK
+    WATCH --> CONV --> NORM --> RNORM --> EXT --> GATES --> REVIEW --> FORK
     FORK -->|greenfield| GEN --> TESTS
     FORK -->|brownfield| AMEND --> TESTS
-    TESTS --> STAMP --> REPO
+    TESTS --> RMODEL --> STAMP --> REPO
     TESTS -->|fail: re-invoke agent<br/>with the failure log| FORK
     classDef gate fill:#fff4e5,stroke:#f5a623;
-    class GATES,NORM,REPO gate;
+    class GATES,NORM,RNORM,RMODEL,REPO gate;
 ```
 
-`normalize_dld` runs only for an IP that has a `dlds/<ip>_dld.src.md`; an
-in-shape DLD skips it and its gate entirely, so today's IPs are unaffected by
-it. A `.docx` DLD always has one — Word gives no way to write the extractor's
-markdown conventions, so its conversion output *is* the author source.
+`normalize_dld` and `review_normalization` both run only for an IP that has a
+`dlds/<ip>_dld.src.md`; an in-shape DLD skips both and their gates entirely, so
+today's IPs are unaffected. A `.docx` DLD always has one — Word gives no way to
+write the extractor's markdown conventions, so its conversion output *is* the
+author source.
 
 Details worth knowing:
 
@@ -601,27 +618,35 @@ Details worth knowing:
   `reports/.dld_pipeline_state.json`. An IP is only marked *processed* after
   its full chain passes — so a half-finished IP is automatically picked up
   again next run.
-- **The three agent steps** (DLD normalization, template review, model
-  implementation) are where judgment is needed. Each declares `gates:` in the harness YAML
-  — tool stages whose pass/fail decides everything: if the gates already
-  pass, the agent is skipped entirely. Without an agent, the runner writes
-  the prompt to `reports/agent_requests/<ip>.<step>.prompt.md` and reports
-  the IP as *awaiting*. With `--agent <profile>` (named commands in the
-  harness YAML's `agent_profiles`) or `--agent-cmd "<raw command>"`, it pipes
-  the prompt to that command and, while the gates fail, re-invokes it with
-  the failure log — up to `max_attempts` per stage (default
-  `loop_policy.max_iterations`).
+- **Five agent steps** (DLD normalization, normalization review, template
+  completion, model implementation or amendment, model review) are where
+  judgment is needed. Each declares `gates:` in the harness YAML — tool stages
+  whose pass/fail decides everything: if the gates already pass, the agent is
+  skipped entirely. Without an agent, the runner writes the prompt to
+  `reports/agent_requests/<ip>.<step>.prompt.md` and reports the IP as
+  *awaiting*. With `--agent <profile>` (named commands in the harness YAML's
+  `agent_profiles`) or `--agent-cmd "<raw command>"`, it pipes the prompt to
+  that command and, while the gates fail, re-invokes it with the failure log —
+  up to `max_attempts` per stage (default `loop_policy.max_iterations`).
+  `review_normalization` and `review_model` are the two exceptions:
+  `max_attempts: 1`, because a fail-only reviewer re-invoked until it stops
+  finding things is a reviewer being talked out of its findings, not a
+  reviewer converging on the truth.
 - **The agent is a plug-in point, not a dependency**: the prompt pack plus
   the contract in `agents/ip_model_generation_agent.md` are the complete task
   description, and the same gates (template coverage, lint, unit tests,
   coding style, coverage thresholds) judge the output no matter which vendor's
   agent — or which human — wrote the model and its tests.
-- **One pause is a human, by design**: the normalization review stamp is a gate
-  no machine can satisfy, so it is deliberately kept out of any agent's retry
-  loop — the agent iterates against the mechanical half
-  (`--no-stamp-check`), and the stamp is a separate stage that reports the IP as
-  *awaiting* rather than failed. A gate a machine cannot satisfy must not sit
-  inside a machine's loop.
+- **Several pauses are a human, by design**: the normalization stamp and every
+  recorded review finding (from either `review_normalization` or
+  `review_model`) are gates no machine can satisfy, so they are deliberately
+  kept out of any agent's retry loop. The normalize agent iterates against the
+  mechanical half of the normalization gate (`--no-stamp-check`); the stamp
+  itself, and both `check_review_findings` checks, are separate stages that
+  report the IP as *awaiting* rather than failed. A gate a machine cannot
+  satisfy must not sit inside a machine's loop — which is also why
+  `review_normalization` and `review_model` may only fail an IP and never pass
+  one: a sampled verdict has no business inside a deterministic retry.
 - **Greenfield vs. brownfield is automatic**: the runner snapshots whether the
   model file already exists before any stage runs. A new IP takes the generate
   path (`scaffold` + `agent_implementation`); an existing IP whose DLD changed
@@ -1054,15 +1079,37 @@ actually enters, and its unit tests pass alongside the rest of the suite.
 | Open Item: completion queue depth (§11) | gaps report + `queues.tenant_pending_queues.depth: unbounded` with `depth_note` | per-tenant deques, unbounded; backpressure via tokens and `cpl_ready` | `test_completion_output_backpressure_holds_ready_command` |
 | Open Item: error behavior for inactive tenants (§11) | `error_conditions: [tenant_inactive, …]` on every command | command parked at accept; scheduler stalls if the tenant dies later | `test_completion_inactive_tenant_parks_command_at_accept`, `test_completion_scheduler_stalls_when_tenant_goes_inactive` |
 
+## Step 7 — the review neither of the above can substitute for
+
+```powershell
+python tools\check_review_findings.py completion_ip --require model
+```
+
+Green here means only that a current `review_model` finding either does not
+exist yet or has been fixed or dismissed — not that one has looked and found
+nothing. Step 6's gates were satisfied by construction: the same session wrote
+the model and the tests that pass against it, which is exactly the blind spot
+`review_model` exists to catch (Part 3, "The gates: what \"validated\" actually
+means"). `completion_ip`'s own review history is real: round five filed six
+findings against it, all fixed or dismissed by name in
+`decisions/completion_ip.md`; a fresh reviewer with no memory of those fixes
+then filed one more against the result, dismissed by cross-reference to the
+finding it re-discovered. Nothing about steps 1–6 would have caught any of
+them.
+
 One footnote: this walkthrough shows the manual, stage-by-stage path so each
 artifact is visible. Today the automated runner does all of it from the DLD drop
 onward — `python tools\auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 
-*As of 2026-07-28: all gates green — `python tools/run_ci.py` runs every one of
-them in about a minute, and the pre-push hook runs it before anything leaves the
-machine.*
+*As of 2026-09-12: two review_model rounds have run against both IPs. Round
+five filed 12 findings and round six filed 3 more against the result; all 15
+are now fixed or dismissed by name in `decisions/<ip>.md`. `python
+tools/run_ci.py` runs all nine repo-wide gates in about a minute, and the
+pre-push hook runs it before anything leaves the machine — a fresh
+`review_model` pass is the one gate still owed at any given moment, since
+fixing a finding is what marks its review stale in the first place.*
 
 ## Modeled IPs (2)
 
@@ -1073,12 +1120,26 @@ machine.*
 
 ## What the gates currently cover
 
-Worth reading before a green run is taken for more than it says. Several gates
-pass by having no subjects: `dld_normalization` checks zero documents, because
-neither IP carries an author source; the subsystem wiring stage inside
-`validate_dld_flow.py` checks zero subsystems; and `decisions/` and `reviews/`
-hold only their READMEs. An empty `reviews/` is not a claim that these two models
-are faithful — only that nobody has looked.
+Worth reading before a green run is taken for more than it says. `dld_normalization`
+still checks zero documents, because neither IP carries an author source
+(`dlds/<ip>_dld.src.md`) — both DLDs were written in-shape from the start, so
+`normalize_dld` and `review_normalization` have never run for real against
+either one. The subsystem wiring stage inside `validate_dld_flow.py` also
+checks zero subsystems.
+
+`review_model` is a different story: both IPs have real review history now.
+`reviews/arbitration_ip.model.findings.yaml` and
+`reviews/completion_ip.model.findings.yaml` each carry a round-six pass — run
+as an isolated agent with no memory of the fixes that had just closed round
+five, and no access to `decisions/*.md` or round five's findings — and every
+finding either review filed, across both rounds, is fixed or dismissed by name
+in `decisions/<ip>.md`. That is not the same claim as "these models are
+faithful": an empty findings list, or a fully-resolved one, records that a
+reviewer looked and reported nothing further, which is a weaker claim than
+"faithful" and must never be read as the stronger one. It is, at least, the
+opposite of the earlier state this section used to describe — before round
+five, `decisions/` and `reviews/` held only their READMEs, and nobody had
+looked at all.
 
 ## Pipeline maturity
 
@@ -1087,9 +1148,18 @@ are faithful — only that nobody has looked.
   validates. Subsystems ride the same path.
 - **A DLD arriving in another house style is handled too** — one with no FSM or
   interface section the extractor could read is normalized into shape by the
-  `normalize_dld` stage before any of the above runs, with a fidelity gate and a
-  human stamp behind it. The pipeline accepts documents as engineers write them,
-  not only documents written to its conventions.
+  `normalize_dld` stage before any of the above runs, with a fidelity gate, an
+  adversarial `review_normalization` pass, and a human stamp behind it. The
+  pipeline accepts documents as engineers write them, not only documents
+  written to its conventions.
+- **Two review stages, both fail-only.** `review_normalization` (DLD vs.
+  reshaped DLD) and `review_model` (template vs. model and tests) exist because
+  every other gate shares one blind spot per side — a fidelity gate proves
+  nothing was dropped or invented, not that the surviving claims attach to the
+  right things, and unit tests proves nothing when the same agent wrote the
+  tests it passes. Both may only report findings, never approve; a finding
+  blocks `check_review_findings` until it is fixed (which invalidates the
+  review) or dismissed by name in `decisions/<ip>.md`.
 - **Every gate runs in one command, locally.** `python tools/run_ci.py` runs the
   repo-wide gates — read from the harness, so adding a stage adds it to CI — and
   `.githooks/pre-push` runs them before a push. There is no hosted CI by choice,
@@ -1103,7 +1173,7 @@ are faithful — only that nobody has looked.
   style rules so newly generated models follow it from the start.
 - The pipeline is agent-agnostic: named `agent_profiles` in the harness YAML
   (select with `--agent <name>`) let any vendor's headless coding agent — or
-  a human — fill the two judgment steps; the same gates judge the output.
+  a human — fill the five judgment steps; the same gates judge the output.
 - The template contract declares FIFO capacities (bounded depth or explicit
   `unbounded` with a reason — lint-enforced) and, for subsystems, per-connection
   ack semantics (`none` / `completion_event` / `level_until_serviced`).

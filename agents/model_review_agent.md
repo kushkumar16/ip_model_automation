@@ -26,11 +26,16 @@ the model enters every declared wait point, coverage is above threshold, style i
 clean — and a model that misimplements its contract alongside a test that agrees
 with it satisfies all of them.
 
-The first run of this review on `sram_ctrl_ip` found six real disagreements after
-all of that was green, including a declared capacity never enforced, three
-undeclared FSM transitions, and an assertion that could not fail for any
-implementation. That IP has since been retired and its decisions file with it, so
-there is no longer a document to point at — the record survives in git history.
+This has repeatedly found real disagreements after every other gate was already
+green: `completion_ip`'s scheduler spinning forever on a tenant whose liveness
+changed through the only API the model's own tests use to express it, and
+`arbitration_ip`'s arbiter re-running a full port/tenant/SQ scan every cycle on a
+candidate already granted and in flight, because the pending bitmap it read had
+no way to say so. Both models had passing unit tests, full FSM coverage, and
+clean style at the time; this stage is what caught them anyway, and both are now
+fixed. See `arbitration_ip.py` and `completion_ip.py`'s git history for the
+specifics — the point that matters here is that the tests these bugs shipped
+with never once looked wrong.
 
 ## Inputs
 

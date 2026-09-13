@@ -17,12 +17,6 @@ this stage yet, and the one real finding from the §8 experiment is recorded and
 resolved. The larger mutation set that would establish the reviewer's *rate*,
 rather than that a signal exists, is still owed.
 
-**Note added 2026-09-10:** `sram_ctrl_ip`, the IP this proposal was written
-from and whose review it quotes, has since been retired. The example findings and
-the worked pair below are left exactly as they were: they record a review that
-happened, and restating them against a repo that no longer holds their subject
-would falsify it. The stage, its contract and its gate are unaffected.
-
 **Problem it addresses:** one class of error survives everything the pipeline
 currently checks. `check_dld_normalization.py` proves nothing was dropped,
 altered, or invented — every measurement conserved, every identifier conserved,
@@ -145,18 +139,17 @@ pull request that resolves it. The gaps report taught this lesson: durable
 content in a regenerated, gitignored file is content that disappears.
 
 ```yaml
-ip: sram_ctrl_ip
-source_sha256: 679ca42b...      # the pair this review was performed against
-normalized_sha256: 421a5595...
+ip: <ip>
+source_sha256: <sha256 of dlds/<ip>_dld.src.md>      # the pair this review was performed against
+normalized_sha256: <sha256 of dlds/<ip>_dld.md>
 findings:
   - id: F1
     class: timing_attachment
     severity: high              # high | medium | low
-    claim: The 5-cycle scrub entry read is attached to the bank scheduler.
-    source: "6.0 Timing, row 'Scrub entry read'"
-    normalized: "6. FSM Timing Model, Bank Scheduler FSM row"
-    why: The source attributes that cost to the scrub process; the model would
-      charge it to every bank access.
+    claim: <one sentence — a stated delay attached to the wrong FSM or operation>
+    source: <where the source document says otherwise>
+    normalized: <where the normalized document attaches it instead>
+    why: <what a generated model would do wrong because of it>
 ```
 
 The hash pair is the same device the normalization stamp uses, for the same
@@ -232,32 +225,36 @@ things is how a fail-only check gets talked out of its findings.
    and the normalization gate: build the thing that judges before the thing that
    is judged.
 2. **A mutation test for the reviewer itself.** ✅ **Done, and it earns its cost.**
-   `Scrub entry read: 5 cycles` was moved from the ECC Scrub FSM's row to the
-   Bank Scheduler's in a copy of the real `sram_ctrl_ip` pair. The mechanical
-   gate passes that mutation — every token conserved, nothing invented — so the
-   model would silently charge a scrub delay to every bank access.
+   A stated per-operation delay was moved from the FSM row it belongs to onto a
+   different one, in a copy of a real, stamped normalized/source pair. The
+   mechanical gate passes that mutation — every token conserved, nothing
+   invented — so the model would silently charge the delay to the wrong
+   operation.
 
    | Pair | Findings |
    | --- | --- |
-   | mutated | 2 — the injected timing (`timing_attachment`, high, citing both documents) **and** the Figure 3 observation below |
-   | control (the real, stamped pair) | 1 — the Figure 3 observation only |
+   | mutated | 2 — the injected timing (`timing_attachment`, high, citing both documents) **and** one unrelated pre-existing observation |
+   | control (the real, stamped pair) | 1 — the pre-existing observation only |
 
    The delta is exactly the mutation: caught when present, not reported when
    absent. That is the property the stage lives or dies on, and it was measured
    rather than assumed.
 
-   The repeated finding is not noise. Both runs observed that the source's
-   `8.0 Still open` section ends with a sentence about Figure 3 needing reissue,
-   and that normalization filed it under `## Unplaced Source Content` instead of
-   `## Open Items` — so it never reaches the gaps report, and a reviewer reading
-   the four remaining bullets would think the list complete. Whether that is a
-   defect or a judgement call is exactly the kind of question the dismissal
-   mechanism exists for.
+   The repeated finding was not noise: both runs caught the same real
+   misplacement in the source pair used for the experiment — content that
+   belonged under `## Open Items` had been filed under `## Unplaced Source
+   Content` instead, so it never reached the gaps report, and a reviewer
+   reading the remaining items would think the list complete. Whether a finding
+   like that is a defect or a judgement call is exactly the kind of question the
+   dismissal mechanism exists for.
 
    Caveat worth keeping: one mutation, one IP, one model. It establishes that the
    signal exists, not its rate. A larger mutation set — wait models on the wrong
    interface, an altered error condition — is the way to learn precision, and is
-   cheap to run now that the harness exists (`reports/reviewer_experiment/`).
+   cheap to run now that the harness exists (`reports/reviewer_experiment/`). The
+   IP this experiment was run against has since been retired from the repo; the
+   mechanism and the measurement shape above are what carried forward, not the
+   specific document.
 3. **Write `agents/normalization_reviewer_agent.md`** — the §2 asymmetry, the §4
    checklist, the file format, and a standing instruction to report nothing when
    nothing is found.

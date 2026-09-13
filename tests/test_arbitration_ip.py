@@ -144,13 +144,29 @@ class TestArbitrationIpModel(unittest.TestCase):
         within a port. The scenario used to declare T0,T1,T1,T1,T1,T2,T2,T3,
         which ignored the port level entirely and asked for eight selections
         from four queued commands.
+
+        Round ten's M42: the scenario also declares
+        expected_performance_properties: [no_output_stall], which nothing here
+        checked -- every command is fully eligible from t=0 with issue_ready
+        never lowered, so the arbiter's own output path should never record a
+        stall either way the weights are set.
         """
-        weighted = self._four_tenant_sequence({"T0": 1, "T1": 4, "T2": 2, "T3": 1})
-        equal = self._four_tenant_sequence({"T0": 1, "T1": 1, "T2": 1, "T3": 1})
+        weighted, weighted_model = self._four_tenant_sequence({"T0": 1, "T1": 4, "T2": 2, "T3": 1})
+        equal, equal_model = self._four_tenant_sequence({"T0": 1, "T1": 1, "T2": 1, "T3": 1})
 
         self.assertEqual(weighted, ["T0", "T2", "T1", "T2", "T1", "T3", "T1", "T1", "T0"])
         self.assertEqual(equal, ["T0", "T2", "T1", "T3", "T0", "T2", "T1", "T1", "T1"])
         self.assertNotEqual(weighted, equal, "tenant weights made no difference to the order")
+
+        for model in (weighted_model, equal_model):
+            self.assertEqual(
+                model.metrics["output_stalls"], 0, "no_output_stall: a fully eligible burst should not stall"
+            )
+            self.assertEqual(
+                model.metrics["output_backpressure_cycles"],
+                0,
+                "no_output_stall: a fully eligible burst should not stall",
+            )
 
     def _four_tenant_sequence(self, tenant_weights):
         env = simpy.Environment()
@@ -170,7 +186,7 @@ class TestArbitrationIpModel(unittest.TestCase):
                         Command(f"{tenant_id}_{sq_id}", "READ", port_id=port_id, tenant_id=tenant_id, sq_id=sq_id)
                     )
         env.run(until=2000)
-        return [entry["tenant_id"] for entry in model.selection_trace]
+        return [entry["tenant_id"] for entry in model.selection_trace], model
 
     def test_arbitration_charges_its_declared_latencies_at_defaults(self):
         """The declared timing model, which no test exercised.
@@ -467,6 +483,31 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(model.metrics["credit_refills"], 0, "a dead tenant made the scan look refillable")
         self.assertEqual(model.issued, [])
 
+    def test_arbitration_idle_does_not_rescan_a_permanently_dead_tenant(self):
+        """A dead tenant's queue leaves the arbiter genuinely idle, not spinning.
+
+        Round eight's M40: `_has_actionable_work` excluded an in-flight SQ
+        but not a dead tenant's, so IDLE broke out of its wait every time,
+        paying a real port_scan + tenant_scan + backpressure_retry cycle
+        forever with nothing that could ever be granted -- `stalls` grew
+        without bound for as long as the run lasted. A dead tenant does not
+        self-clear on its own the way credit exhaustion does, so nothing
+        short of `set_tenant_credit(tenant_alive=True)` should ever wake
+        this arbiter for it, and once that happens it must actually notice.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.set_tenant_credit("T0", tenant_alive=False)
+        model.enqueue(Command("held", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=1000)
+
+        self.assertEqual(model.metrics["stalls"], 0, "arbiter_main kept re-scanning a permanently dead tenant")
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
+
+        model.set_tenant_credit("T0", tenant_alive=True)
+        env.run(until=1050)
+        self.assertEqual([command.cmd_id for _, command in model.issued], ["held"], "reviving the tenant never woke it")
+
     def test_arbitration_idle_does_not_rescan_an_already_granted_in_flight_sq(self):
         """A port whose only pending work is already granted stays quiet.
 
@@ -497,6 +538,41 @@ class TestArbitrationIpModel(unittest.TestCase):
         model.set_issue_ready(True)
         env.run(until=520)
         self.assertEqual([command.cmd_id for _, command in model.issued], ["a"], "the command never issued")
+
+    def test_arbitration_partial_issue_wakes_the_arbiter_for_the_residue(self):
+        """A burst-limited partial issue must wake an arbiter blocked in IDLE.
+
+        Round seven's M38: the fix for M36 made IDLE genuinely block on
+        `_arbiter_wake` rather than busy-polling, woken only by `enqueue()`.
+        But a partial issue -- burst covers some of an SQ's pending count,
+        not all -- discards that SQ from `inflight_sqs` while real work is
+        still queued behind it, which is exactly when `_has_actionable_work`
+        would now say yes. Nothing called `_wake_arbiter()` there, so an
+        arbiter already blocked in IDLE never re-checked and the residue
+        waited forever -- reproduced with no API but enqueue and
+        configure_burst, no misuse.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(env, log_level="CRITICAL")
+        model.configure_burst(sqs={"T0": {"SQ0": 3}})
+        for i in range(8):
+            model.enqueue(Command(f"c{i}", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=100)
+
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            ["c0", "c1", "c2"],
+            "the burst-covered portion did not issue",
+        )
+        self.assertGreater(model.metrics["burst_stalls"], 0, "the residue never even reached a burst stall")
+
+        model.configure_burst(sqs={"T0": {"SQ0": 1024}})
+        env.run(until=200)
+        self.assertEqual(
+            [command.cmd_id for _, command in model.issued],
+            [f"c{i}" for i in range(8)],
+            "the residue behind the partial issue was never granted",
+        )
 
     def test_arbitration_burst_stall_retries_in_place_rather_than_re_arbitrating(self):
         """ISSUE_STALL -> READ_PENDING_COUNT on a burst stall, not a discard.
@@ -635,6 +711,37 @@ class TestArbitrationIpModel(unittest.TestCase):
             "the second port was reached without its own PORT_SCAN dwell",
         )
 
+    def test_arbitration_a_stalled_tenant_does_not_starve_a_sibling_on_the_same_port(self):
+        """SQ_SCAN's failure excludes the tenant it tried, not the whole port.
+
+        Round nine's M41: a heavily-weighted tenant whose only pending SQ is
+        in flight used to make the model mark the *entire port* tried for
+        the rest of the sweep, since a tenant's own weighted-round-robin
+        pointer only advances on a real grant -- so it keeps winning
+        TENANT_SCAN every sweep, and a lighter-weighted but genuinely
+        grantable sibling tenant on the same port is starved indefinitely,
+        even though the model's own accounting knows real work exists the
+        whole time.
+        """
+        env = simpy.Environment()
+        model = ArbitrationIpModel(
+            env,
+            weights={"ports": {"port0": 1}, "tenants": {"T0": 4, "T1": 1}, "sqs": {}},
+            log_level="CRITICAL",
+        )
+        model.set_issue_ready(False)
+        model.enqueue(Command("t0a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        env.run(until=30)
+        self.assertEqual(model.metrics["grants"], 1, "T0's first command was not granted")
+
+        model.enqueue(Command("t0b", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+        model.enqueue(Command("t1a", "READ", port_id="port0", tenant_id="T1", sq_id="SQ0"))
+        env.run(until=390)
+
+        self.assertEqual(
+            model.metrics["grants"], 2, "T1 was never granted while T0's in-flight SQ starved its own port"
+        )
+
     def test_arbitration_each_port_is_stalled_under_its_own_true_reason(self):
         """The stall reason reflects the candidate that actually produced it.
 
@@ -642,13 +749,23 @@ class TestArbitrationIpModel(unittest.TestCase):
         sweep used to record only the last one tried: the loop kept
         `tenant_id`/`sq_id` as variables overwritten on every candidate, and
         branched on their final values alone. port0's tenant is genuinely
-        dead (a real no_tenant_with_active_traffic) and port1's SQ is
-        genuinely already in flight (a real no_eligible_sq); both reasons
-        must be counted, not just whichever was tried last.
+        out of credit (a real no_tenant_with_active_traffic -- alive, so
+        `_has_actionable_work` still counts it, unlike a dead tenant) and
+        port1's SQ is genuinely already in flight (a real no_eligible_sq);
+        both reasons must be counted, not just whichever was tried last.
+
+        A dead tenant used to stand in for port0's failure here, before
+        round eight's M40: `_has_actionable_work` now excludes a dead
+        tenant's queue from "actionable" the same way it already excludes
+        an in-flight SQ's, so a genuinely dead port0 would leave nothing
+        actionable at all and the arbiter would never enter PORT_SCAN in
+        this scenario. Credit exhaustion is deliberately not excluded --
+        TENANT_SCAN reaching an exhausted tenant is what triggers
+        CREDIT_REFILL -- so it still reaches this stall for real.
         """
         env = simpy.Environment()
         model = ArbitrationIpModel(env, log_level="CRITICAL")
-        model.set_tenant_credit("T0", tenant_alive=False)
+        model.set_tenant_credit("T0", read_iops_credit=False)
         model.enqueue(Command("a", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
         model.enqueue(Command("b", "READ", port_id="port1", tenant_id="T2", sq_id="SQ0"))
         model.inflight_sqs.add(("T2", "SQ0"))
@@ -914,6 +1031,13 @@ class TestArbitrationIpModel(unittest.TestCase):
         self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 1)
         self.assertGreater(model.metrics["output_backpressure_cycles"], 0)
         self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
+        # The granted SQ is inflight, so arbiter_main finds no other
+        # actionable work and blocks in IDLE rather than stalling itself --
+        # the backpressure hold is entirely issue_pipeline's, matching this
+        # scenario's fsm_coverage (round seven's M39: this used to declare
+        # arbiter_main.STALL, a state the in-flight exclusion makes
+        # unreachable here).
+        self.assertEqual(model.fsm_state["arbiter_main"], "IDLE")
 
         model.set_issue_ready(True)
         env.run(until=30)

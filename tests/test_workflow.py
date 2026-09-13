@@ -19,7 +19,7 @@ from ip_model_automation.ip import IP_ARTIFACTS, ArbitrationIpModel, Command, li
 
 class TestIpRegistryAndLayout(unittest.TestCase):
     def test_registry_has_all_ips_and_artifacts(self):
-        self.assertEqual(len(tuple(list_ips())), 2)
+        self.assertEqual(len(tuple(list_ips())), 3)
         repo_root = Path(__file__).resolve().parents[1]
         for ip_name in IP_ARTIFACTS:
             paths = resolve_artifacts(repo_root, ip_name)
@@ -35,6 +35,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             "common.py",
             "completion_ip.py",
             "ip.py",
+            "storage_pipeline_subsystem.py",
         }
         self.assertEqual({path.name for path in package_dir.glob("*.py")}, expected)
         self.assertFalse(any(path.is_dir() and path.name.endswith("_ip") for path in package_dir.iterdir()))
@@ -109,7 +110,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         spec.loader.exec_module(validator)
 
         templates = validator.discover_templates(repo_root)
-        self.assertEqual(len(templates), 2)
+        self.assertEqual(len(templates), 3)
         validator.validate_scaffolds(repo_root, templates)
 
     def test_prompt_pack_generator_emits_model_request(self):
@@ -144,7 +145,7 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("harness: ip_generation_loop", text)
         self.assertIn("agent_contract: agents/ip_model_generation_agent.md", text)
-        self.assertIn("templates: 2", text)
+        self.assertIn("templates: 3", text)
 
         # Every contract an agent stage is told to follow must be a file that
         # exists. A stage pointing at a missing contract is an agent invoked with
@@ -1527,17 +1528,20 @@ class TestIpRegistryAndLayout(unittest.TestCase):
     def test_subsystem_wiring_check_accepts_well_formed_wiring(self):
         """The checker must not false-positive, which is the half that can rot silently.
 
-        The repo currently contains no subsystem templates at all, so
-        discover_subsystem_templates returns nothing and validate_dld_flow.py's
-        wiring stage checks nothing. A test that walked the repo's subsystems
-        would now pass by having no work to do; this one gives it work.
+        storage_pipeline_subsystem is a real, non-synthetic subsystem -- two
+        live member IPs, a real model that instantiates both, real
+        connections -- so this checks the actual thing validate_dld_flow.py's
+        wiring stage runs against, not only a fixture built to look like one.
         """
         repo_root, checker = self._wiring_checker()
 
+        discovered = checker.discover_subsystem_templates(repo_root)
+        real_template = repo_root / "templates" / "storage_pipeline_subsystem.template.yaml"
+        self.assertIn(real_template, discovered)
         self.assertEqual(
-            checker.discover_subsystem_templates(repo_root),
+            checker.check_file(repo_root, real_template),
             [],
-            "a subsystem template was added -- give it a real wiring test rather than relying on this one",
+            "the real storage_pipeline_subsystem template fails its own wiring check",
         )
 
         good = self._synthetic_subsystem(

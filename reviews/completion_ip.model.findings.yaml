@@ -4,44 +4,41 @@ template_sha256: 3be0d38a41015bb215b3c3fcca649174f1f1da3ee2b9640fd67c4c6b4f556ea
 model_sha256: 90270c9554b9e90470eecccdf5e4f0e2e04bf31eebd7cf77528c4c601e75b9a1
 tests_sha256: 442eaf5d190bcf9371aed51c53762cffc6e26601ebb9679211dbf143d5f4d6bc
 findings:
-  - id: M36
+  - id: M37
     class: wait_model_impl
-    severity: medium
+    severity: high
     claim: >-
       qos_config_if is declared wait_for_ack_inline with its wait point at
-      refill.REFILL_BASE -- the peer's configuration write is only supposed
-      to complete once the model reaches that state -- but
-      configure_tenant/credit_tokens/set_tenant_alive apply and take effect
-      synchronously at call time, with no relationship to the refill FSM at
-      all, and the refill process does not even run unless a caller opts in.
+      refill.REFILL_BASE and resumes_on config_applied -- i.e. a peer's
+      tenant_config transaction should be gated so it takes effect (and is
+      acked) when the refill FSM reaches REFILL_BASE -- but configure_tenant
+      applies the new token/liveness values synchronously at call time, with
+      no wait, no returned ack event, and no relation to the refill process's
+      state at all.
     template: >-
-      templates/completion_ip.template.yaml:29-38 (`qos_config_if ...
-      wait_model: mode: wait_for_ack_inline, requester: peer, wait_points:
-      [refill.REFILL_BASE], resumes_on: config_applied`).
+      templates/completion_ip.template.yaml interfaces[1] (qos_config_if):
+      wait_model.mode=wait_for_ack_inline, wait_model.wait_points=[refill.REFILL_BASE],
+      wait_model.resumes_on=config_applied, wait_model.requester=peer.
     model: >-
-      src/ip_model_automation/completion_ip.py:99-115 (`configure_tenant`
-      writes `self.tokens`/`self.base_tokens`/`self.tenant_alive` directly
-      and returns `None`, with no `yield`/event tied to `refill.REFILL_BASE`,
-      and `credit_tokens`/`set_tenant_alive` at lines 117-147 do the same),
-      contrasted with lines 158-174 (`submit`, implementing accepted_cmd_if's
-      own wait_for_ack_inline mode, which correctly returns an event that
-      only succeeds at its declared wait point, accept.ENQUEUE); and lines
-      30, 91-92 (`start_refill_process` defaults to False, so the `refill`
-      process -- and its REFILL_BASE state -- need never run at all for
-      configure_tenant to take full effect).
+      src/ip_model_automation/completion_ip.py configure_tenant()
+      (lines 99-115) writes self.tokens/self.base_tokens/self.tenant_alive and
+      returns None immediately; refill_process() (lines 515-548) only ever
+      calls _restore_base_tokens() as the periodic top-up action on its own
+      ASSESS_USAGE -> REFILL_BASE transition and never reads or applies
+      anything a configure_tenant call is waiting on, because configure_tenant
+      does not wait on anything. Reproduced empirically: calling
+      configure_tenant("T0", read=5, ...) while env.run() has left the refill
+      process sitting in WAIT_WINDOW (nowhere near REFILL_BASE) updates
+      model.tokens["T0"]["read"] to 5.0 immediately, in the same call, with
+      model.fsm_state["refill"] still reading "WAIT_WINDOW".
     why: >-
-      A test or caller relying on qos_config_if's declared handshake --
-      treating a configuration write as pending until the model reaches
-      refill.REFILL_BASE -- would be wrong about when it actually lands.
-      Verified directly: tests/test_completion_ip.py:309-337
-      (test_completion_credit_tokens_makes_a_now_eligible_tenant_selectable_again)
-      constructs the model without start_refill_process=True (so the refill
-      FSM never runs and refill.REFILL_BASE is never reached at all), calls
-      credit_tokens mid-run, and the very next scheduler pass sees and acts
-      on the new tokens -- the config write is effective immediately, not
-      "when config_applied resumes at REFILL_BASE" as the template declares.
-      The one other interface sharing this exact wait_for_ack_inline mode,
-      accepted_cmd_if, is implemented with a real event gated on its wait
-      point (src/ip_model_automation/completion_ip.py:158-174), showing the
-      pattern is available in this model and simply not applied to
-      qos_config_if.
+      Any scenario that reconfigures a tenant mid-run (a live QoS budget
+      change, or a liveness toggle) takes effect and is "acked" instantly in
+      the model instead of at the next refill.REFILL_BASE boundary the
+      contract declares, so timing computed from when a configuration change
+      becomes visible to the scheduler -- or from when a caller is entitled to
+      assume it has been applied -- will not match a design that honors the
+      declared inline-ack gate. No test in tests/test_completion_ip.py drives
+      configure_tenant/set_tenant_alive/credit_tokens concurrently with the
+      refill process to exercise (or pin) this wait point at all, so the gap
+      is currently unguarded by any assertion.

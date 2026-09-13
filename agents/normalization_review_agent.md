@@ -52,6 +52,18 @@ normalized DLD and the template it produced is a different review's job
 (`review_model` reads the template against the model; template promotion is
 gated by `check_template_coverage.py`). Read the two documents and nothing else.
 
+## Isolation, enforced by the harness
+
+When `tools/auto_ip_pipeline.py` dispatches this stage, it runs in a throwaway
+git worktree with `decisions/<ip>.md` and every `reviews/<ip>.*.findings.yaml`
+removed from the working copy — not merely asked not to be read, the same
+mechanism `agents/model_review_agent.md` describes for `review_model`. The id
+to start from is computed beforehand, from the real checkout, so the isolated
+review never needs to look either file up. `git log`/`git show`/`git blame`
+against the repository's shared history are not blocked, only asked not to be
+used against this ip's subject documents — if a removed file is what you were
+looking for, its absence is by design.
+
 ## What to report
 
 | Class | The failure |

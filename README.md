@@ -203,19 +203,25 @@ python tools\auto_ip_pipeline.py dlds\my_ip_dld.docx  # process one DLD explicit
 python tools\auto_ip_pipeline.py --force              # reprocess everything
 ```
 
-The harness agent stages (`normalize_dld`, `complete_template`, and one of
-`agent_implementation` / `amend_implementation`) need an LLM or a human. The
-pipeline is **agent-agnostic** — models and unit tests may be written by any
-vendor's coding agent that can run headless, read the prompt from stdin, and
-edit files (requirements and named profiles are in
-`harness/ip_generation_loop.yaml` under `agent_profiles`; the contracts are
-`agents/ip_model_generation_agent.md` and, for normalization,
-`agents/dld_normalization_agent.md`). By default the runner writes a
-ready-to-send prompt to `reports\agent_requests\<ip>.<stage>.prompt.md` and
-reports the IP as *awaiting* that stage. To run unattended, pick a profile or
-pass a raw command — the prompt is piped to the agent's stdin, and failed
-validations re-invoke it with the failure log up to
-`loop_policy.max_iterations` from the harness:
+The harness agent stages (`normalize_dld`, `complete_template`,
+`agent_implementation`/`amend_implementation`, and the two reviewers,
+`review_normalization`/`review_model`) need an LLM or a human. The pipeline is
+**agent-agnostic** — models and unit tests may be written by any vendor's
+coding agent that can run headless, read the prompt from stdin, and edit files
+(requirements and named profiles are in `harness/ip_generation_loop.yaml`
+under `agent_profiles`; the contracts are `agents/ip_model_generation_agent.md`
+and, for normalization, `agents/dld_normalization_agent.md`). By default the
+runner writes a ready-to-send prompt to
+`reports\agent_requests\<ip>.<stage>.prompt.md` and reports the IP as
+*awaiting* that stage. To run unattended, pick a profile or pass a raw
+command — the prompt is piped to the agent's stdin, and failed validations
+re-invoke it with the failure log up to `loop_policy.max_iterations` from the
+harness. The two reviewers are dispatched differently from the rest: each runs
+in a throwaway git worktree with the IP's own `decisions/<ip>.md` and
+`reviews/<ip>.*.findings.yaml` removed from the working copy first, so a
+reviewer cannot see what a prior round already decided about the very thing
+it is reviewing (`agents/model_review_agent.md`'s "Isolation, enforced by the
+harness" section has the detail):
 
 ```powershell
 python tools\auto_ip_pipeline.py --agent claude                  # profile from the harness YAML
@@ -476,6 +482,7 @@ resolves to the same default, so nothing breaks in the meantime).
 - `reports/*.gaps.md`: per-IP missing-detail report from extraction (gitignored, regenerated every parse).
 - `decisions/<ip>.md`: the durable record of how each gap was resolved and why — tracked, never generated; the gaps report is not a place to write anything you want to keep.
 - `tools/check_review_findings.py`: deterministic gate over `reviews/<ip>.findings.yaml` — every recorded finding must be fixed (which makes the review stale) or dismissed by name in `decisions/<ip>.md`. The reviewer that writes those findings is not built yet; see [docs/proposals/review_normalization_stage.md](docs/proposals/review_normalization_stage.md).
+- `tools/report_review_status.py`: generates the review-status block embedded in `docs/project_overview.md` and `reviews/README.md` from `reviews/*.findings.yaml` and `decisions/*.md` — `--write` regenerates it, `--check` is the repo-wide gate that fails if either doc's block has drifted.
 - `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
 - `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.

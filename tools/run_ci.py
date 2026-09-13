@@ -72,6 +72,11 @@ EXTRA_CHECKS: list[tuple[str, str, str]] = [
         "python tools/check_review_findings.py",
         "every recorded model or normalization review finding is fixed or dismissed by name",
     ),
+    (
+        "review_status_sync",
+        "python tools/report_review_status.py --check",
+        "the generated review-status block in project_overview.md and reviews/README.md matches reality",
+    ),
 ]
 
 

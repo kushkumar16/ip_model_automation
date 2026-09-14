@@ -13,9 +13,10 @@ The template contract is enforced in two layers, and this tool runs both:
 2. **Cross-field semantics** — the checks below that JSON Schema cannot express:
    the declared ``fsm_count`` matching the number of FSMs, every FSM having a
    timing entry and appearing in a test scenario, every interface wait model
-   pointing at an FSM state that exists, and the arbitration-IP sub-contract.
-   Each rule lives in exactly one layer, so the schema and this file cannot
-   drift apart.
+   pointing at an FSM state that exists, and the template's own timing numbers
+   being internally coherent. Each rule lives in exactly one layer, so the
+   schema and this file cannot drift apart, and every rule applies to every
+   IP alike — nothing here is specific to one IP by name.
 
 Both layers operate on the same parsed mapping (``yaml.safe_load``); nothing
 here parses YAML by hand.
@@ -233,64 +234,12 @@ def timing_coherence_errors(template: dict[str, Any]) -> list[str]:
     return errors
 
 
-# --------------------------------------------------------------------------- #
-# arbitration_ip sub-contract: concepts that must be modeled by name.
-# Operates on the flattened set of keys/values from the parsed template, so it
-# never touches raw text.
-# --------------------------------------------------------------------------- #
-ARBITRATION_REQUIRED = [
-    "topology",
-    "port_mode",
-    "pending_bitmaps",
-    "device_burst_available",
-    "tenant_burst_available",
-    "sq_burst_available",
-    "issue_count_rule",
-    "issue_pipeline",
-    "pending_count_read",
-    "burst_read",
-    "min_burst_calculation",
-    "downstream_issue_request",
-    "burst_debit",
-]
-ARBITRATION_METRICS = ["burst_stalls", "downstream_requests", "issued_commands", "issue_count"]
-
-
-def flatten_tokens(obj: Any) -> set[str]:
-    """Collect every key and scalar string from a parsed template."""
-    tokens: set[str] = set()
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            tokens.add(str(key))
-            tokens |= flatten_tokens(value)
-    elif isinstance(obj, list):
-        for item in obj:
-            tokens |= flatten_tokens(item)
-    elif isinstance(obj, str):
-        tokens.add(obj)
-    return tokens
-
-
-def arbitration_errors(template: dict[str, Any]) -> list[str]:
-    if template.get("ip", {}).get("name") != "arbitration_ip":
-        return []
-    tokens = flatten_tokens(template)
-    metrics = set(template.get("performance_model", {}).get("metrics", []))
-    errors = [f"arbitration_ip contract: missing `{token}`" for token in ARBITRATION_REQUIRED if token not in tokens]
-    errors += [
-        f"arbitration_ip contract: performance metrics missing `{metric}`"
-        for metric in ARBITRATION_METRICS
-        if metric not in metrics
-    ]
-    return errors
-
-
 def lint_template(template: dict[str, Any], jsonschema) -> list[str]:
     structure = schema_errors(template, jsonschema)
     # Cross-field checks assume a well-formed shape; skip them if structure failed.
     if structure:
         return structure
-    return semantic_errors(template) + arbitration_errors(template)
+    return semantic_errors(template)
 
 
 def lint_file(path: Path) -> list[str]:

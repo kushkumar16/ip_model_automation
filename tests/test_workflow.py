@@ -135,6 +135,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertIn("Model class: `ArbitrationIpModel`", text)
             self.assertIn("## Required Unit Tests From Template", text)
 
+            # R9: the validation commands are what an agent actually runs to
+            # check its own work. A Windows-only backslash path here used to
+            # ship in every generated prompt pack regardless of the platform
+            # the pipeline is running on -- on a POSIX shell, the backslash
+            # is an escape character, not a path separator, so the command
+            # would not do what it looks like it does.
+            self.assertIn("python tools/generate_model_scaffold.py", text)
+            self.assertIn("--output-dir src/ip_model_automation", text)
+            self.assertNotIn("\\", text, "a generated prompt pack must not bake in a Windows-only path")
+
     def test_harness_config_is_inspectable(self):
         repo_root = Path(__file__).resolve().parents[1]
         inspector_path = repo_root / "tools" / "inspect_harness.py"

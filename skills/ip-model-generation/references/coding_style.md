@@ -5,9 +5,9 @@ mechanical half is enforced by ruff (configuration in `ruff.toml` at the repo
 root); the structural half is enforced by the scaffold/validation gates and by
 review. Check locally with:
 
-```powershell
-python tools\check_code_style.py          # check (the pipeline gate)
-python tools\check_code_style.py --fix    # auto-fix lint findings and reformat
+```shell
+python tools/check_code_style.py          # check (the pipeline gate)
+python tools/check_code_style.py --fix    # auto-fix lint findings and reformat
 ```
 
 ## Formatting (enforced by `ruff format`)

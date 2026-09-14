@@ -161,12 +161,11 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
             "",
             "## Validation Commands",
             "",
-            "```powershell",
-            "python tools\\template_lint.py templates\\*.template.yaml",
-            f"python tools\\generate_model_scaffold.py templates\\{ip_name}.template.yaml"
-            f" --output-dir {model_root.replace('/', chr(92))}",
-            "python tools\\report_model_coverage.py",
-            "python tools\\validate_ip_flow.py",
+            "```shell",
+            "python tools/template_lint.py templates/*.template.yaml",
+            f"python tools/generate_model_scaffold.py templates/{ip_name}.template.yaml --output-dir {model_root}",
+            "python tools/report_model_coverage.py",
+            "python tools/validate_ip_flow.py",
             "```",
             "",
         ]

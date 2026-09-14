@@ -76,12 +76,12 @@ section of the agent contract.
 
 Run:
 
-```powershell
-python tools\template_lint.py templates\*.template.yaml
-python tools\report_model_coverage.py
-python tools\check_wait_model_coverage.py
-python tools\check_code_style.py
-python tools\validate_ip_flow.py
+```shell
+python tools/template_lint.py templates/*.template.yaml
+python tools/report_model_coverage.py
+python tools/check_wait_model_coverage.py
+python tools/check_code_style.py
+python tools/validate_ip_flow.py
 ```
 
 The final validation must pass before considering the model complete.

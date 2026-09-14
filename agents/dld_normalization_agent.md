@@ -112,9 +112,9 @@ sharper than they first look:
 
 Self-check before reporting done:
 
-```powershell
-python tools\check_dld_normalization.py <ip> --no-stamp-check
-python tools\dld_to_template.py dlds\<ip>_dld.md   # the extraction it was all for
+```shell
+python tools/check_dld_normalization.py <ip> --no-stamp-check
+python tools/dld_to_template.py dlds/<ip>_dld.md   # the extraction it was all for
 ```
 
 ## What The Gate Cannot Check
@@ -124,8 +124,8 @@ prove the meaning survived — attaching a stated timing to the wrong FSM preser
 every number. So the fidelity claim is earned per IP by a human, exactly the way
 `check_model_provenance.py` earns its baseline:
 
-```powershell
-python tools\check_dld_normalization.py --stamp <ip>
+```shell
+python tools/check_dld_normalization.py --stamp <ip>
 ```
 
 **Never stamp your own normalization.** The stamp is a human saying "I read the

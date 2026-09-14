@@ -17,31 +17,31 @@ surface it in the gaps report.
 
 1. Extract a draft template and a gaps report from the DLD:
 
-   ```powershell
-   python tools\dld_to_template.py dlds\<ip_name>_dld.md
+   ```shell
+   python tools/dld_to_template.py dlds/<ip_name>_dld.md
    ```
 
-   This writes `templates\<ip_name>.template.draft.yaml` and
-   `reports\<ip_name>.gaps.md`.
+   This writes `templates/<ip_name>.template.draft.yaml` and
+   `reports/<ip_name>.gaps.md`.
 
-2. Read `reports\<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker in the
+2. Read `reports/<ip_name>.gaps.md`. Replace every `TODO_REVIEW` marker in the
    draft using only behavior the DLD states. Where the DLD leaves a detail open
-   (see its "Open Items"), record how you resolved it in `decisions\<ip_name>.md`
+   (see its "Open Items"), record how you resolved it in `decisions/<ip_name>.md`
    — **not** in the gaps report, which is regenerated on every parse and
    gitignored, so anything written there is lost. Resolving it does not always
    mean choosing a value: an unstated number is left unset and made configuration,
    a behavior the model must reach gets the conservative branch clearly labeled,
    and a behavior whose conservative branch would itself be a guess is not modeled
-   at all. `decisions\README.md` states the three.
+   at all. `decisions/README.md` states the three.
 3. Lint and check DLD coverage of the draft:
 
-   ```powershell
-   python tools\template_lint.py templates\<ip_name>.template.draft.yaml
-   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md
+   ```shell
+   python tools/template_lint.py templates/<ip_name>.template.draft.yaml
+   python tools/check_template_coverage.py templates/<ip_name>.template.draft.yaml dlds/<ip_name>_dld.md
    ```
 
 4. When both pass and no `TODO_REVIEW` remains, promote the draft to the golden
-   template `templates\<ip_name>.template.yaml`, then re-run
+   template `templates/<ip_name>.template.yaml`, then re-run
    `check_template_coverage.py ... --strict` on the promoted file.
 
 Read `references/dld_extraction_rules.md` for the expected DLD conventions and
@@ -52,32 +52,32 @@ the "stated vs inferred" rule.
 1. Treat the reviewed template as the source of truth.
 2. Run template lint before model generation:
 
-   ```powershell
-   python tools\template_lint.py templates\<ip_name>.template.yaml
+   ```shell
+   python tools/template_lint.py templates/<ip_name>.template.yaml
    ```
 
 3. Generate a scaffold before implementation:
 
-   ```powershell
-   python tools\generate_model_scaffold.py templates\<ip_name>.template.yaml --output-dir src\ip_model_automation
+   ```shell
+   python tools/generate_model_scaffold.py templates/<ip_name>.template.yaml --output-dir src/ip_model_automation
    ```
 
 4. Fill model behavior using only template fields — including each interface's
    `wait_model`: the process must park at the `<fsm>.<STATE>` its `wait_points`
    name and publish that state through `fsm_state`
-   (`python tools\check_wait_model_coverage.py` is the gate).
-5. Add or update `tests\test_<ip_name>.py` from `test_scenarios`.
+   (`python tools/check_wait_model_coverage.py` is the gate).
+5. Add or update `tests/test_<ip_name>.py` from `test_scenarios`.
 6. Run the full validation flow:
 
-   ```powershell
-   python tools\validate_ip_flow.py
+   ```shell
+   python tools/validate_ip_flow.py
    ```
 
    To validate the DLD front-end as well (every DLD has a lint-passing,
    DLD-covering template, then the model/test flow):
 
-   ```powershell
-   python tools\validate_dld_flow.py
+   ```shell
+   python tools/validate_dld_flow.py
    ```
 
 ## Amending An Existing Model (DLD Changed)
@@ -86,21 +86,21 @@ When the IP already has a model, do **not** regenerate it. Diff the template
 (not the prose DLD — the template is normalized, so its diff is a clean typed
 change list) and make only the corresponding edits:
 
-```powershell
-git show HEAD:templates\<ip_name>.template.yaml > old.yaml
-python tools\diff_template.py old.yaml templates\<ip_name>.template.yaml
-python tools\diff_template.py old.yaml templates\<ip_name>.template.yaml --amend-prompt --ip <ip_name>
+```shell
+git show HEAD:templates/<ip_name>.template.yaml > old.yaml
+python tools/diff_template.py old.yaml templates/<ip_name>.template.yaml
+python tools/diff_template.py old.yaml templates/<ip_name>.template.yaml --amend-prompt --ip <ip_name>
 ```
 
 Each change is tagged `SURGICAL` (localized value/addition — edit in place) or
 `STRUCTURAL` (FSM/state/interface/command added or removed — check for cascade
 first). After the edits pass `validate_dld_flow.py`, refresh the baseline:
 
-```powershell
-python tools\check_model_provenance.py --stamp <ip_name>
+```shell
+python tools/check_model_provenance.py --stamp <ip_name>
 ```
 
-`python tools\check_model_provenance.py` (no args) reports any template that has
+`python tools/check_model_provenance.py` (no args) reports any template that has
 drifted from the model baseline it was last built against. Stamp per IP and only
 after the amend: the stamp asserts the model was amended against that revision,
 which the hash itself cannot verify (`--stamp-all` refuses once baselines exist,
@@ -111,8 +111,8 @@ runs all of this for you as the `amend_implementation` stage.
 
 When asked to prepare LLM input for another model, generate a prompt pack:
 
-```powershell
-python tools\generate_prompt_pack.py templates\<ip_name>.template.yaml --output-dir prompt_packs
+```shell
+python tools/generate_prompt_pack.py templates/<ip_name>.template.yaml --output-dir prompt_packs
 ```
 
 Use the prompt pack as the generation request. Do not supplement it with
@@ -120,7 +120,7 @@ unstated behavior from the DLD.
 
 ## Rules
 
-- Keep one flat model file: `src\ip_model_automation\<ip_name>.py`.
+- Keep one flat model file: `src/ip_model_automation/<ip_name>.py`.
 - Generate one class named `<CamelIpName>Model`.
 - Those paths and that class-naming rule come from `target_profile.yaml` (see
   `tools/target_profile.py`); the values above are this repo's profile. If you

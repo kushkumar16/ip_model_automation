@@ -202,8 +202,8 @@ The repo already has the right pattern for exactly this class of claim: the
 comparison cannot verify, so a human earns it per IP. Normalization needs the
 same treatment:
 
-```powershell
-python tools\check_dld_normalization.py --stamp <ip>   # "I read the diff; the meaning survived"
+```shell
+python tools/check_dld_normalization.py --stamp <ip>   # "I read the diff; the meaning survived"
 ```
 
 The stamp records a hash pair (`src`, `normalized`) in

@@ -7,6 +7,19 @@ The template is the source of truth for model generation. The DLD is used to
 author and review the template, but generation should not infer missing
 behavior from the DLD.
 
+**What kind of IP this is for.** The template schema, the wait-model
+vocabulary (`wait_for_response` / `wait_for_ack_inline` /
+`wait_for_ack_before_next_request`), and the whole generation approach assume
+a **transaction-level, discrete-event digital block** — something built from
+FSMs, interfaces, and queues, whose behavior is meaningfully described in
+clock cycles (arbiters, schedulers, DMA/interconnect fabric, protocol
+controllers, mailboxes, timers — `storage_pipeline_subsystem` below composes
+two of these into a third). It is **not** built for analog/mixed-signal
+behavior, power/thermal modeling, DFT, or RTL/gate-level correctness — this
+generates a performance and functional model, not a synthesizable design or
+a substitute for RTL verification. If your IP doesn't fit that shape, this
+framework's approach may not either.
+
 > **New here?** Read [docs/project_overview.md](docs/project_overview.md) — the
 > single project document: intention, a diagrammed explanation of every
 > pipeline stage, code conventions, and current status.
@@ -81,18 +94,18 @@ would not naturally produce.
 DLDs vary in format and often omit details. Extract a draft template plus a gaps
 report from a DLD:
 
-```powershell
-python tools\dld_to_template.py dlds\<ip_name>_dld.md
+```shell
+python tools/dld_to_template.py dlds/<ip_name>_dld.md
 ```
 
-This writes `templates\<ip_name>.template.draft.yaml`,
-`reports\<ip_name>.gaps.md`, and a readable HTML view of the draft at
-`reports\template_docs\<ip_name>.template.draft.html`. Replace every
+This writes `templates/<ip_name>.template.draft.yaml`,
+`reports/<ip_name>.gaps.md`, and a readable HTML view of the draft at
+`reports/template_docs/<ip_name>.template.draft.html`. Replace every
 `TODO_REVIEW` marker using only DLD-stated behavior, then check the draft
 covers the DLD and promote it:
 
-```powershell
-python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md --strict
+```shell
+python tools/check_template_coverage.py templates/<ip_name>.template.draft.yaml dlds/<ip_name>_dld.md --strict
 ```
 
 Every interface must state its **wait model** — how the requester waits on the
@@ -108,17 +121,17 @@ template still carrying that assumed default.
 Validate the whole flow (every DLD has a lint-passing, DLD-covering template,
 subsystem wiring is consistent, then the model/test flow). When the gate
 passes it also regenerates the readable Markdown + HTML docs for every
-promoted template in `reports\template_docs\`:
+promoted template in `reports/template_docs/`:
 
-```powershell
-python tools\validate_dld_flow.py
+```shell
+python tools/validate_dld_flow.py
 ```
 
 Check subsystem wiring only (members exist, member APIs and glue FSMs
 referenced by `connections:` are real, the model instantiates the members):
 
-```powershell
-python tools\check_subsystem_wiring.py
+```shell
+python tools/check_subsystem_wiring.py
 ```
 
 ## DLD Normalization
@@ -150,10 +163,10 @@ markdown conventions, so the pipeline's conversion output lands on
 Re-converting an unchanged document does not rewrite the file, so the review
 stamp survives.
 
-```powershell
-python tools\check_dld_normalization.py <ip>              # fidelity gate for one IP
-python tools\check_dld_normalization.py --calibrate       # every DLD against itself
-python tools\check_dld_normalization.py --stamp <ip>      # record human review
+```shell
+python tools/check_dld_normalization.py <ip>              # fidelity gate for one IP
+python tools/check_dld_normalization.py --calibrate       # every DLD against itself
+python tools/check_dld_normalization.py --stamp <ip>      # record human review
 ```
 
 The gate is entirely mechanical: measurement and identifier conservation **in
@@ -205,10 +218,10 @@ an IP is only marked processed after its full chain passes. The hash covers the
 IP's `.src.md` too, where one exists, so editing the author's document
 re-triggers normalization.
 
-```powershell
-python tools\auto_ip_pipeline.py                      # process every changed DLD
-python tools\auto_ip_pipeline.py dlds\my_ip_dld.docx  # process one DLD explicitly
-python tools\auto_ip_pipeline.py --force              # reprocess everything
+```shell
+python tools/auto_ip_pipeline.py                      # process every changed DLD
+python tools/auto_ip_pipeline.py dlds/my_ip_dld.docx  # process one DLD explicitly
+python tools/auto_ip_pipeline.py --force              # reprocess everything
 ```
 
 The harness agent stages (`normalize_dld`, `complete_template`,
@@ -220,7 +233,7 @@ coding agent that can run headless, read the prompt from stdin, and edit files
 under `agent_profiles`; the contracts are `agents/ip_model_generation_agent.md`
 and, for normalization, `agents/dld_normalization_agent.md`). By default the
 runner writes a ready-to-send prompt to
-`reports\agent_requests\<ip>.<stage>.prompt.md` and reports the IP as
+`reports/agent_requests/<ip>.<stage>.prompt.md` and reports the IP as
 *awaiting* that stage. To run unattended, pick a profile or pass a raw
 command — the prompt is piped to the agent's stdin, and failed validations
 re-invoke it with the failure log up to `loop_policy.max_iterations` from the
@@ -231,15 +244,32 @@ reviewer cannot see what a prior round already decided about the very thing
 it is reviewing (`agents/model_review_agent.md`'s "Isolation, enforced by the
 harness" section has the detail):
 
-```powershell
-python tools\auto_ip_pipeline.py --agent claude                  # profile from the harness YAML
-python tools\auto_ip_pipeline.py --agent codex                   # OpenAI Codex CLI profile
-python tools\auto_ip_pipeline.py --agent gemini                  # Gemini CLI profile
-python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any other agent, raw command
+```shell
+python tools/auto_ip_pipeline.py --agent claude                  # profile from the harness YAML
+python tools/auto_ip_pipeline.py --agent codex                   # OpenAI Codex CLI profile
+python tools/auto_ip_pipeline.py --agent gemini                  # Gemini CLI profile
+python tools/auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any other agent, raw command
 ```
 
 Whichever agent writes the code, the same gates judge it: template coverage,
 lint, unit tests, the coding style check, and the coverage thresholds.
+
+Before spending anything, see what the run would need without dispatching a
+single agent — `--dry-run` runs every gate for real (gates are read-only
+checks, so this is the true current answer, not a guess) and reports the
+first stage each changed IP would need an agent for, and how many attempts it
+could take, without touching `reports/.dld_pipeline_state.json`:
+
+```shell
+python tools/auto_ip_pipeline.py --dry-run
+```
+
+Two more knobs guard an unattended run: `--gate-timeout`/`--agent-timeout`
+(seconds before a hung tool stage or a wedged agent CLI is killed instead of
+blocking the run forever — defaults 300 / 1800) and a per-checkout lock file
+(`reports/.auto_ip_pipeline.lock`) that refuses a second concurrent run
+rather than letting two runs race on the same pipeline state and generated
+files; `--force-lock` overrides a lock that is actually stale.
 
 ## Continuous Integration (local)
 
@@ -248,10 +278,10 @@ and nowhere else. Without it a branch can be pushed and merged with a failing
 coverage threshold, a stale Word overview, or an unstamped normalization, and
 nothing says so. One command runs all of them:
 
-```powershell
-python tools\run_ci.py            # every repo-wide gate, full report
-python tools\run_ci.py --list     # what it would run, and why
-python tools\run_ci.py --fail-fast
+```shell
+python tools/run_ci.py            # every repo-wide gate, full report
+python tools/run_ci.py --list     # what it would run, and why
+python tools/run_ci.py --fail-fast
 ```
 
 It takes about a minute. The repo-wide stages are **read from
@@ -264,8 +294,8 @@ listed in `EXTRA_CHECKS` with the reason.
 To run it automatically before every push, enable the tracked hook — once per
 clone:
 
-```powershell
-python tools\run_ci.py --install-hook
+```shell
+python tools/run_ci.py --install-hook
 ```
 
 Running locally instead of on a hosted runner costs two things, so the runner
@@ -289,8 +319,8 @@ protects nothing.
 
 Run the full flow:
 
-```powershell
-python tools\validate_ip_flow.py
+```shell
+python tools/validate_ip_flow.py
 ```
 
 This command:
@@ -304,8 +334,8 @@ This command:
 
 Run only the FSM coverage report:
 
-```powershell
-python tools\report_model_coverage.py
+```shell
+python tools/report_model_coverage.py
 ```
 
 Check coding style — ruff lint + format over `src/`, `tools/`, and `tests/`
@@ -313,27 +343,27 @@ Check coding style — ruff lint + format over `src/`, `tools/`, and `tests/`
 `skills/ip-model-generation/references/coding_style.md`; the automated
 pipeline runs this as a hard repo-wide gate):
 
-```powershell
-python tools\check_code_style.py          # check only
-python tools\check_code_style.py --fix    # auto-fix and reformat
+```shell
+python tools/check_code_style.py          # check only
+python tools/check_code_style.py --fix    # auto-fix and reformat
 ```
 
 Measure *code* coverage — which model lines the unit tests actually execute
 (distinct from the template FSM/scenario coverage above). The table lands in
-`reports\code_coverage\coverage.txt`; `--html` adds a browsable report at
-`reports\code_coverage\html\index.html`, and `--fail-under N` (total) /
+`reports/code_coverage/coverage.txt`; `--html` adds a browsable report at
+`reports/code_coverage/html/index.html`, and `--fail-under N` (total) /
 `--fail-under-file N` (each model file) turn it into a gate — the automated
 pipeline enforces 95% for both:
 
-```powershell
-python tools\run_code_coverage.py
-python tools\run_code_coverage.py --html --fail-under 95 --fail-under-file 95
+```shell
+python tools/run_code_coverage.py
+python tools/run_code_coverage.py --html --fail-under 95 --fail-under-file 95
 ```
 
 Generate an LLM prompt pack from a reviewed template:
 
-```powershell
-python tools\generate_prompt_pack.py templates\<ip_name>.template.yaml --output-dir prompt_packs
+```shell
+python tools/generate_prompt_pack.py templates/<ip_name>.template.yaml --output-dir prompt_packs
 ```
 
 Render templates into human-readable documents — Markdown by default, or
@@ -341,29 +371,29 @@ standalone HTML pages that open in any browser (output lands in
 `reports/template_docs/`, gitignored; use `--stdout` to print one to the
 terminal):
 
-```powershell
-python tools\render_template_doc.py                                  # all reviewed templates (Markdown)
-python tools\render_template_doc.py --format html                    # styled HTML pages
-python tools\render_template_doc.py --format both                    # both formats
-python tools\render_template_doc.py templates\completion_ip.template.yaml --stdout
+```shell
+python tools/render_template_doc.py                                  # all reviewed templates (Markdown)
+python tools/render_template_doc.py --format html                    # styled HTML pages
+python tools/render_template_doc.py --format both                    # both formats
+python tools/render_template_doc.py templates/completion_ip.template.yaml --stdout
 ```
 
 Inspect the generation harness:
 
-```powershell
-python tools\inspect_harness.py
+```shell
+python tools/inspect_harness.py
 ```
 
 Run deterministic loop validation:
 
-```powershell
-python tools\run_loop_validation.py
+```shell
+python tools/run_loop_validation.py
 ```
 
 For scaffold-only validation:
 
-```powershell
-python tools\validate_ip_flow.py --skip-tests
+```shell
+python tools/validate_ip_flow.py --skip-tests
 ```
 
 ## Performance Experiments
@@ -371,10 +401,10 @@ python tools\validate_ip_flow.py --skip-tests
 Sweep model configurations and extract latency/throughput tables from the
 models' metrics (results land in `reports/experiments/`, gitignored):
 
-```powershell
-python tools\run_experiments.py            # run all experiments
-python tools\run_experiments.py --list     # list available experiments
-python tools\run_experiments.py --only dma_outstanding_limit
+```shell
+python tools/run_experiments.py            # run all experiments
+python tools/run_experiments.py --list     # list available experiments
+python tools/run_experiments.py --only dma_outstanding_limit
 ```
 
 Each experiment sweeps one parameter against a fixed deterministic workload —
@@ -404,16 +434,16 @@ When a DLD changes, amend the existing model instead of regenerating it. Diff
 the **template** (not the prose DLD) to get a typed, blast-radius-tagged delta,
 then drive a minimal in-place edit:
 
-```powershell
-# 1. Re-extract/review the template from the edited DLD (produces the new templates\<ip>.template.yaml)
+```shell
+# 1. Re-extract/review the template from the edited DLD (produces the new templates/<ip>.template.yaml)
 # 2. Diff it against the previous committed template (git is the history store)
-git show HEAD:templates\<ip>.template.yaml > old.yaml
-python tools\diff_template.py old.yaml templates\<ip>.template.yaml                       # see the delta
-python tools\diff_template.py old.yaml templates\<ip>.template.yaml --amend-prompt --ip <ip>   # agent instruction
+git show HEAD:templates/<ip>.template.yaml > old.yaml
+python tools/diff_template.py old.yaml templates/<ip>.template.yaml                       # see the delta
+python tools/diff_template.py old.yaml templates/<ip>.template.yaml --amend-prompt --ip <ip>   # agent instruction
 
-# 3. Apply the amend (agent or human edits src\ip_model_automation\<ip>.py and tests\test_<ip>.py), then:
-python tools\validate_dld_flow.py
-python tools\check_model_provenance.py --stamp <ip>          # refresh the baseline once back in sync
+# 3. Apply the amend (agent or human edits src/ip_model_automation/<ip>.py and tests/test_<ip>.py), then:
+python tools/validate_dld_flow.py
+python tools/check_model_provenance.py --stamp <ip>          # refresh the baseline once back in sync
 ```
 
 `check_model_provenance.py` (no args) reports any template that has drifted from
@@ -456,30 +486,30 @@ resolves to the same default, so nothing breaks in the meantime).
 2. Extract a draft template and gaps report, then fill every `TODO_REVIEW`
    using only DLD-stated behavior:
 
-   ```powershell
-   python tools\dld_to_template.py dlds\<ip_name>_dld.md
+   ```shell
+   python tools/dld_to_template.py dlds/<ip_name>_dld.md
    ```
 
 3. Check DLD coverage, then promote the draft to
-   `templates\<ip_name>.template.yaml`:
+   `templates/<ip_name>.template.yaml`:
 
-   ```powershell
-   python tools\check_template_coverage.py templates\<ip_name>.template.draft.yaml dlds\<ip_name>_dld.md --strict
-   python tools\template_lint.py templates\<ip_name>.template.yaml
+   ```shell
+   python tools/check_template_coverage.py templates/<ip_name>.template.draft.yaml dlds/<ip_name>_dld.md --strict
+   python tools/template_lint.py templates/<ip_name>.template.yaml
    ```
 
 4. Generate the initial model scaffold:
 
-   ```powershell
-   python tools\generate_model_scaffold.py templates\<ip_name>.template.yaml --output-dir src\ip_model_automation
+   ```shell
+   python tools/generate_model_scaffold.py templates/<ip_name>.template.yaml --output-dir src/ip_model_automation
    ```
 
 5. Fill the model behavior from the template only.
 6. Add unit tests from `test_scenarios`.
 7. Run:
 
-   ```powershell
-   python tools\validate_ip_flow.py
+   ```shell
+   python tools/validate_ip_flow.py
    ```
 
 ## Key Files

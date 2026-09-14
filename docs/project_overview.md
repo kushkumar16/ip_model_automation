@@ -36,6 +36,15 @@ project status is at the [end of this document](#part-5--current-status).
 > suite** — with automated checks at every step so nothing is invented or
 > lost along the way.
 
+**"IP block" here means something specific**: a transaction-level,
+discrete-event digital block described in FSMs, interfaces, and queues,
+whose behavior is meaningfully stated in clock cycles — an arbiter, a scheduler, a
+DMA engine, a protocol controller, a timer, a mailbox, or (as
+`storage_pipeline_subsystem` shows) several of those wired together. It is
+not aimed at analog/mixed-signal behavior, power/thermal modeling, DFT, or
+RTL/gate-level correctness; the output is a performance and functional
+model, not a synthesizable design.
+
 ## What goes in, what comes out
 
 **You provide:** a DLD (Design-Level Document) — an ordinary markdown (or
@@ -82,12 +91,12 @@ model trustworthy.
 
 Drop your DLD into `dlds/` and run the pipeline:
 
-```powershell
-# 1. Add your document (markdown or .docx both work)
-copy my_ip_dld.md dlds\
+```shell
+# 1. Add your document (markdown or .docx both work) into dlds/
+#    -- e.g. `cp my_ip_dld.md dlds/` or your OS's file manager
 
 # 2. Run the automated pipeline
-python tools\auto_ip_pipeline.py
+python tools/auto_ip_pipeline.py
 ```
 
 The pipeline detects the new document and drives everything: normalization (if
@@ -105,9 +114,9 @@ implementing model behavior) — for those the pipeline either:
   the prompt from stdin, and can edit files. The runner pipes the prompt in,
   validates the result, and retries with the failure log if validation fails:
 
-  ```powershell
-  python tools\auto_ip_pipeline.py --agent codex        # named profile from the harness YAML
-  python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any raw command
+  ```shell
+  python tools/auto_ip_pipeline.py --agent codex        # named profile from the harness YAML
+  python tools/auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any raw command
   ```
 
 When the pipeline reports green, you have a validated model in
@@ -145,8 +154,8 @@ flowchart TD
 
 2. **Extract** a draft spec and a gaps report:
 
-   ```powershell
-   python tools\dld_to_template.py dlds\<ip>_dld.md
+   ```shell
+   python tools/dld_to_template.py dlds/<ip>_dld.md
    ```
 
 3. **Review** the draft (`templates/<ip>.template.draft.yaml`): replace every
@@ -155,16 +164,16 @@ flowchart TD
 
 4. **Pass the gates**, then **promote** the draft:
 
-   ```powershell
-   python tools\check_template_coverage.py templates\<ip>.template.draft.yaml dlds\<ip>_dld.md --strict
-   python tools\template_lint.py templates\<ip>.template.yaml
+   ```shell
+   python tools/check_template_coverage.py templates/<ip>.template.draft.yaml dlds/<ip>_dld.md --strict
+   python tools/template_lint.py templates/<ip>.template.yaml
    ```
 
 5. **Generate the model scaffold** and fill in behavior *from the template
    only*:
 
-   ```powershell
-   python tools\generate_model_scaffold.py templates\<ip>.template.yaml --output-dir src\ip_model_automation
+   ```shell
+   python tools/generate_model_scaffold.py templates/<ip>.template.yaml --output-dir src/ip_model_automation
    ```
 
 6. **Write unit tests** from the template's `test_scenarios` (and register
@@ -172,8 +181,8 @@ flowchart TD
 
 7. **Validate everything**:
 
-   ```powershell
-   python tools\validate_dld_flow.py
+   ```shell
+   python tools/validate_dld_flow.py
    ```
 
 This exact path is how an IP joins the repo: a brand-new DLD in, a validated
@@ -228,9 +237,9 @@ What that gate cannot prove is that the **meaning** survived — a rewrite could
 preserve every number while attaching it to the wrong FSM. So that one claim is
 signed by a person, per IP, exactly the way the model provenance baseline is:
 
-```powershell
-python tools\check_dld_normalization.py <ip>            # the mechanical half
-python tools\check_dld_normalization.py --stamp <ip>    # "I read the diff; the meaning survived"
+```shell
+python tools/check_dld_normalization.py <ip>            # the mechanical half
+python tools/check_dld_normalization.py --stamp <ip>    # "I read the diff; the meaning survived"
 ```
 
 The stamp records a `(source, normalized)` hash pair; editing either file breaks
@@ -443,8 +452,8 @@ Every model also ships with:
 
 Run the whole test suite from the repo root:
 
-```powershell
-$env:PYTHONPATH="$PWD\src"
+```shell
+$env:PYTHONPATH="$PWD/src"
 python -m unittest discover -s tests
 ```
 
@@ -488,9 +497,9 @@ One command checks all of it, and the automated pipeline runs the same command
 as a required repo-wide `code_style` stage (a hard gate, right before the
 coverage gate):
 
-```powershell
-python tools\check_code_style.py          # check — what the pipeline runs
-python tools\check_code_style.py --fix    # apply auto-fixes and reformat
+```shell
+python tools/check_code_style.py          # check — what the pipeline runs
+python tools/check_code_style.py --fix    # apply auto-fixes and reformat
 ```
 
 New models inherit the style at generation time: every prompt pack carries a
@@ -529,7 +538,7 @@ state, and `check_wait_model_coverage.py` proves the model actually enters it �
 so a template cannot claim the requester blocks for a software clear while the
 model asserts the interrupt and loops on.
 
-One command — `python tools\validate_dld_flow.py` — runs the front-end gate
+One command — `python tools/validate_dld_flow.py` — runs the front-end gate
 for **every** DLD in the repo (template exists, lints, covers its DLD), then
 the model/test flow, and regenerates the readable template docs. A single
 green result proves the whole repo is consistent.
@@ -538,9 +547,9 @@ To run *every* repo-wide gate, not just that chain — style, code coverage,
 provenance, normalization fidelity, the Word-overview sync, and every recorded
 review finding fixed or dismissed by name:
 
-```powershell
-python tools\run_ci.py                 # about a minute
-python tools\run_ci.py --install-hook  # once per clone: run it before every push
+```shell
+python tools/run_ci.py                 # about a minute
+python tools/run_ci.py --install-hook  # once per clone: run it before every push
 ```
 
 This is the repo's CI, and it is **local by choice** — there is no hosted
@@ -552,11 +561,11 @@ package one machine happens to have), and it warns when the working tree is
 dirty, because then the files being checked are not the commits being pushed.
 
 Two more repo-wide hard gates run in the automated pipeline alongside the
-chain above: `python tools\check_code_style.py` (ruff lint + format — the
-coding style guide's mechanical half) and `python tools\run_code_coverage.py
+chain above: `python tools/check_code_style.py` (ruff lint + format — the
+coding style guide's mechanical half) and `python tools/run_code_coverage.py
 --fail-under 95 --fail-under-file 95` — *code* coverage, which model lines the
 unit tests actually execute (coverage.py, table + optional `--html` report in
-`reports\code_coverage\`), enforced at 95%+ both in total and per model file.
+`reports/code_coverage/`), enforced at 95%+ both in total and per model file.
 
 Beyond those, `run_ci.py` runs five further checks that are deliberately **not**
 pipeline stages — they guard artifacts the pipeline produces rather than steps
@@ -567,10 +576,10 @@ breaks one is exactly as broken as a failing test: `check_model_provenance.py`
 author source, and human-stamped), `check_overview_sync.py` (this Word document
 has not drifted from `project_overview.md`), `check_review_findings.py` (every
 finding either review stage has filed — `review_normalization` or
-`review_model` — is fixed or dismissed by name in `decisions\<ip>.md`), and
+`review_model` — is fixed or dismissed by name in `decisions/<ip>.md`), and
 `report_review_status.py --check` (the generated review-status block below is
 still what `reviews/*.findings.yaml` and `decisions/*.md` actually say). Ten
-gates in total; `python tools\run_ci.py --list` prints all of them with their
+gates in total; `python tools/run_ci.py --list` prints all of them with their
 commands.
 
 ## The automated pipeline runner
@@ -875,14 +884,14 @@ through the whole flow instead of being silently guessed.
 
 ## Step 1 — extract a draft spec + gaps report
 
-```powershell
-python tools\dld_to_template.py dlds\completion_ip_dld.md
+```shell
+python tools/dld_to_template.py dlds/completion_ip_dld.md
 ```
 
 ```text
-wrote draft:  templates\completion_ip.template.draft.yaml
-wrote report: reports\completion_ip.gaps.md
-wrote doc:    reports\template_docs\completion_ip.template.draft.html
+wrote draft:  templates/completion_ip.template.draft.yaml
+wrote report: reports/completion_ip.gaps.md
+wrote doc:    reports/template_docs/completion_ip.template.draft.html
 Next: resolve TODO_REVIEW markers, lint, check coverage, then promote.
 ```
 
@@ -960,9 +969,9 @@ rather than a depth being picked so the field looks filled in.
 
 ## Step 3 — pass the gates, promote to golden
 
-```powershell
-python tools\check_template_coverage.py templates\completion_ip.template.draft.yaml dlds\completion_ip_dld.md --strict
-python tools\template_lint.py templates\completion_ip.template.yaml
+```shell
+python tools/check_template_coverage.py templates/completion_ip.template.draft.yaml dlds/completion_ip_dld.md --strict
+python tools/template_lint.py templates/completion_ip.template.yaml
 ```
 
 ```text
@@ -984,8 +993,8 @@ schema/contract. The draft was then renamed to the golden
 
 ## Step 4 — scaffold + implement the model
 
-```powershell
-python tools\generate_model_scaffold.py templates\completion_ip.template.yaml --output-dir src\ip_model_automation
+```shell
+python tools/generate_model_scaffold.py templates/completion_ip.template.yaml --output-dir src/ip_model_automation
 ```
 
 Each of the three template FSMs became one concurrent SimPy process in
@@ -1066,8 +1075,8 @@ state the template named — then the output opens and it drains. The scenario's
 
 ## Step 6 — the repo-wide gate
 
-```powershell
-python tools\validate_dld_flow.py
+```shell
+python tools/validate_dld_flow.py
 ```
 
 Green means, for `completion_ip` specifically: its template lints and covers its
@@ -1088,15 +1097,15 @@ actually enters, and its unit tests pass alongside the rest of the suite.
 
 ## Step 7 — the review neither of the above can substitute for
 
-```powershell
-python tools\check_review_findings.py completion_ip --require model
+```shell
+python tools/check_review_findings.py completion_ip --require model
 ```
 
 Green here means only that a current `review_model` finding either does not
 exist yet or has been fixed or dismissed — not that one has looked and found
 nothing. Step 6's gates were satisfied by construction: the same session wrote
 the model and the tests that pass against it, which is exactly the blind spot
-`review_model` exists to catch (Part 3, "The gates: what \"validated\" actually
+`review_model` exists to catch (Part 3, "The gates: what /"validated/" actually
 means"). `completion_ip`'s own review history is real: round five filed six
 findings against it, all fixed or dismissed by name in
 `decisions/completion_ip.md`; a fresh reviewer with no memory of those fixes
@@ -1109,7 +1118,7 @@ of them.
 
 One footnote: this walkthrough shows the manual, stage-by-stage path so each
 artifact is visible. Today the automated runner does all of it from the DLD drop
-onward — `python tools\auto_ip_pipeline.py` (Part 3).
+onward — `python tools/auto_ip_pipeline.py` (Part 3).
 
 # Part 5 — Current status
 

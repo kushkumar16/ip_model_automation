@@ -670,18 +670,37 @@ class ArbitrationIpModel:
             # both what the contract says and the safer of the two: the queue
             # and the burst state can move while the downstream is not
             # accepting.
+            # Whether the next pass through the loop below should hold on
+            # issue_ready before re-reading. This is true only right after a
+            # retry caused by the ISSUE_REQUEST -> ISSUE_STALL reject edge
+            # (downstream_did_not_accept) -- never on the first attempt (no
+            # declared edge reaches ISSUE_STALL from WAIT_SELECTION; round
+            # twelve's M43) and never after a burst stall (CALC_ISSUE_COUNT ->
+            # ISSUE_STALL on issue_count_zero). gating_relationships declares
+            # issue_ready and burst as two independent gates on ISSUE_REQUEST,
+            # and the template's one ISSUE_STALL -> READ_PENDING_COUNT retry
+            # edge carries no issue_ready condition; holding a burst retry on
+            # issue_ready as well would miss a burst replenishment while
+            # issue_ready happened to still be low, and record the wait as
+            # output_backpressure when burst was what actually blocked it
+            # (round twelve's M45).
+            hold_for_issue_ready = False
             while True:
-                # The hold comes before the re-read, not after it. issue_if
-                # declares that while issue_ready is low the pipeline holds in
-                # ISSUE_STALL; re-reading the pending count and burst on a loop
-                # during backpressure would leave it cycling through
-                # READ_PENDING_COUNT and READ_BURST instead of holding.
-                while not self.output_ready:
-                    self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
-                    self.metrics["output_stalls"] += 1
-                    self.metrics["output_backpressure_cycles"] += 1
-                    self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
-                    yield self.env.timeout(1)
+                # The hold comes before the re-read, not after it -- but only
+                # for a retry that stalled at ISSUE_REQUEST. Holding here is
+                # what "while issue_ready is low the pipeline holds in
+                # ISSUE_STALL" means for that edge; re-reading the pending
+                # count and burst on a loop during backpressure would leave it
+                # cycling through READ_PENDING_COUNT and READ_BURST instead of
+                # holding.
+                if hold_for_issue_ready:
+                    while not self.output_ready:
+                        self._set_fsm_state("issue_pipeline", "ISSUE_STALL")
+                        self.metrics["output_stalls"] += 1
+                        self.metrics["output_backpressure_cycles"] += 1
+                        self.logger.warning("output backpressure selection=%s time=%s", selection, self.env.now)
+                        yield self.env.timeout(1)
+                    hold_for_issue_ready = False
 
                 self._set_fsm_state("issue_pipeline", "READ_PENDING_COUNT")
                 yield self.env.timeout(self.latency["pending_count"])
@@ -729,8 +748,10 @@ class ArbitrationIpModel:
                 self.metrics["output_backpressure_cycles"] += 1
                 self.logger.warning("issue_ready dropped during request selection=%s time=%s", selection, self.env.now)
                 yield self.env.timeout(1)
-                # back to the top: it holds here while issue_ready stays low,
-                # and re-reads only once the downstream is ready again.
+                # back to the top: the next pass holds here while issue_ready
+                # stays low, and re-reads only once the downstream is ready
+                # again.
+                hold_for_issue_ready = True
 
             issued_cmds = []
             queue = self.queues[selection["port_id"]][selection["tenant_id"]][selection["sq_id"]]

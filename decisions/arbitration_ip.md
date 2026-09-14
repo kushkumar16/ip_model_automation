@@ -82,3 +82,22 @@ first cousin, the normal `PORT_SCAN -> TENANT_SCAN` — pays the real six.
 What was real underneath this finding, and is fixed: the retry into
 `TENANT_SCAN` this edge leads to used to be charged *some* cost and then
 discarded without ever calling `_select_tenant()` again — see M31.
+
+## FLUSH's ordering barrier
+
+**M44 dismissed:** `FLUSH`'s `ordering_barrier_clear`/`preserve_ordering`
+trace back to `dlds/arbitration_ip_dld.md` §13 Open Items, which lists
+"Flush/admin ordering rules" as explicitly unresolved — the DLD never states
+what an ordering barrier is scoped to (per-SQ, per-tenant, per-port, global)
+or what clears it. The template promoted both as named `valid_conditions`/
+`functional_effects` on FLUSH without that decision ever having been made, so
+the model has nothing to implement them against.
+
+Implementing an ordering barrier now would mean inventing the one thing this
+project's whole discipline exists to not invent: a behavior the DLD does not
+state. `FLUSH` is arbitrated and issued exactly like an unordered `READ` in
+the meantime — a real, known gap, tracked here rather than papered over. This
+does not close until the DLD's own open item is resolved and the template
+re-promoted through review, at which point the model can implement whatever
+is actually decided; a future review re-finding the same gap under a new id
+is this same dismissal repeated, not a new question.

@@ -1021,10 +1021,22 @@ class TestArbitrationIpModel(unittest.TestCase):
         model.set_issue_ready(False)
         model.enqueue(Command("held", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
 
+        # A freshly granted selection must still pay READ_PENDING_COUNT ->
+        # READ_BURST -> CALC_ISSUE_COUNT before it can ever land in
+        # ISSUE_STALL: WAIT_SELECTION's only declared exit is unconditional,
+        # and issue_if names ISSUE_REQUEST as its sole wait point. The
+        # pipeline used to check issue_ready before that chain ran at all and
+        # skip straight from WAIT_SELECTION to ISSUE_STALL whenever it was
+        # already low at grant time -- an edge nothing declares (round
+        # twelve's M43). No backpressure cycle is charged yet at t=10.
+        env.run(until=10)
+        self.assertEqual(model.metrics["output_backpressure_cycles"], 0)
+        self.assertEqual(model.fsm_state["issue_pipeline"], "CALC_ISSUE_COUNT")
+
         # The three scan stages each cost scan_latency now, where the parameter
         # used to zero two of them and grant, and arbiter_main holds RESET and
         # IDLE for real cycles, so the pipeline reaches its first backpressure
-        # cycle at t=13 rather than immediately.
+        # cycle only after paying that chain and reaching ISSUE_REQUEST.
         env.run(until=14)
 
         self.assertEqual(model.downstream_requests, [])
@@ -1041,6 +1053,52 @@ class TestArbitrationIpModel(unittest.TestCase):
 
         model.set_issue_ready(True)
         env.run(until=30)
+
+        self.assertEqual(model.downstream_requests[0]["cmd_ids"], ["held"])
+        self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 0)
+
+    def test_arbitration_burst_stall_retry_does_not_wait_on_issue_ready(self):
+        # gating_relationships declares issue_ready and burst as two
+        # independent gates on ISSUE_REQUEST, and the template's one
+        # ISSUE_STALL -> READ_PENDING_COUNT retry edge carries no issue_ready
+        # condition. A burst stall (CALC_ISSUE_COUNT -> ISSUE_STALL on
+        # issue_count_zero) never reached ISSUE_REQUEST, so its retry must not
+        # wait on issue_ready before re-reading -- otherwise a burst
+        # replenished while issue_ready happens to still be low goes unnoticed
+        # (round twelve's M45).
+        env = simpy.Environment()
+        model = ArbitrationIpModel(
+            env,
+            scan_latency=1,
+            issue_latency=1,
+            port_mode="single",
+            pending_count_latency=1,
+            burst_read_latency=1,
+            burst_calc_latency=1,
+            burst_debit_latency=1,
+        )
+        model.configure_burst(device=0)
+        model.set_issue_ready(False)
+        model.enqueue(Command("held", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        # Burst alone stalls the selection, twice, with issue_ready never
+        # once checked: output_stalls/output_backpressure_cycles stay at 0.
+        env.run(until=15)
+        self.assertGreaterEqual(model.metrics["burst_stalls"], 2)
+        self.assertEqual(model.metrics["output_stalls"], 0)
+        self.assertEqual(model.metrics["output_backpressure_cycles"], 0)
+
+        # Replenish burst while issue_ready is still low. The retry must
+        # notice on its own, without issue_ready ever going high in between,
+        # and only then reach ISSUE_REQUEST and stall there for the real
+        # (issue_ready) reason.
+        model.configure_burst(device=10)
+        env.run(until=21)
+        self.assertEqual(model.fsm_state["issue_pipeline"], "ISSUE_STALL")
+        self.assertGreater(model.metrics["output_stalls"], 0)
+
+        model.set_issue_ready(True)
+        env.run(until=35)
 
         self.assertEqual(model.downstream_requests[0]["cmd_ids"], ["held"])
         self.assertEqual(len(model.queues["port0"]["T0"]["SQ0"]), 0)

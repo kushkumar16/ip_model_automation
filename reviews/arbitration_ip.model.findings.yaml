@@ -1,44 +1,6 @@
 ip: arbitration_ip
 kind: model
 template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
-model_sha256: 1353e5b146182ddbeb529cb0f849cdcaa82705340c62b01ca307ed932c1bfa71
-tests_sha256: 2e510e38b4ed5a0289bd17621c1ea1dea10b08bbb35ef640fc2708244d7edd59
-findings:
-  - id: M42
-    class: scenario_gap
-    severity: low
-    claim: >-
-      The weighted_order_four_tenants test_scenario's declared
-      expected_performance_properties: [no_output_stall] is never checked by
-      the test written for it, and no other test in the suite covers a
-      sustained multi-tenant weighted-load configuration for this property
-      either.
-    template: >-
-      templates/arbitration_ip.template.yaml test_scenarios[0]
-      (weighted_order_four_tenants), expected_performance_properties:
-      [no_output_stall]
-    model: >-
-      tests/test_arbitration_ip.py
-      test_arbitration_weighted_order_across_four_tenants (its docstring
-      names this scenario by name: "The weighted_order_four_tenants
-      scenario, which no test drove"); it and its helper
-      _four_tenant_sequence (lines ~138-173) assert only selection_trace
-      tenant order and never read model.metrics["output_stalls"] or
-      model.metrics["output_backpressure_cycles"]. The only two assertions
-      on output_backpressure_cycles in the whole file are in
-      test_arbitration_downstream_backpressure_holds_selected_sq and
-      test_arbitration_issue_ready_dropping_during_the_request_holds_the_command
-      (lines 312 and 985), both single-tenant backpressure scenarios
-      unrelated to this one.
-    why: >-
-      A reader relying on test_scenarios to know what the suite verifies
-      would believe the no-stall claim for this weighted, multi-tenant,
-      multi-port scenario had been checked; it has not. The underlying
-      behaviour is very likely correct (issue_ready is never lowered in
-      this test), so this does not look like a live bug, but it is exactly
-      the kind of declared-but-unexercised property this stage exists to
-      surface, and the same repo's own test history shows this class of gap
-      (a declared expected_performance_property nothing checked) has been
-      treated as worth a dedicated fix before, e.g. the timing assertions
-      later added in test_arbitration_charges_its_declared_latencies_at_defaults
-      and test_arbitration_issue_pipeline_charges_its_declared_latencies.
+model_sha256: 9bbcf6226dec46e30b814c65a7175c07ec3bf430836f1f277fbeb50330c978f9
+tests_sha256: ce367b562e51f0627896375e3d0400deb99cae2623546badc38e8cc099be7cc5
+findings: []

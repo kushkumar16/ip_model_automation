@@ -44,6 +44,16 @@ Change detection hashes DLD sources into ``reports/.dld_pipeline_state.json``
 (gitignored); an IP is only marked processed after its full chain passes. The
 hash covers the IP's ``.src.md`` too, where one exists, so editing the author's
 document re-triggers normalization.
+
+``--dry-run`` reports which IPs would need an agent, and how many attempts it
+could take, by running every gate for real (gates are read-only checks) and
+stopping before the dispatch itself; it never touches the state file above.
+``--gate-timeout``/``--agent-timeout`` bound how long a hung tool stage or a
+wedged agent CLI can block the run before it is killed (defaults 300s/1800s).
+A lock file (``reports/.auto_ip_pipeline.lock``, PID-stamped) refuses a
+second concurrent run against the same checkout rather than letting two runs
+race on the state file or on generated model/test files; ``--force-lock``
+overrides a lock that is actually stale.
 """
 
 from __future__ import annotations
@@ -58,6 +68,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +82,89 @@ HARNESS_PATH = REPO_ROOT / "harness" / "ip_generation_loop.yaml"
 SKILL_PATH = REPO_ROOT / "skills" / "ip-model-generation" / "SKILL.md"
 AGENT_CONTRACT_PATH = REPO_ROOT / "agents" / "ip_model_generation_agent.md"
 NORMALIZATION_CONTRACT_PATH = REPO_ROOT / "agents" / "dld_normalization_agent.md"
+LOCK_PATH = REPORTS_DIR / ".auto_ip_pipeline.lock"
+
+# A gate/tool stage is a deterministic command (lint, coverage, unit tests,
+# ...); five minutes is generous headroom over the slowest of them observed in
+# this repo. An agent stage can be an LLM writing a whole model and its tests;
+# thirty minutes is a starting point to tune per environment, not a measured
+# ceiling. Both are overridable per run (--gate-timeout / --agent-timeout)
+# rather than hard-coded, since "generous" depends on the machine and the
+# agent.
+DEFAULT_GATE_TIMEOUT = 300.0
+DEFAULT_AGENT_TIMEOUT = 1800.0
+
+
+@dataclass
+class RunOptions:
+    """Per-run knobs threaded through the stage engine, instead of a growing
+    positional-argument list every call site would otherwise need to repeat.
+
+    dispatch_count is the live running total this run has actually spent on
+    agent dispatches -- printed after each one (R4: visibility into spend
+    before it becomes a surprise). dry_run walks the same stage engine but
+    answers "what would need an agent" from real, current gate results
+    without spending anything: gates are read-only checks, safe to run for
+    real, so only the dispatch itself is skipped.
+    """
+
+    gate_timeout: float = DEFAULT_GATE_TIMEOUT
+    agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    dry_run: bool = False
+    dispatch_count: int = 0
+    dry_run_estimate: int = 0
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else -- treat as running
+    except OSError:
+        return False
+    return True
+
+
+def acquire_lock(force: bool = False) -> None:
+    """Refuse to start a second run against the same repo checkout.
+
+    Two runs racing on reports/.dld_pipeline_state.json (read-modify-write,
+    no locking of its own) can corrupt each other's bookkeeping, and two
+    agents editing the same model file concurrently is worse. The lock is a
+    PID file: a live PID refuses the new run outright; a stale one (process
+    no longer running -- e.g. the machine was killed mid-run) is reclaimed
+    with a warning, since a lock that can never be recovered from is worse
+    than the race it prevents. --force-lock bypasses a live lock too, for the
+    rare case the PID check itself is wrong (e.g. PID reuse) -- the same
+    "deliberate escape hatch" shape as SKIP_CI=1 elsewhere in this repo.
+    """
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.is_file():
+        raw = LOCK_PATH.read_text(encoding="utf-8").strip()
+        pid = int(raw) if raw.isdigit() else None
+        live = pid is not None and _pid_is_running(pid)
+        if live and not force:
+            raise SystemExit(
+                f"auto_ip_pipeline.py: already running (pid {pid}; lock at "
+                f"{LOCK_PATH.relative_to(REPO_ROOT)}). Two runs sharing this checkout can "
+                f"corrupt {STATE_PATH.relative_to(REPO_ROOT)} or race on the same generated "
+                f"files. Wait for it to finish, or pass --force-lock if that pid is not "
+                f"actually this tool."
+            )
+        if live and force:
+            print(f"auto_ip_pipeline.py: --force-lock overriding a live lock (pid {pid}).")
+        elif not live:
+            print(f"auto_ip_pipeline.py: reclaiming a stale lock (pid {pid} is not running).")
+    LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def release_lock() -> None:
+    try:
+        LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _load_tool(module_name: str):
@@ -293,7 +387,7 @@ def state_key(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
+def run_stage_command(stage: dict, ctx: dict[str, str], options: RunOptions) -> tuple[bool, str]:
     """Run one tool stage's harness command with {placeholder} substitution."""
     name = stage["name"]
     try:
@@ -302,15 +396,20 @@ def run_stage_command(stage: dict, ctx: dict[str, str]) -> tuple[bool, str]:
         raise SystemExit(f"harness stage '{name}': unknown placeholder {exc} in command")
     if argv and argv[0] == "python":
         argv[0] = sys.executable
-    result = subprocess.run(
-        argv,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+            timeout=options.gate_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {name}: TIMEOUT after {options.gate_timeout:.0f}s")
+        return False, f"stage '{name}' timed out after {options.gate_timeout:.0f}s: {' '.join(argv)}"
     output = (result.stdout or "") + (result.stderr or "")
     print(f"  {name}: {'OK' if result.returncode == 0 else 'FAIL'}")
     return result.returncode == 0, output
@@ -499,14 +598,18 @@ def implementation_prompt(ip_name: str, extra_context: str = "") -> str:
 def _previous_template(ip_name: str) -> str | None:
     """The last committed template for this IP (git is the history store), or
     None if it is not committed yet."""
-    result = subprocess.run(
-        ["git", "show", f"HEAD:templates/{ip_name}.template.yaml"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            ["git", "show", f"HEAD:templates/{ip_name}.template.yaml"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     return result.stdout if result.returncode == 0 else None
 
 
@@ -556,7 +659,7 @@ def resolve_agent_command(agent: str | None, agent_cmd: str | None, harness: dic
     return str(command)
 
 
-def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str) -> bool:
+def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str, options: RunOptions) -> bool:
     """Run the agent command with the prompt on stdin, or write a request file.
 
     Returns True if an agent actually ran (so gates should be re-checked)."""
@@ -566,10 +669,25 @@ def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str)
     if not agent_cmd:
         print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
         return False
-    print(f"  {stage}: running agent: {agent_cmd}")
-    result = subprocess.run(
-        agent_cmd, cwd=REPO_ROOT, input=prompt, text=True, encoding="utf-8", errors="replace", shell=True
+    options.dispatch_count += 1
+    print(
+        f"  {stage}: running agent (dispatch #{options.dispatch_count} this run, "
+        f"timeout {options.agent_timeout:.0f}s): {agent_cmd}"
     )
+    try:
+        result = subprocess.run(
+            agent_cmd,
+            cwd=REPO_ROOT,
+            input=prompt,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            timeout=options.agent_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  {stage}: agent TIMED OUT after {options.agent_timeout:.0f}s -- counted as a failed attempt")
+        return True
     print(f"  {stage}: agent exited {result.returncode}")
     return True
 
@@ -655,6 +773,7 @@ def provision_review_worktree(ip_name: str) -> Path:
         check=True,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     decisions_file = worktree_dir / "decisions" / f"{ip_name}.md"
     if decisions_file.is_file():
@@ -665,15 +784,21 @@ def provision_review_worktree(ip_name: str) -> Path:
 
 
 def cleanup_review_worktree(worktree_dir: Path) -> None:
-    subprocess.run(
-        ["git", "worktree", "remove", "--force", str(worktree_dir)],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_dir)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  warning: `git worktree remove` timed out cleaning up {worktree_dir}; remove it by hand later.")
 
 
-def dispatch_isolated_review(agent_cmd: str | None, ip_name: str, stage: str, kind: str, prompt: str) -> bool:
+def dispatch_isolated_review(
+    agent_cmd: str | None, ip_name: str, stage: str, kind: str, prompt: str, options: RunOptions
+) -> bool:
     """Like dispatch_agent, but runs the agent in an isolated worktree (see
     provision_review_worktree) and copies back only the one findings file the
     contract permits it to write.
@@ -685,12 +810,27 @@ def dispatch_isolated_review(agent_cmd: str | None, ip_name: str, stage: str, ki
     if not agent_cmd:
         print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
         return False
+    options.dispatch_count += 1
     worktree_dir = provision_review_worktree(ip_name)
     try:
-        print(f"  {stage}: running agent (isolated worktree, no memory of {ip_name}'s review history): {agent_cmd}")
-        result = subprocess.run(
-            agent_cmd, cwd=worktree_dir, input=prompt, text=True, encoding="utf-8", errors="replace", shell=True
+        print(
+            f"  {stage}: running agent (dispatch #{options.dispatch_count} this run, isolated worktree, "
+            f"no memory of {ip_name}'s review history, timeout {options.agent_timeout:.0f}s): {agent_cmd}"
         )
+        try:
+            result = subprocess.run(
+                agent_cmd,
+                cwd=worktree_dir,
+                input=prompt,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=True,
+                timeout=options.agent_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  {stage}: agent TIMED OUT after {options.agent_timeout:.0f}s -- counted as a failed attempt")
+            return True
         print(f"  {stage}: agent exited {result.returncode}")
         written = worktree_dir / "reviews" / f"{ip_name}.{kind}.findings.yaml"
         if written.is_file():
@@ -790,13 +930,19 @@ def run_gates(
     stages_by_name: dict[str, dict],
     ctx: dict[str, str],
     gate_results: dict[str, bool],
+    options: RunOptions,
 ) -> tuple[bool, str]:
-    """Run an agent stage's gate stages in order; stop at the first failure."""
+    """Run an agent stage's gate stages in order; stop at the first failure.
+
+    Gates are deterministic, read-only checks (lint, coverage, unit tests,
+    ...), so running them for real is exactly as safe in --dry-run as
+    otherwise -- dry-run only ever skips the dispatch, never a gate.
+    """
     for gate_name in gate_names:
         gate = stages_by_name.get(gate_name)
         if gate is None:
             raise SystemExit(f"harness: agent gate references unknown stage '{gate_name}'")
-        ok, out = run_stage_command(gate, ctx)
+        ok, out = run_stage_command(gate, ctx, options)
         gate_results[gate_name] = ok
         if not ok:
             return False, out
@@ -810,41 +956,46 @@ def run_agent_stage(
     stages_by_name: dict[str, dict],
     gate_results: dict[str, bool],
     default_attempts: int,
+    options: RunOptions,
 ) -> tuple[str, str]:
     """Skip the agent if its gates pass; otherwise dispatch it and re-check the
     gates, up to max_attempts. Returns (outcome, output) with outcome in
-    {'pass', 'awaiting', 'failed'}."""
+    {'pass', 'awaiting', 'failed', 'dry-run'}."""
     name = stage["name"]
     gate_names = stage.get("gates") or []
     if not gate_names:
         raise SystemExit(f"harness: agent stage '{name}' needs a 'gates' list")
-    ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results)
+    ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results, options)
     if ok:
         print(f"  {name}: skipped (gates already pass)")
         return "pass", ""
+    max_attempts = int(stage.get("max_attempts", default_attempts))
+    if options.dry_run:
+        options.dry_run_estimate += max_attempts
+        print(f"  {name}: [dry-run] gates fail; would dispatch up to {max_attempts} attempt(s)")
+        return "dry-run", out
     build_prompt = AGENT_PROMPT_BUILDERS.get(name)
     if build_prompt is None:
         raise SystemExit(f"harness: no prompt builder registered for agent stage '{name}'")
     review_kind = REVIEW_STAGE_KINDS.get(name)
-    max_attempts = int(stage.get("max_attempts", default_attempts))
     for attempt in range(1, max_attempts + 1):
         extra_context = f"\nAttempt {attempt}. Current gate output:\n{out[-4000:]}"
         if review_kind:
             next_id = next_finding_id(ctx["ip"], review_kind)
             prompt = build_prompt(ctx["ip"], next_id=next_id, extra_context=extra_context)
-            dispatched = dispatch_isolated_review(agent_cmd, ctx["ip"], name, review_kind, prompt)
+            dispatched = dispatch_isolated_review(agent_cmd, ctx["ip"], name, review_kind, prompt, options)
         else:
             prompt = build_prompt(ctx["ip"], extra_context)
-            dispatched = dispatch_agent(agent_cmd, ctx["ip"], name, prompt)
+            dispatched = dispatch_agent(agent_cmd, ctx["ip"], name, prompt, options)
         if not dispatched:
             return "awaiting", ""
-        ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results)
+        ok, out = run_gates(gate_names, stages_by_name, ctx, gate_results, options)
         if ok:
             return "pass", ""
     return "failed", out
 
 
-def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
+def process_dld(source: Path, harness: dict, agent_cmd: str | None, options: RunOptions) -> str:
     """Run the harness's per-IP stages for one DLD source. Returns a status string."""
     dld_md = ensure_markdown_dld(source)
     ip_name = dld_tool.ip_name_from_path(dld_md)
@@ -868,7 +1019,16 @@ def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
                 print(f"  {name}: skipped (when: {when} is false)")
                 continue
         if stage_kind(stage) == "agent":
-            outcome, out = run_agent_stage(stage, ctx, agent_cmd, stages_by_name, gate_results, default_attempts)
+            outcome, out = run_agent_stage(
+                stage, ctx, agent_cmd, stages_by_name, gate_results, default_attempts, options
+            )
+            if outcome == "dry-run":
+                # Downstream stages' own gates are contingent on this agent's
+                # work actually having happened -- reporting past this point
+                # without it would be a guess dressed as an estimate, not a
+                # dry run. Stop here, honestly, at the first stage that needs
+                # one.
+                return f"dry-run: would need {name} (up to {stage.get('max_attempts', default_attempts)} attempt(s))"
             if outcome == "awaiting":
                 return f"awaiting {name}"
             if outcome == "failed":
@@ -878,7 +1038,7 @@ def process_dld(source: Path, harness: dict, agent_cmd: str | None) -> str:
             if gate_results.get(name):
                 print(f"  {name}: OK (already verified as an agent gate)")
                 continue
-            ok, out = run_stage_command(stage, ctx)
+            ok, out = run_stage_command(stage, ctx, options)
             gate_results[name] = ok
             if not ok:
                 if stage.get("awaiting_human"):
@@ -917,8 +1077,45 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--skip-final-gate", action="store_true", help="Skip the repo-wide (scope: repo) harness stages at the end"
     )
+    parser.add_argument(
+        "--gate-timeout",
+        type=float,
+        default=DEFAULT_GATE_TIMEOUT,
+        help=f"seconds before a tool/gate stage is killed as hung (default {DEFAULT_GATE_TIMEOUT:.0f})",
+    )
+    parser.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        help=f"seconds before an agent dispatch is killed as hung (default {DEFAULT_AGENT_TIMEOUT:.0f})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report which IPs would need an agent and how many attempts it could take, without "
+        "dispatching one or touching reports/.dld_pipeline_state.json. Every gate a dry run "
+        "reports on is still run for real -- gates are read-only checks, so this is the true "
+        "current answer, not a guess.",
+    )
+    parser.add_argument(
+        "--force-lock",
+        action="store_true",
+        help="Start even if another run's lock file claims this checkout is busy (see acquire_lock's "
+        "docstring for when this is actually safe)",
+    )
     args = parser.parse_args(argv)
 
+    options = RunOptions(gate_timeout=args.gate_timeout, agent_timeout=args.agent_timeout, dry_run=args.dry_run)
+    if not options.dry_run:
+        acquire_lock(force=args.force_lock)
+    try:
+        return _run(args, options)
+    finally:
+        if not options.dry_run:
+            release_lock()
+
+
+def _run(args: argparse.Namespace, options: RunOptions) -> int:
     harness = load_harness()
     agent_cmd = resolve_agent_command(args.agent, args.agent_cmd, harness)
     state = load_state()
@@ -934,12 +1131,16 @@ def main(argv: list[str]) -> int:
         print("no new or modified DLDs; nothing to do")
         return 0
 
-    print(f"processing {len(changed)} DLD(s): {', '.join(p.name for p in changed)}")
+    verb = "dry-run over" if options.dry_run else "processing"
+    print(f"{verb} {len(changed)} DLD(s): {', '.join(p.name for p in changed)}")
     statuses: dict[str, str] = {}
     for src in changed:
-        status = process_dld(src, harness, agent_cmd)
+        status = process_dld(src, harness, agent_cmd, options)
         statuses[src.name] = status
-        if status == "complete":
+        # A dry run must leave reports/.dld_pipeline_state.json exactly as it
+        # found it -- marking a DLD processed without having actually done
+        # anything would make the *next real run* silently skip it.
+        if status == "complete" and not options.dry_run:
             state[state_key(src)] = source_fingerprint(src)
             save_state(state)
 
@@ -949,7 +1150,7 @@ def main(argv: list[str]) -> int:
         print("\n=== repo-wide validation gate ===")
         repo_ctx = stage_context(harness)
         for stage in repo_stages:
-            ok, out = run_stage_command(stage, repo_ctx)
+            ok, out = run_stage_command(stage, repo_ctx, options)
             if not ok:
                 if not stage.get("required", True):
                     print(f"  {stage['name']}: FAIL (optional stage; continuing)")
@@ -962,7 +1163,15 @@ def main(argv: list[str]) -> int:
     print("\n=== summary ===")
     for name, status in statuses.items():
         print(f"  {name}: {status}")
-    return 0 if all(s.startswith("complete") or s.startswith("awaiting") for s in statuses.values()) else 1
+    if options.dry_run:
+        print(
+            f"\ndry run: up to {options.dry_run_estimate} agent invocation(s) across this run, worst case "
+            f"(every attempt fails and the loop runs to max_attempts). No agent was dispatched and "
+            f"reports/.dld_pipeline_state.json was not touched."
+        )
+    else:
+        print(f"\n{options.dispatch_count} agent invocation(s) actually dispatched this run.")
+    return 0 if all(s.startswith(("complete", "awaiting", "dry-run")) for s in statuses.values()) else 1
 
 
 if __name__ == "__main__":

@@ -3,10 +3,12 @@ import copy
 import importlib.util
 import io
 import logging
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1057,7 +1059,9 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 "mkdir -p reviews && "
                 "printf 'ip: probe_ip\\nkind: model\\nfindings: []\\n' > reviews/probe_ip.model.findings.yaml"
             )
-            dispatched = pipeline.dispatch_isolated_review(fake_agent, "probe_ip", "review_model", "model", "prompt")
+            dispatched = pipeline.dispatch_isolated_review(
+                fake_agent, "probe_ip", "review_model", "model", "prompt", pipeline.RunOptions()
+            )
             self.assertTrue(dispatched)
             self.assertEqual(
                 (root / "reviews" / "probe_ip.model.findings.yaml").read_text(encoding="utf-8"),
@@ -1067,6 +1071,97 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
             ).stdout
             self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
+
+    def test_agent_dispatch_times_out_instead_of_hanging_forever(self):
+        """R3: a wedged agent CLI must not block the pipeline indefinitely.
+
+        A real subprocess timeout, not a mocked one -- the fake "agent" is a
+        shell command that sleeps longer than the configured timeout, and the
+        assertion is on wall-clock time actually elapsed.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports" / "agent_requests").mkdir(parents=True)
+            pipeline.REPO_ROOT = root
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            options = pipeline.RunOptions(agent_timeout=0.3)
+
+            started = time.monotonic()
+            dispatched = pipeline.dispatch_agent("sleep 5", "probe_ip", "agent_implementation", "prompt", options)
+            elapsed = time.monotonic() - started
+
+            self.assertTrue(dispatched, "a timed-out attempt still counts as dispatched, so the loop moves on")
+            self.assertLess(elapsed, 4.0, "dispatch_agent waited past the configured timeout")
+            self.assertEqual(options.dispatch_count, 1)
+
+    def test_gate_command_that_hangs_is_killed_and_reported_as_failed(self):
+        """R3: the same timeout on the tool/gate side of run_stage_command."""
+        pipeline = self._load_pipeline()
+        stage = {"name": "hangs", "command": f'{sys.executable} -c "import time; time.sleep(5)"'}
+        options = pipeline.RunOptions(gate_timeout=0.3)
+
+        started = time.monotonic()
+        ok, out = pipeline.run_stage_command(stage, {}, options)
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(ok)
+        self.assertIn("timed out", out)
+        self.assertLess(elapsed, 4.0, "run_stage_command waited past the configured timeout")
+
+    def test_pipeline_lock_refuses_a_live_run_but_reclaims_a_stale_one(self):
+        """R3: two `auto_ip_pipeline.py` runs must not race on the same checkout.
+
+        Uses real PIDs, not a mocked liveness check: a genuinely-finished
+        child process for the stale case, and this test's own PID (definitely
+        alive) for the live case.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports").mkdir()
+            pipeline.REPO_ROOT = root
+            pipeline.REPORTS_DIR = root / "reports"
+            pipeline.LOCK_PATH = root / "reports" / ".auto_ip_pipeline.lock"
+            pipeline.STATE_PATH = root / "reports" / ".dld_pipeline_state.json"
+
+            # A stale lock (the pid it names has already exited) is reclaimed.
+            child = subprocess.Popen([sys.executable, "-c", "pass"])
+            stale_pid = child.pid
+            self.assertEqual(child.wait(timeout=5), 0)
+            pipeline.LOCK_PATH.write_text(str(stale_pid), encoding="utf-8")
+            pipeline.acquire_lock()  # must not raise
+            self.assertEqual(pipeline.LOCK_PATH.read_text(encoding="utf-8").strip(), str(os.getpid()))
+            pipeline.release_lock()
+            self.assertFalse(pipeline.LOCK_PATH.exists())
+
+            # A live lock (this test process's own pid) refuses...
+            pipeline.LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                pipeline.acquire_lock()
+            # ...unless force-lock is passed.
+            pipeline.acquire_lock(force=True)
+            pipeline.release_lock()
+
+    def test_dry_run_estimates_without_dispatching_or_advancing_state(self):
+        """R4: --dry-run must answer from real (gate-checked) state, spend
+        nothing, and leave reports/.dld_pipeline_state.json untouched."""
+        pipeline = self._load_pipeline()
+
+        always_fails = {"name": "always_fails", "command": f'{sys.executable} -c "import sys; sys.exit(1)"'}
+        agent_stage = {"name": "agent_implementation", "gates": ["always_fails"], "max_attempts": 5}
+        stages_by_name = {"always_fails": always_fails}
+        options = pipeline.RunOptions(dry_run=True)
+
+        outcome, _out = pipeline.run_agent_stage(
+            agent_stage, {"ip": "probe_ip"}, "some-agent-cmd", stages_by_name, {}, 3, options
+        )
+
+        self.assertEqual(outcome, "dry-run")
+        self.assertEqual(options.dry_run_estimate, 5, "should use the stage's own max_attempts, not the default")
+        self.assertEqual(options.dispatch_count, 0, "a dry run must not actually dispatch anything")
 
     def test_a_reviewers_gate_is_not_satisfied_by_its_own_absence(self):
         """The gate driving a reviewer must fail when no review has been run.

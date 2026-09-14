@@ -241,6 +241,23 @@ python tools\auto_ip_pipeline.py --agent-cmd "my-agent --auto"   # any other age
 Whichever agent writes the code, the same gates judge it: template coverage,
 lint, unit tests, the coding style check, and the coverage thresholds.
 
+Before spending anything, see what the run would need without dispatching a
+single agent — `--dry-run` runs every gate for real (gates are read-only
+checks, so this is the true current answer, not a guess) and reports the
+first stage each changed IP would need an agent for, and how many attempts it
+could take, without touching `reports/.dld_pipeline_state.json`:
+
+```powershell
+python tools\auto_ip_pipeline.py --dry-run
+```
+
+Two more knobs guard an unattended run: `--gate-timeout`/`--agent-timeout`
+(seconds before a hung tool stage or a wedged agent CLI is killed instead of
+blocking the run forever — defaults 300 / 1800) and a per-checkout lock file
+(`reports/.auto_ip_pipeline.lock`) that refuses a second concurrent run
+rather than letting two runs race on the same pipeline state and generated
+files; `--force-lock` overrides a lock that is actually stale.
+
 ## Continuous Integration (local)
 
 CI here is **deliberately local**: the gates run on this machine, before a push,

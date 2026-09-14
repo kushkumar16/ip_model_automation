@@ -49,7 +49,15 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from ._repo_root import find_repo_root
+except ImportError:  # not running as part of the `ip_model_automation.tools`
+    # package (e.g. `python tools/x.py`, or a test loading this file
+    # directly via importlib) -- fall back to a sibling top-level import.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _repo_root import find_repo_root
+
+REPO_ROOT = find_repo_root()
 DLDS_DIR = REPO_ROOT / "dlds"
 REPORTS_DIR = REPO_ROOT / "reports"
 BASELINES_PATH = DLDS_DIR / "normalization_baselines.json"

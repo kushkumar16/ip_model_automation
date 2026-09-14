@@ -29,9 +29,17 @@ that dismissal is a decision on the record rather than a silence.
 reported nothing, which is a weaker claim than "faithful" and must not be read as
 the stronger one. The normalization stamp remains the human judgement.
 
+**Never having been reviewed is not a pass either.** The default (no-args) run
+also fails for any promoted IP (one with a golden template, i.e. a model exists
+to review) that has no ``model`` review file at all — not stale, simply never
+run. A findings-file loop only ever sees files that exist, so a model that was
+never reviewed once produced neither a stale-review error nor an unresolved-
+finding error, just silence — exactly the gap that let a real IP run several
+rounds unreviewed before anyone thought to check (see git history).
+
 Usage::
 
-    python tools/check_review_findings.py                # every IP with findings
+    python tools/check_review_findings.py                # every IP with findings, plus any promoted IP missing one
     python tools/check_review_findings.py arbitration_ip # one IP
     python tools/check_review_findings.py --list         # what is outstanding
 """
@@ -56,6 +64,7 @@ REPO_ROOT = find_repo_root()
 DLDS_DIR = REPO_ROOT / "dlds"
 REVIEWS_DIR = REPO_ROOT / "reviews"
 DECISIONS_DIR = REPO_ROOT / "decisions"
+TEMPLATES_DIR = REPO_ROOT / "templates"
 
 # Two review kinds, because there are two places a faithful-looking artifact can
 # still be wrong, and each compares a different pair of things:
@@ -142,6 +151,31 @@ def reviews() -> list[tuple[str, str]]:
 
 def reviewed_ips() -> list[str]:
     return sorted({ip for ip, _kind in reviews()})
+
+
+def promoted_ips() -> list[str]:
+    """Every IP with a golden template, i.e. one build_model_scaffold has run
+    against -- the same source of truth check_model_provenance.py uses for
+    "which IPs must be checked". A promoted template implies a model exists
+    to review; unlike ``reviewed_ips()`` this does not depend on a review
+    having ever been run, which is the whole point of using it here.
+    """
+    if not TEMPLATES_DIR.is_dir():
+        return []
+    return sorted(p.name[: -len(".template.yaml")] for p in TEMPLATES_DIR.glob("*.template.yaml"))
+
+
+def missing_model_reviews(ips: set[str] | None = None) -> list[str]:
+    """Promoted IPs with no `model` review file at all -- never run, not merely
+    stale. `check_ip`/`review_is_stale` only ever look at files that already
+    exist, so an IP that has never been reviewed once was invisible to this
+    gate: it produced neither a stale-review error nor an unresolved-finding
+    error, just silence, for as long as nobody thought to ask (see
+    storage_pipeline_subsystem, unreviewed from R7 until round thirteen).
+    """
+    reviewed = {ip for ip, kind in reviews() if kind == "model"}
+    candidates = set(promoted_ips()) if ips is None else ips & set(promoted_ips())
+    return sorted(candidates - reviewed)
 
 
 def load_findings(path: Path) -> tuple[dict, list[str]]:
@@ -303,6 +337,8 @@ def outstanding_summary() -> list[str]:
         open_count = sum(1 for f in data["findings"] if f.get("id") not in resolved)
         state = "stale" if review_is_stale(data, ip, kind) else "current"
         lines.append(f"  {ip} ({kind}): {total} finding(s), {open_count} unresolved, review {state}")
+    for ip in missing_model_reviews():
+        lines.append(f"  {ip} (model): no review has ever been run")
     return lines or ["  (no reviews recorded)"]
 
 
@@ -362,12 +398,6 @@ def main(argv: list[str]) -> int:
 
     wanted = set(args.ips) if args.ips else None
     pairs = [(ip, kind) for ip, kind in reviews() if wanted is None or ip in wanted]
-    if not pairs:
-        # No reviewer has run. That is the current state of the world, not a
-        # clean bill of health: the stage is unbuilt (see the proposal's build
-        # order), and this becomes a hard requirement when it is wired in.
-        print("review findings: none recorded (no reviews/*.findings.yaml)")
-        return 0
 
     errors: list[str] = []
     for ip in sorted({ip for ip, _kind in pairs}):
@@ -375,12 +405,32 @@ def main(argv: list[str]) -> int:
     for ip, kind in pairs:
         errors += check_ip(ip, kind)
 
+    # A promoted IP that has never been reviewed at all is not a clean bill of
+    # health -- it is exactly as much a gap as a stale one, just invisible to
+    # the loop above because there is no file for it to iterate. Named IPs
+    # that are not promoted (no golden template yet) are not held to this;
+    # nothing to review means nothing owed.
+    never_reviewed = missing_model_reviews(wanted)
+    for ip in never_reviewed:
+        errors.append(
+            f"{ip} (model): no review has ever been run. Run the review_model stage against it "
+            f"(see agents/model_review_agent.md), then commit reviews/{ip}.model.findings.yaml."
+        )
+
     if errors:
         print("review findings: FAIL", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print(f"review findings: OK ({len(pairs)} review(s), every finding accounted for)")
+
+    if not pairs and not never_reviewed:
+        print("review findings: none recorded (no promoted IPs to review)")
+        return 0
+
+    print(
+        f"review findings: OK ({len(pairs)} review(s), every finding accounted for, "
+        f"every promoted IP has a current model review)"
+    )
     return 0
 
 

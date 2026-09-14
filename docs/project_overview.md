@@ -662,6 +662,17 @@ Details worth knowing:
   model file already exists before any stage runs. A new IP takes the generate
   path (`scaffold` + `agent_implementation`); an existing IP whose DLD changed
   takes the amend path (`amend_implementation`), described next.
+- **See the cost before spending anything**: `--dry-run` runs every gate for
+  real (gates are read-only checks, so this is the true current answer, not a
+  guess) and reports the first stage each changed IP would need an agent for
+  and how many attempts it could take, without dispatching a single agent or
+  touching `reports/.dld_pipeline_state.json`.
+- **An unattended run is guarded on two sides**: `--gate-timeout` /
+  `--agent-timeout` kill a hung tool stage or a wedged agent CLI instead of
+  blocking the run forever (defaults 300s / 1800s), and a per-checkout lock
+  file (`reports/.auto_ip_pipeline.lock`) refuses a second concurrent run
+  rather than letting two runs race on the same pipeline state and generated
+  files — `--force-lock` overrides a lock that is actually stale.
 
 ## Editing a DLD without rewriting the model
 
@@ -754,6 +765,25 @@ the model-class convention already route through the profile (the previously
 duplicated camel-case-plus-`Model` logic now lives only in `target_profile.py`);
 the remaining hardcoded paths each still resolve to the same default and are
 migrated as the other-framework integration firms up.
+
+**The tooling is also pip-installable**, so pointing it at another codebase no
+longer requires a clone of this repo alongside it: `pip install -e .` (or a
+built wheel) installs an `ipmodel` console script that dispatches every tool
+by name (`ipmodel run-ci`, `ipmodel generate-model-scaffold ...` — subcommand
+names are each tool's filename with underscores turned to hyphens). What makes
+this actually work from outside this repo, not just installable: every tool
+used to compute its target repo root from its own script location
+(`Path(__file__).resolve().parents[1]`), which only resolves correctly inside
+a clone of this repo. That is replaced with `tools/_repo_root.find_repo_root()`,
+which walks upward from the current working directory for `target_profile.yaml`
+or `.git` — the same discovery git/npm/eslint use. So `cd` into your own repo
+(with a `target_profile.yaml` if its layout differs from the defaults) and run
+`ipmodel <command>` there; `python tools/x.py` keeps working identically for
+local development. The one piece packaging does not close: a scaffolded model
+imports its logging/`Command` helpers from this repo's own
+`ip_model_automation.common`, so a target repo needs that module importable
+too. See the README's "Installing As A CLI" section for the full command
+reference.
 
 ## Beyond single IPs: subsystems
 
@@ -1224,6 +1254,11 @@ looked at all.
 - A **target profile** (`target_profile.yaml`) supplies the paths and the
   model-class naming, so the same tooling can be pointed at another SimPy
   codebase; migration of the remaining hardcoded paths is incremental.
+- The tooling is **pip-installable**: an `ipmodel` console script dispatches
+  every tool by name, and target-repo root discovery walks up from the
+  current directory (`target_profile.yaml` or `.git`) rather than from the
+  tooling's own install location — so pointing the pipeline at another
+  codebase no longer requires cloning this repo alongside it.
 - Extractor calibration holds for every golden IP (FSM name set + count
   reproduce exactly).
 

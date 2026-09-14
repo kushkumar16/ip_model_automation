@@ -35,10 +35,18 @@ behavior from the DLD.
   bitmaps, RR/WRR policy, and burst-limited issue pipeline.
 - `completion_ip`: command completion scheduling with per-tenant QoS tokens,
   window-based refill, and output backpressure.
+- `storage_pipeline_subsystem`: composes the two above into one pipeline —
+  a host submits a command once, to the subsystem, and three glue processes
+  forward it into `arbitration_ip`, forward what `arbitration_ip` issues into
+  `completion_ip`, and mirror `completion_ip`'s pending backlog back into
+  `arbitration_ip`'s issue readiness as backpressure. See
+  `dlds/storage_pipeline_subsystem_dld.md` and
+  `templates/storage_pipeline_subsystem.template.yaml`'s `subsystem:` section.
 
-Ten further IPs — including both subsystems — were retired on 2026-09-10; their
-artifacts are in git history. `docs/project_overview.md` Part 5 lists them and
-says what their removal costs the gates.
+Ten further IPs — including the two subsystems that predated this one — were
+retired on 2026-09-10; their artifacts are in git history.
+`docs/project_overview.md` Part 5 lists them and says what their removal costs
+the gates.
 
 ## Flow
 
@@ -64,11 +72,11 @@ documents every section, the rules each gate enforces, and the optional
 `subsystem:` section. It is kept lint-clean by the test suite but is named so
 template discovery never treats it as a real IP.
 
-Note that **no subsystem currently ships** — both were retired — so
-`check_subsystem_wiring.py` and the wiring stage inside `validate_dld_flow.py`
-presently have nothing to examine. Both still work; the test suite proves the
-checker still rejects bad wiring using a synthetic subsystem rather than a real
-one.
+`storage_pipeline_subsystem` is a real, live example of the `subsystem:`
+section in use — `check_subsystem_wiring.py` and the wiring stage inside
+`validate_dld_flow.py` check it on every run, not only the synthetic fixture
+the test suite also exercises for the bad-wiring cases a real subsystem
+would not naturally produce.
 
 DLDs vary in format and often omit details. Extract a draft template plus a gaps
 report from a DLD:

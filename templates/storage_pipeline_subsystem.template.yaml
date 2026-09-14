@@ -1,0 +1,265 @@
+ip:
+  name: storage_pipeline_subsystem
+  domain: soc_subsystem
+  description: Connects the Arbitration IP and the Completion IP into one command-scheduling-and-completion pipeline via three glue processes.
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: clear_glue_tracking_state_and_return_to_idle
+
+subsystem:
+  members:
+    - {ip: arbitration_ip, model: ArbitrationIpModel, role: scheduler}
+    - {ip: completion_ip, model: CompletionIpModel, role: qos_accounting}
+  connections:
+    - {from: intake_bridge, to: arbitration_ip.enqueue, payload: command, ack: none}
+    - {from: intake_bridge, to: completion_ip.configure_tenant, payload: qos_config, ack: none}
+    - {from: arbitration_ip.issued, to: dispatch_bridge, payload: issued_command}
+    - {from: dispatch_bridge, to: completion_ip.submit, payload: qos_command, ack: completion_event, ack_via: completion_ip.completed -> dispatch_bridge}
+    - {from: backpressure_monitor, to: arbitration_ip.set_issue_ready, payload: completion_backlog, ack: none}
+
+interfaces:
+  - name: command_intake_if
+    type: command_queue
+    direction: input
+    clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [intake_bridge.ACCEPT_COMMAND]
+      resumes_on: command_forwarded
+      source: dld
+      notes: the host is told the command was accepted, not that it has completed; completion is observed separately, through the Completion IP's own record.
+    transactions:
+      - name: command_intake_access
+        fields: [cmd_id, kind, port_id, tenant_id, sq_id]
+        handshake: queue_put
+        timing_notes: accepted once handed to the Arbitration IP's own ingress queue, not merely queued at the subsystem boundary
+  - name: qos_configuration_if
+    type: config
+    direction: input
+    clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [intake_bridge.APPLY_QOS_CONFIG]
+      resumes_on: qos_config_applied
+      source: dld
+    transactions:
+      - name: qos_configuration_access
+        fields: [tenant_id, token_budget]
+        handshake: immediate
+        timing_notes: applied synchronously once the bridge reaches the config state, no further than the Completion IP's own configure_tenant already defers it
+
+commands:
+  - name: SUBMIT_COMMAND
+    description: Host submits a command for scheduling and QoS-accounted completion.
+    fields: [cmd_id, kind, port_id, tenant_id, sq_id]
+    valid_conditions: [known_port_tenant_sq_binding]
+    completion_conditions: [completion_ip_records_completion]
+    error_conditions: [unknown_port_tenant_sq_binding]
+    functional_effects: [enqueue_into_arbitration_ip, forward_issued_command_into_completion_ip]
+    timing_effects: [intake_bridge_forward_delay, arbitration_ip_selection_delay, dispatch_bridge_forward_delay, completion_ip_scheduling_delay]
+  - name: CONFIGURE_QOS
+    description: Host sets a tenant's QoS token budget, applied to all four Completion IP token buckets alike.
+    fields: [tenant_id, token_budget]
+    valid_conditions: []
+    completion_conditions: [completion_ip_tenant_configured]
+    error_conditions: []
+    functional_effects: [update_completion_ip_token_buckets]
+    timing_effects: [intake_bridge_config_delay]
+
+fsm_processes:
+  - name: intake_bridge
+    purpose: Accept a host command or a QoS config request and forward it to the right member IP.
+    simpy_process: true
+    states: [IDLE, ACCEPT_COMMAND, FORWARD_TO_ARBITRATION, ACCEPT_QOS_CONFIG, APPLY_QOS_CONFIG]
+    transitions:
+      - from: IDLE
+        to: ACCEPT_COMMAND
+        condition: next_intake_item_is_a_command
+        actions: [dequeue_intake_item]
+        latency_cycles: 1
+      - from: ACCEPT_COMMAND
+        to: FORWARD_TO_ARBITRATION
+        condition: command_accepted_for_forwarding
+        actions: [enqueue_into_arbitration_ip]
+        latency_cycles: 1
+      - from: FORWARD_TO_ARBITRATION
+        to: IDLE
+        condition: command_handed_to_arbitration_ip
+        actions: [acknowledge_host]
+        latency_cycles: 1
+      - from: IDLE
+        to: ACCEPT_QOS_CONFIG
+        condition: next_intake_item_is_a_qos_config_request
+        actions: [dequeue_intake_item]
+        latency_cycles: 1
+      - from: ACCEPT_QOS_CONFIG
+        to: APPLY_QOS_CONFIG
+        condition: qos_config_accepted_for_forwarding
+        actions: [configure_completion_ip_tenant]
+        latency_cycles: 1
+      - from: APPLY_QOS_CONFIG
+        to: IDLE
+        condition: qos_config_applied_to_completion_ip
+        actions: [acknowledge_host]
+        latency_cycles: 1
+    functional_responsibilities: [single_host_facing_command_and_qos_intake, forwarding_into_the_right_member_ip]
+    interfaces_touched: [command_intake_if, qos_configuration_if]
+    queues_used: [intake_queue]
+    resources_used: []
+  - name: dispatch_bridge
+    purpose: Watch the Arbitration IP's own issued-command record and forward every newly issued command into the Completion IP.
+    simpy_process: true
+    states: [POLL_ISSUED, FORWARD_TO_COMPLETION]
+    transitions:
+      - from: POLL_ISSUED
+        to: FORWARD_TO_COMPLETION
+        condition: at_least_one_issued_command_not_yet_forwarded
+        actions: [read_new_issued_commands]
+        latency_cycles: 1
+      - from: FORWARD_TO_COMPLETION
+        to: POLL_ISSUED
+        condition: completion_ip_has_accepted_the_command
+        actions: [submit_into_completion_ip]
+        latency_cycles: 1
+      - from: POLL_ISSUED
+        to: POLL_ISSUED
+        condition: no_new_issued_commands
+        actions: []
+        latency_cycles: 1
+    functional_responsibilities: [decoupling_arbitration_ip_issue_timing_from_completion_ip_submission]
+    interfaces_touched: []
+    queues_used: []
+    resources_used: []
+  - name: backpressure_monitor
+    purpose: Sample the Completion IP's pending backlog and throttle the Arbitration IP's issue readiness when it grows too large.
+    simpy_process: true
+    states: [SAMPLE_BACKLOG, APPLY_THROTTLE]
+    transitions:
+      - from: SAMPLE_BACKLOG
+        to: APPLY_THROTTLE
+        condition: backlog_crossed_the_configured_limit_since_last_sample
+        actions: [recompute_throttle_state]
+        latency_cycles: 2
+      - from: APPLY_THROTTLE
+        to: SAMPLE_BACKLOG
+        condition: arbitration_ip_issue_readiness_now_matches_sampled_backlog_state
+        actions: [set_arbitration_ip_issue_ready]
+        latency_cycles: 1
+      - from: SAMPLE_BACKLOG
+        to: SAMPLE_BACKLOG
+        condition: backlog_state_unchanged_since_last_sample
+        actions: []
+        latency_cycles: 2
+    functional_responsibilities: [applying_end_to_end_backpressure_from_completion_ip_backlog_to_arbitration_ip_issue_readiness]
+    interfaces_touched: []
+    queues_used: []
+    resources_used: []
+
+queues:
+  - name: intake_queue
+    producer: host
+    consumer: intake_bridge
+    depth: unbounded
+    depth_note: no subsystem-level depth limit is declared; the host is expected not to outrun the bridge, and a growing backlog shows up as intake_bridge queue depth rather than a hard reject.
+    blocking_behavior: backpressure
+    ordering: fifo
+
+fsm_relationships:
+  fsm_count: 3
+  parallel_processes:
+    - [intake_bridge, dispatch_bridge, backpressure_monitor]
+  sequential_paths:
+    - name: command_intake_to_completion_forward
+      path: [intake_bridge.FORWARD_TO_ARBITRATION, dispatch_bridge.FORWARD_TO_COMPLETION]
+      description: A command must be forwarded into the Arbitration IP before it can ever appear in the Arbitration IP's issued-command record for the dispatch bridge to forward into the Completion IP. The two are decoupled through that record, not a direct handoff, but the ordering is still real per command.
+  gating_relationships:
+    - source: intake_queue
+      gates: intake_bridge.ACCEPT_COMMAND
+      stall_reason: queue_empty
+    - source: arbitration_ip.issued
+      gates: dispatch_bridge.FORWARD_TO_COMPLETION
+      stall_reason: no_new_issued_commands
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing for the glue processes; each member IP carries its own reviewed timing separately.
+  fsm_process_delays:
+    - fsm: intake_bridge
+      mode: parallel_process
+      operations:
+        - {name: accept_command, cycles: 1, ns: 2}
+        - {name: forward_to_arbitration, cycles: 1, ns: 2}
+        - {name: accept_qos_config, cycles: 1, ns: 2}
+        - {name: apply_qos_config, cycles: 1, ns: 2}
+    - fsm: dispatch_bridge
+      mode: parallel_process
+      operations:
+        - {name: poll_issued, cycles: 1, ns: 2}
+        - {name: forward_to_completion, cycles: 1, ns: 2}
+    - fsm: backpressure_monitor
+      mode: parallel_process
+      operations:
+        - {name: sample_backlog, cycles: 2, ns: 4}
+        - {name: apply_throttle, cycles: 1, ns: 2}
+  end_to_end_paths:
+    - name: intake_to_forwarded
+      cycles: 2
+      ns: 4
+      path: [accept_command, forward_to_arbitration]
+    - name: issued_to_forwarded_into_completion
+      cycles: 2
+      ns: 4
+      path: [poll_issued, forward_to_completion]
+    - name: backlog_sample_to_throttle_applied
+      cycles: 3
+      ns: 6
+      path: [sample_backlog, apply_throttle]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [fsm_state, transition_counts, issue_throttled]
+  apis: [submit, configure_qos, get_metrics]
+  invariants:
+    - A command is enqueued into the Arbitration IP only after the intake bridge accepts it.
+    - A command is submitted into the Completion IP only after the Arbitration IP has issued it.
+    - The Arbitration IP's issue readiness is set to not-ready only while the Completion IP's pending backlog is at or above the configured limit.
+  ignored_payload_details: []
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: true
+  model_arbitration: false
+  model_queue_occupancy: true
+  model_latency_sources: [intake_bridge_forward_delay, dispatch_bridge_forward_delay, backpressure_monitor_sample_delay]
+  metrics: [commands_submitted, qos_configs_applied, completion_submitted, backpressure_events]
+
+test_scenarios:
+  - name: command_flows_end_to_end
+    description: A single command submitted to the subsystem is scheduled by the Arbitration IP and recorded complete by the Completion IP.
+    input_sequence: [SUBMIT_COMMAND]
+    expected_functional_behavior: [command_enqueued_into_arbitration_ip, command_issued_by_arbitration_ip, command_submitted_into_completion_ip, command_completed_by_completion_ip]
+    expected_performance_properties: [end_to_end_latency_measured]
+    fsm_coverage: [intake_bridge.IDLE, intake_bridge.ACCEPT_COMMAND, intake_bridge.FORWARD_TO_ARBITRATION, dispatch_bridge.POLL_ISSUED, dispatch_bridge.FORWARD_TO_COMPLETION]
+  - name: qos_config_flows_to_completion_ip
+    description: A QoS config request submitted to the subsystem is applied to the Completion IP's own per-tenant token buckets.
+    input_sequence: [CONFIGURE_QOS]
+    expected_functional_behavior: [completion_ip_tenant_token_buckets_updated]
+    expected_performance_properties: [qos_config_applied_promptly]
+    fsm_coverage: [intake_bridge.ACCEPT_QOS_CONFIG, intake_bridge.APPLY_QOS_CONFIG]
+  - name: completion_backlog_throttles_arbitration_issue_readiness
+    description: When the Completion IP's pending backlog reaches the configured limit, the backpressure monitor makes the Arbitration IP not-issue-ready; when the backlog drops back below it, issue readiness is restored.
+    input_sequence: [SUBMIT_COMMAND, SUBMIT_COMMAND, SUBMIT_COMMAND]
+    expected_functional_behavior: [arbitration_ip_issue_ready_cleared_at_backlog_limit, arbitration_ip_issue_ready_restored_below_backlog_limit]
+    expected_performance_properties: [no_output_stall_below_the_backlog_limit]
+    fsm_coverage: [backpressure_monitor.SAMPLE_BACKLOG, backpressure_monitor.APPLY_THROTTLE]

@@ -759,13 +759,18 @@ the model actually instantiates its members. Connections can also declare
 signal (`ack: none | completion_event | level_until_serviced`, with `ack_via`
 naming the return path).
 
-**The repository currently contains no subsystems.** The template section, the
-schema and the wiring checker are all here and all work; what is missing is
-anything for the checker to examine, so the wiring stage inside
-`validate_dld_flow.py` passes by having no subjects. Its ability to *reject* bad
-wiring is kept honest by a synthetic subsystem the test suite builds in a
-temporary directory, precisely so that proof does not depend on a particular IP
-existing.
+**`storage_pipeline_subsystem` is a real, live subsystem** composing
+`arbitration_ip` and `completion_ip`: a host submits a command once, to the
+subsystem, and three glue processes (`intake_bridge`, `dispatch_bridge`,
+`backpressure_monitor`) forward it into `arbitration_ip`, forward what
+`arbitration_ip` issues into `completion_ip`, and mirror `completion_ip`'s
+pending backlog back into `arbitration_ip`'s issue readiness. It went through
+the same DLD → template → model → tests pipeline as either member IP — see
+`dlds/storage_pipeline_subsystem_dld.md` — and `check_subsystem_wiring.py`
+checks it on every run, not a fixture built to resemble one. Its ability to
+*reject* bad wiring is still also kept honest by a synthetic subsystem the
+test suite builds in a temporary directory, so that half of the proof does
+not depend on any one real subsystem's specific shape.
 
 ## Map of the repository
 
@@ -1131,12 +1136,13 @@ Findings dismissed by name to date, from `decisions/<ip>.md`:
 - `completion_ip`: M15, M33, M36, M37
 <!-- AUTOGEN:review-status:end -->
 
-## Modeled IPs (2)
+## Modeled IPs (3)
 
 | IP | What it models |
 | --- | --- |
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. |
 | `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. |
+| `storage_pipeline_subsystem` | Composes the two above: forwards a submitted command into `arbitration_ip`, forwards what it issues into `completion_ip`, and mirrors `completion_ip`'s backlog back into `arbitration_ip`'s issue readiness. |
 
 ## What the gates currently cover
 

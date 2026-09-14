@@ -19,6 +19,11 @@ IP_ARTIFACTS: Dict[str, IpArtifact] = {
         "arbitration_ip", "dlds/arbitration_ip_dld.md", "templates/arbitration_ip.template.yaml"
     ),
     "completion_ip": IpArtifact("completion_ip", "dlds/completion_ip_dld.md", "templates/completion_ip.template.yaml"),
+    "storage_pipeline_subsystem": IpArtifact(
+        "storage_pipeline_subsystem",
+        "dlds/storage_pipeline_subsystem_dld.md",
+        "templates/storage_pipeline_subsystem.template.yaml",
+    ),
 }
 
 

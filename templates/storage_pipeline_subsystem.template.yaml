@@ -17,7 +17,7 @@ subsystem:
     - {from: intake_bridge, to: arbitration_ip.enqueue, payload: command, ack: none}
     - {from: intake_bridge, to: completion_ip.configure_tenant, payload: qos_config, ack: none}
     - {from: arbitration_ip.issued, to: dispatch_bridge, payload: issued_command}
-    - {from: dispatch_bridge, to: completion_ip.submit, payload: qos_command, ack: completion_event, ack_via: completion_ip.completed -> dispatch_bridge}
+    - {from: dispatch_bridge, to: completion_ip.submit, payload: qos_command, ack: accept_event, ack_via: completion_ip.submit accept -> dispatch_bridge}
     - {from: backpressure_monitor, to: arbitration_ip.set_issue_ready, payload: completion_backlog, ack: none}
 
 interfaces:

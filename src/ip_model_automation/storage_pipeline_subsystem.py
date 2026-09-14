@@ -129,6 +129,11 @@ class StoragePipelineSubsystemModel:
                 self.arbitration.enqueue(payload)
                 self.metrics["commands_submitted"] += 1
                 self.transition_counts["ACCEPT_COMMAND->FORWARD_TO_ARBITRATION"] += 1
+                # FORWARD_TO_ARBITRATION -> IDLE (action: acknowledge_host)
+                # is its own declared 1-cycle transition, not a free return
+                # to IDLE (round thirteen's M2).
+                yield self.env.timeout(1)
+                self.transition_counts["FORWARD_TO_ARBITRATION->IDLE"] += 1
                 accepted.succeed()
                 self.logger.debug("command forwarded cmd=%s", payload.cmd_id)
             else:
@@ -138,15 +143,23 @@ class StoragePipelineSubsystemModel:
                 self.transition_counts["IDLE->ACCEPT_QOS_CONFIG"] += 1
                 self.fsm_state["intake_bridge"] = "APPLY_QOS_CONFIG"
                 yield self.env.timeout(1)
+                # CONFIGURE_QOS: "applied to all four Completion IP token
+                # buckets alike" -- read_bw/write_bw take the same budget as
+                # read/write, not a scaled bandwidth unit nothing declares
+                # (round thirteen's M3).
                 self.completion.configure_tenant(
                     tenant_id,
                     read=token_budget,
                     write=token_budget,
-                    read_bw=max(token_budget, 1.0) * 1000.0,
-                    write_bw=max(token_budget, 1.0) * 1000.0,
+                    read_bw=token_budget,
+                    write_bw=token_budget,
                 )
                 self.metrics["qos_configs_applied"] += 1
                 self.transition_counts["ACCEPT_QOS_CONFIG->APPLY_QOS_CONFIG"] += 1
+                # APPLY_QOS_CONFIG -> IDLE (action: acknowledge_host) is its
+                # own declared 1-cycle transition (round thirteen's M2).
+                yield self.env.timeout(1)
+                self.transition_counts["APPLY_QOS_CONFIG->IDLE"] += 1
                 accepted.succeed()
                 self.logger.debug("qos config applied tenant=%s budget=%s", tenant_id, token_budget)
 

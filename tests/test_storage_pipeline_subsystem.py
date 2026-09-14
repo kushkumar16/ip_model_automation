@@ -54,13 +54,20 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
         """
         env = simpy.Environment()
         model = make_subsystem(env)
+        submitted_at = env.now
         model.submit(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
         env.run(until=80)
 
         self.assertEqual(model.get_metrics()["commands_submitted"], 1)
         self.assertEqual(model.get_metrics()["completion_submitted"], 1)
         self.assertEqual(len(model.completion.completed), 1)
-        self.assertEqual(model.completion.completed[0][1].cmd_id, "c0")
+        completed_at, completed_command = model.completion.completed[0]
+        self.assertEqual(completed_command.cmd_id, "c0")
+        # expected_performance_properties: [end_to_end_latency_measured] --
+        # the whole point of this scenario is a real, non-zero latency
+        # through both member IPs and both glue processes, not just that
+        # completion eventually happened (round thirteen's M4).
+        self.assertGreater(completed_at - submitted_at, 0)
         # fsm_coverage: both bridges must actually pass through every declared
         # intermediate state, not just start and end in IDLE/POLL_ISSUED.
         self.assertGreater(model.transition_counts["IDLE->ACCEPT_COMMAND"], 0)
@@ -103,9 +110,13 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
 
         self.assertTrue(accepted.processed)
         self.assertEqual(model.get_metrics()["qos_configs_applied"], 1)
+        # CONFIGURE_QOS applies the same budget to all four buckets alike
+        # (round thirteen's M3: read_bw/write_bw used to get a 1000x-scaled
+        # value instead).
         self.assertEqual(model.completion.tokens["T0"]["read"], 250.0)
         self.assertEqual(model.completion.tokens["T0"]["write"], 250.0)
-        self.assertEqual(model.completion.tokens["T0"]["read_bw"], 250000.0)
+        self.assertEqual(model.completion.tokens["T0"]["read_bw"], 250.0)
+        self.assertEqual(model.completion.tokens["T0"]["write_bw"], 250.0)
         self.assertGreater(model.transition_counts["IDLE->ACCEPT_QOS_CONFIG"], 0)
         self.assertGreater(model.transition_counts["ACCEPT_QOS_CONFIG->APPLY_QOS_CONFIG"], 0)
         self.assertEqual(model.fsm_state["intake_bridge"], "IDLE")

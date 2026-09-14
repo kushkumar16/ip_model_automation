@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ip-model-automation"
+version = "0.1.0"
+description = "Deterministic pipeline for turning DLDs into reviewed SimPy IP models, plus the gates that keep them honest."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "simpy>=4.1.2",
+    "PyYAML>=6.0.2",
+    "coverage>=7.6",
+    "ruff>=0.15",
+    "jsonschema>=4.20",
+    "python-docx>=1.1",
+]
+
+[project.scripts]
+ipmodel = "ip_model_automation.tools.cli:main"
+
+[tool.setuptools]
+packages = ["ip_model_automation", "ip_model_automation.tools"]
+package-dir = { "ip_model_automation" = "src/ip_model_automation", "ip_model_automation.tools" = "tools" }

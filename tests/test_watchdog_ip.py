@@ -40,16 +40,20 @@ class TestWatchdogIpModel(unittest.TestCase):
         # ack delay), so a tight timeout close to that period would make this
         # test sensitive to exact same-instant tie-breaking between the ack
         # and the countdown tick rather than to the property under test.
-        model = make_model(env, default_timeout_cycles=20)
+        model = make_model(env)
 
         def driver():
+            # template input_sequence[0] is CONFIGURE_TIMEOUT -- issue it as a
+            # real command through config_intake rather than a constructor
+            # kwarg, so this scenario actually exercises that command path.
+            yield model.configure_timeout(20)
             yield model.arm()
             for _ in range(20):
                 yield env.timeout(1)
                 yield model.kick()
 
         env.process(driver())
-        env.run(until=50)
+        env.run(until=55)
 
         self.assertEqual(model.get_metrics()["kicks_received"], 20)
         self.assertEqual(model.get_metrics()["expirations"], 0)
@@ -65,9 +69,13 @@ class TestWatchdogIpModel(unittest.TestCase):
         was then absorbed by that stale request instead of clearing the latch.
         """
         env = simpy.Environment()
-        model = make_model(env, default_timeout_cycles=5)
+        model = make_model(env)
 
         def driver():
+            # template input_sequence[0] is CONFIGURE_TIMEOUT -- issue it as a
+            # real command through config_intake rather than a constructor
+            # kwarg, so this scenario actually exercises that command path.
+            yield model.configure_timeout(5)
             yield model.arm()
             yield env.timeout(20)  # never kicked -- countdown must reach zero
             yield model.disarm()
@@ -79,7 +87,7 @@ class TestWatchdogIpModel(unittest.TestCase):
         # not just that both happened.
         trace = []
         previous = None
-        while env.peek() < 30:
+        while env.peek() < 35:
             env.step()
             state = model.fsm_state["watchdog_main"]
             if state != previous:

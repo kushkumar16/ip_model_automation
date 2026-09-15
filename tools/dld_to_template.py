@@ -125,6 +125,15 @@ def strip_code(token: str) -> str:
 
 FSM_HEADING = re.compile(r"^#{3}\s+[\d.]*\s*(.*?)\s+FSM\s*$", re.IGNORECASE)
 IFACE_HEADING = re.compile(r"^#{3}\s+[\d.]*\s*(.*?)\s+Interfaces?\s*$", re.IGNORECASE)
+COMMANDS_HEADING = re.compile(r"^#{2}\s+[\d.]*\s*(Commands.*)$", re.IGNORECASE)
+# `- `NAME`: description.` -- a top-level bullet naming and describing one
+# command in a single line, seen in e.g. arbitration_ip_dld.md.
+COMMAND_BULLET = re.compile(r"^-\s+`([^`]+)`:\s*(\S.*)$")
+# `` `NAME`: `` on its own line, followed by bullets describing effects rather
+# than a one-line description -- seen in e.g. completion_ip_dld.md. Only the
+# name is unambiguous here; synthesizing a description from the effect
+# bullets would be composing prose the DLD did not state, not extracting it.
+COMMAND_HEADING_LINE = re.compile(r"^`([^`]+)`:\s*$")
 
 
 def extract_fsms(lines: list[str]) -> list[dict[str, Any]]:
@@ -136,6 +145,47 @@ def extract_fsms(lines: list[str]) -> list[dict[str, Any]]:
         purpose = first_role(block) or TODO
         fsms.append({"name": name, "purpose": purpose, "states": states, "raw": raw_name})
     return fsms
+
+
+def extract_commands(lines: list[str]) -> list[dict[str, str | None]]:
+    """Command names (and, where stated in one line, descriptions) from the
+    DLD's own `## N. Commands` section.
+
+    Best-effort by design, matching only the two bullet shapes seen in this
+    repo's own DLDs (see COMMAND_BULLET / COMMAND_HEADING_LINE). A DLD whose
+    Commands section uses neither -- a table, a different list style -- yields
+    nothing here rather than a wrong guess; the caller falls back to a single
+    generic placeholder exactly as before.
+    """
+    commands: list[dict[str, str | None]] = []
+    for _heading, block in split_blocks(lines, COMMANDS_HEADING):
+        current: dict[str, str | None] | None = None
+        for line in block:
+            stripped = line.strip()
+            bullet_match = COMMAND_BULLET.match(stripped)
+            if bullet_match:
+                current = {"name": bullet_match.group(1).strip(), "description": bullet_match.group(2).strip()}
+                commands.append(current)
+                continue
+            heading_match = COMMAND_HEADING_LINE.match(stripped)
+            if heading_match:
+                current = {"name": heading_match.group(1).strip(), "description": None}
+                commands.append(current)
+                continue
+            if not stripped:
+                current = None  # a blank line ends any continuation of the bullet above it
+                continue
+            # An indented continuation line wrapping the previous bullet's
+            # one-line description onto the next line (e.g. FLUSH's "...
+            # cannot bypass\n  ordering barriers." in arbitration_ip_dld.md).
+            # Shape B's own bullets never reach here: their `current` has
+            # description=None, so nothing is appended to it -- synthesizing
+            # a description from effect bullets would be composing prose the
+            # DLD did not state in that shape, not extracting it.
+            if current is not None and current["description"] is not None and line.startswith((" ", "\t")):
+                current["description"] = f"{current['description']} {stripped}"
+        break  # only one Commands section is expected
+    return commands
 
 
 def snake_state(token: str) -> str:
@@ -422,6 +472,8 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
         gaps.append("interfaces: no `### N.M <Name> Interface` sections found in DLD")
     gaps.extend(wait_model_gaps(interfaces))
 
+    commands = extract_commands(lines)
+
     clock_mhz, cycle_ns, clock_gaps = extract_clock(text)
     gaps.extend(clock_gaps)
     timing_ops = extract_timing_table(lines, fsm_names)
@@ -439,7 +491,7 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
             "reset": {"type": "sync", "behavior": f"{TODO}_reset_behavior"},
         },
         "interfaces": [strip_raw(i) for i in interfaces] or [placeholder_interface()],
-        "commands": [placeholder_command()],
+        "commands": [placeholder_command(c["name"], c["description"]) for c in commands] or [placeholder_command()],
         "fsm_processes": [build_fsm_entry(f, interfaces) for f in fsms] or [placeholder_fsm()],
         "fsm_relationships": {
             "fsm_count": extract_fsm_count(text, len(fsm_names)),
@@ -475,12 +527,22 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
             "model_latency_sources": [f"{TODO}_latency_source"],
             "metrics": ["transition_counts", f"{TODO}_metric"],
         },
-        "test_scenarios": [build_placeholder_scenario(fsms)],
+        "test_scenarios": [build_placeholder_scenario(f) for f in fsms] or [build_placeholder_scenario(None)],
     }
 
     # Record every schema-required field left as TODO for the gaps report.
-    gaps.append("commands: not derivable from DLD; TODO_REVIEW placeholder emitted")
-    gaps.append("test_scenarios: author from DLD behavior; TODO_REVIEW placeholder emitted")
+    if commands:
+        described = sum(1 for c in commands if c["description"])
+        gaps.append(
+            f"commands: {len(commands)} name(s) found in DLD ({described} with a description); "
+            "fields/valid_conditions/completion_conditions/error_conditions still TODO_REVIEW"
+        )
+    else:
+        gaps.append("commands: not derivable from DLD; TODO_REVIEW placeholder emitted")
+    gaps.append(
+        f"test_scenarios: {len(fsm_names) or 1} stub(s) emitted (one per FSM), "
+        "author each from DLD behavior; TODO_REVIEW placeholder content"
+    )
     gaps.append("functionality_model.invariants/apis/state_variables: complete from DLD")
     missing_timing = [n for n in fsm_names if n not in timing_ops]
     if missing_timing:
@@ -588,18 +650,31 @@ def build_timing(
     }
 
 
-def build_placeholder_scenario(fsms: list[dict[str, Any]]) -> dict[str, Any]:
-    coverage = []
-    for f in fsms:
-        state = (f["states"] or ["STATE"])[0]
-        coverage.append(f"{f['name']}.{state}")
+def build_placeholder_scenario(fsm: dict[str, Any] | None) -> dict[str, Any]:
+    """One scenario stub for one FSM -- scaffolding the number of scenarios a
+    template actually needs (template_lint.py requires every FSM be covered
+    by at least one), not just a single generic stub an author must remember
+    to multiply by hand. Content is still entirely TODO_REVIEW: a scenario's
+    behavior is a coverage judgment call, not something any DLD convention in
+    this repo states in extractable form.
+    """
+    if fsm is None:
+        return {
+            "name": f"{TODO}_scenario",
+            "description": TODO,
+            "input_sequence": [TODO],
+            "expected_functional_behavior": [TODO],
+            "expected_performance_properties": [TODO],
+            "fsm_coverage": [f"{TODO}_fsm.STATE"],
+        }
+    state = (fsm["states"] or ["STATE"])[0]
     return {
-        "name": f"{TODO}_scenario",
+        "name": f"{TODO}_{fsm['name']}_scenario",
         "description": TODO,
         "input_sequence": [TODO],
         "expected_functional_behavior": [TODO],
         "expected_performance_properties": [TODO],
-        "fsm_coverage": coverage or [f"{TODO}_fsm.STATE"],
+        "fsm_coverage": [f"{fsm['name']}.{state}"],
     }
 
 
@@ -613,10 +688,16 @@ def placeholder_interface() -> dict[str, Any]:
     }
 
 
-def placeholder_command() -> dict[str, Any]:
+def placeholder_command(name: str | None = None, description: str | None = None) -> dict[str, Any]:
+    """A command stub, with `name`/`description` filled from the DLD when
+    extract_commands() found them in a shape it trusts. `fields`,
+    `valid_conditions`, `completion_conditions`, and `error_conditions` stay
+    TODO_REVIEW regardless: no DLD convention in this repo co-locates those
+    with the command list itself, so filling them would mean guessing.
+    """
     return {
-        "name": f"{TODO}_COMMAND",
-        "description": TODO,
+        "name": name or f"{TODO}_COMMAND",
+        "description": description or TODO,
         "fields": ["cmd_id"],
         "valid_conditions": [TODO],
         "completion_conditions": [TODO],

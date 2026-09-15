@@ -98,7 +98,7 @@ hand; `python tools/report_review_status.py --check` (an `EXTRA_CHECKS` gate in
 | `arbitration_ip` | model | current | none |
 | `completion_ip` | model | current | M37 (dismissed) |
 | `storage_pipeline_subsystem` | model | current | none |
-| `watchdog_ip` | model | stale — watchdog_ip.template.yaml changed since this review; a fresh round is owed | M6 (superseded) |
+| `watchdog_ip` | model | stale — watchdog_ip.template.yaml changed since this review; a fresh round is owed | M7 (superseded) |
 
 No `normalization` review has been run against either live IP yet.
 

@@ -70,10 +70,11 @@ Wait model:
 
 - Mode: `wait_for_ack_inline`
 - Requester: peer
-- Waits in: `watchdog_main.ARMED`
+- Waits in: `watchdog_main.ARMED`, `watchdog_main.EXPIRED`
 - Resumes on: `command_applied`
 - Note: `CONFIGURE_TIMEOUT` is acknowledged by the Config Intake FSM instead
-  (see 6.2); this wait model covers `ARM`/`KICK`/`DISARM`.
+  (see 6.2); this wait model covers `ARM`/`KICK`/`DISARM`. Two wait points
+  because `DISARM` resolves from either `ARMED` or `EXPIRED`.
 
 ### 4.2 Expiry Interface
 

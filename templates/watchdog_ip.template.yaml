@@ -17,10 +17,10 @@ interfaces:
     wait_model:
       mode: wait_for_ack_inline
       requester: peer
-      wait_points: [watchdog_main.ARMED]
+      wait_points: [watchdog_main.ARMED, watchdog_main.EXPIRED]
       resumes_on: command_applied
       source: dld
-      notes: "CONFIGURE_TIMEOUT is acknowledged by the Config Intake FSM instead (see config_intake); this wait model covers ARM/KICK/DISARM."
+      notes: "CONFIGURE_TIMEOUT is acknowledged by the Config Intake FSM instead (see config_intake); this wait model covers ARM/KICK/DISARM. Two wait points because DISARM (valid_conditions: watchdog_armed_or_expired) resolves from either ARMED or EXPIRED, and it is not until watchdog_main's outer loop resumes that fsm_state moves to DISARMED."
     transactions:
       - name: host_control_access
         fields: [command, timeout_cycles]

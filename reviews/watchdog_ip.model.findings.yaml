@@ -1,39 +1,40 @@
 ip: watchdog_ip
 kind: model
-template_sha256: 3dad68e9e8f19f13bda59cf41a88036903042935fd0b32ec5b5f27525eb86a4f
+template_sha256: d69aee31ccd3ffcadf77f44ef71d34570c4d09d9a3291ebf8511b777b3157ccc
 model_sha256: 6c4524324a9abab68637b9cb31f0d820f7d2591dc3b91ac64716f849656f90a1
 tests_sha256: 56deacf63db3656bbe7b74a380fcca3034c7a514f3667d06e8d440d94b641058
 findings:
-  - id: M6
-    class: timing_mismatch
+  - id: M7
+    class: wait_model_impl
     severity: medium
     claim: >-
-      The expiry_if transaction's timing_notes state the expired signal is
-      asserted the same cycle the countdown reaches zero, but the model
-      asserts it one cycle later, after the FSM's declared 1-cycle expire
-      delay.
+      host_control_if's wait_model declares a single wait_points entry,
+      watchdog_main.ARMED, but the DISARM command it says this wait model
+      covers also resolves (accepted.succeed() after the declared disarm
+      latency) from watchdog_main.EXPIRED, a state the wait_points list does
+      not mention.
     template: >-
-      templates/watchdog_ip.template.yaml:44, expiry_access timing_notes:
-      "asserted the same cycle the countdown reaches zero; stays asserted
-      until the host disarms". This is also the transaction for expiry_if,
-      whose wait_model (lines 33-39) declares mode wait_for_ack_inline with
-      wait_points [watchdog_main.EXPIRED].
+      templates/watchdog_ip.template.yaml:17-23, interfaces[0].wait_model:
+      mode wait_for_ack_inline, resumes_on: command_applied,
+      wait_points: [watchdog_main.ARMED], with the note "this wait model
+      covers ARM/KICK/DISARM". DISARM's own valid_conditions
+      (templates/watchdog_ip.template.yaml:66,
+      watchdog_armed_or_expired) confirm it is legal, and declared as a
+      transition, from both ARMED and EXPIRED
+      (templates/watchdog_ip.template.yaml:101-104 and 111-114).
     model: >-
-      src/ip_model_automation/watchdog_ip.py:171-182, _run_armed(): on
-      self.countdown_cycles reaching zero the method does
-      "get_event.cancel(); yield self.env.timeout(self.latency['expire']);
-      ...; self.expired = True", i.e. expired is set a full expire_latency
-      cycle (1 cycle, per the template's own watchdog_main.expire operation
-      at line 162 and the expiry_once_countdown_reaches_zero end_to_end_path
-      at lines 173-176) after the tick that decremented countdown_cycles to
-      zero, not in that same cycle.
+      src/ip_model_automation/watchdog_ip.py:189-200 (_run_expired). DISARM
+      received while fsm_state["watchdog_main"] == "EXPIRED" yields
+      env.timeout(self.latency["disarm"]) and then calls accepted.succeed()
+      before fsm_state is ever updated away from "EXPIRED" (the state is
+      only set to "DISARMED" later, back at the top of the watchdog_main()
+      loop at line 107) -- so this DISARM's command_applied ack fires while
+      the FSM is in EXPIRED, not ARMED. Contrast with the ARMED-state DISARM
+      path at lines 156-164, whose ack does fire while fsm_state is ARMED,
+      matching the declared wait_points.
     why: >-
-      A reader who trusts the expiry_if interface's timing_notes over the
-      FSM's own transition latency will expect expired to go high in the
-      exact cycle the countdown empties, and will misjudge the expiry
-      latency of any host logic built against that stated contract by one
-      cycle (2ns at the declared 500MHz clock). The template contradicts
-      itself here -- the FSM transition and timing_model both declare a
-      1-cycle assert_expiry delay that the model correctly follows -- but
-      the interface prose that a reader is most likely to consult for "when
-      does expired assert" says otherwise and was not corrected to match.
+      A reader using host_control_if's wait_points to find every state in
+      which this interface's wait_for_ack_inline blocking is observable would
+      miss the EXPIRED case entirely, even though the template's own notes
+      say this wait model covers DISARM, and DISARM's valid_conditions
+      explicitly include the expired state.

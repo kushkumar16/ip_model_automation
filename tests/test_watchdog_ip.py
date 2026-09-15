@@ -41,6 +41,7 @@ class TestWatchdogIpModel(unittest.TestCase):
         # test sensitive to exact same-instant tie-breaking between the ack
         # and the countdown tick rather than to the property under test.
         model = make_model(env)
+        countdown_after_kick = []
 
         def driver():
             # template input_sequence[0] is CONFIGURE_TIMEOUT -- issue it as a
@@ -51,6 +52,12 @@ class TestWatchdogIpModel(unittest.TestCase):
             for _ in range(20):
                 yield env.timeout(1)
                 yield model.kick()
+                # countdown_reset_to_full_timeout_on_kick (template
+                # test_scenarios[0].expected_performance_properties): sample
+                # right at the kick's own ack, before the next tick can
+                # decrement it, so this actually verifies a full reload rather
+                # than merely that no expiry happened under this drive pattern.
+                countdown_after_kick.append(model.countdown_cycles)
 
         env.process(driver())
         env.run(until=55)
@@ -58,6 +65,9 @@ class TestWatchdogIpModel(unittest.TestCase):
         self.assertEqual(model.get_metrics()["kicks_received"], 20)
         self.assertEqual(model.get_metrics()["expirations"], 0)
         self.assertEqual(model.fsm_state["watchdog_main"], "ARMED")
+        self.assertEqual(
+            countdown_after_kick, [20] * 20, "each kick must reset the countdown to the full configured timeout"
+        )
 
     def test_countdown_reaches_zero_without_kick_expires(self):
         """template test_scenarios[1]: countdown_reaches_zero_without_kick_expires.

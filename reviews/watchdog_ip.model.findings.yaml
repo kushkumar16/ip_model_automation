@@ -2,57 +2,44 @@ ip: watchdog_ip
 kind: model
 template_sha256: a700839ea41b5039a384d4f6d318cefdddbb568c5a7111e26824ba58c154408a
 model_sha256: 6c4524324a9abab68637b9cb31f0d820f7d2591dc3b91ac64716f849656f90a1
-tests_sha256: 56deacf63db3656bbe7b74a380fcca3034c7a514f3667d06e8d440d94b641058
+tests_sha256: 4e1f0799a683651ef34457b6a79fb3a4062683d3425968c3088d8a495d77d8ac
 findings:
-  - id: M8
+  - id: M10
     class: scenario_gap
     severity: medium
     claim: >-
-      test_scenarios[0] (kick_before_expiry_prevents_expiration) declares
-      input_sequence [CONFIGURE_TIMEOUT, ARM, KICK], but the test written for
-      it never issues a CONFIGURE_TIMEOUT command -- the timeout is set by
-      passing default_timeout_cycles directly to the model constructor,
-      bypassing the config_intake FSM entirely.
+      The test written for template test_scenarios[0]
+      (kick_before_expiry_prevents_expiration) never measures the countdown
+      value, so it does not actually exercise the scenario's declared
+      expected_performance_properties entry
+      countdown_reset_to_full_timeout_on_kick -- it only checks that no
+      expiry occurred, which this particular drive pattern would pass under
+      even a partial or wrong-sized reload.
     template: >-
-      templates/watchdog_ip.template.yaml test_scenarios[0]
-      (kick_before_expiry_prevents_expiration), lines 206-211:
-      input_sequence: [CONFIGURE_TIMEOUT, ARM, KICK].
+      templates/watchdog_ip.template.yaml:206-211, test_scenarios[0]
+      kick_before_expiry_prevents_expiration declares
+      expected_performance_properties: [countdown_reset_to_full_timeout_on_kick]
+      alongside expected_functional_behavior:
+      [countdown_reloaded_on_kick, no_expiry_asserted].
     model: >-
-      tests/test_watchdog_ip.py:26-56
-      test_kick_before_expiry_prevents_expiration -- driver() only calls
-      model.arm() and model.kick() (lines 46-49); default_timeout_cycles=20
-      is supplied via make_model(env, default_timeout_cycles=20) at line 43,
-      never through model.configure_timeout().
+      tests/test_watchdog_ip.py:26-60,
+      test_kick_before_expiry_prevents_expiration configures a 20-cycle
+      timeout and kicks once per driver-side cycle (each loop iteration
+      costs 2 simulated cycles per its own comment, so kicks land roughly
+      every ~2-3 cycles), then only asserts kicks_received == 20,
+      expirations == 0, and fsm_state == "ARMED" at line 58-60. It never
+      reads model.countdown_cycles after a kick, so it cannot distinguish a
+      correct reload to the full configured_timeout_cycles (20) from a
+      reload to any smaller value that still comfortably exceeds the ~2-3
+      cycle gap between kicks -- e.g. a reload bug that only restored a
+      handful of cycles would still leave kicks_received == 20 and
+      expirations == 0 under this exact drive pattern.
     why: >-
-      A reader relying on the docstring's "template test_scenarios[0]" label
-      would believe the CONFIGURE_TIMEOUT step of the declared sequence, and
-      therefore the config_intake IDLE->APPLY_TIMEOUT->IDLE path feeding a
-      value into this scenario's ARM, is exercised here. It is not: the
-      command path from host_control_if through config_intake into
-      configured_timeout_cycles is never invoked by this test at all.
-  - id: M9
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      test_scenarios[1] (countdown_reaches_zero_without_kick_expires)
-      declares input_sequence [CONFIGURE_TIMEOUT, ARM], but the test written
-      for it never issues a CONFIGURE_TIMEOUT command -- the timeout is set
-      by passing default_timeout_cycles directly to the model constructor,
-      bypassing the config_intake FSM entirely.
-    template: >-
-      templates/watchdog_ip.template.yaml test_scenarios[1]
-      (countdown_reaches_zero_without_kick_expires), lines 212-217:
-      input_sequence: [CONFIGURE_TIMEOUT, ARM].
-    model: >-
-      tests/test_watchdog_ip.py:58-97
-      test_countdown_reaches_zero_without_kick_expires -- driver() only
-      calls model.arm(), env.timeout(20), and model.disarm() (lines 71-73);
-      default_timeout_cycles=5 is supplied via make_model(env,
-      default_timeout_cycles=5) at line 68, never through
-      model.configure_timeout().
-    why: >-
-      Same gap as M8: the docstring ties this test to
-      test_scenarios[1], but the CONFIGURE_TIMEOUT leg of the declared
-      sequence, and the config_intake command path it would exercise, is
-      never run. Only the ARM/expiry portion of the scenario is actually
-      covered.
+      A regression that reloads the countdown to the wrong magnitude (as
+      opposed to not reloading at all, which the existing leak-regression
+      framing in this test's docstring already guards against) would pass
+      this test silently, since the assertions only observe the aggregate
+      absence of expiry rather than the reloaded value itself. A reader
+      citing this test as coverage for
+      countdown_reset_to_full_timeout_on_kick would be misled about what it
+      actually pins down.

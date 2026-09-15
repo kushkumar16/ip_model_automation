@@ -146,6 +146,7 @@ class WatchdogIpModel:
                     # put() (kick/disarm) would have no pending getter to be
                     # consumed by.
                     get_event = self._host_q.get()
+                    yield self.env.timeout(self.latency["kick"])
                     self.countdown_cycles = self.configured_timeout_cycles
                     self.metrics["kicks_received"] += 1
                     self.transition_counts["ARMED->ARMED"] += 1
@@ -153,6 +154,7 @@ class WatchdogIpModel:
                     self.logger.debug("kicked, countdown reloaded to %s", self.countdown_cycles)
                     continue
                 if command == "DISARM":
+                    yield self.env.timeout(self.latency["disarm"])
                     self.armed = False
                     self.countdown_cycles = 0
                     self.metrics["disarm_count"] += 1
@@ -189,6 +191,7 @@ class WatchdogIpModel:
         while True:
             command, accepted = yield self._host_q.get()
             if command == "DISARM":
+                yield self.env.timeout(self.latency["disarm"])
                 self.expired = False
                 self.metrics["disarm_count"] += 1
                 self.transition_counts["EXPIRED->DISARMED"] += 1

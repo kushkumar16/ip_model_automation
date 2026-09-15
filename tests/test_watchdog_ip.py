@@ -35,7 +35,12 @@ class TestWatchdogIpModel(unittest.TestCase):
         undercounted and the watchdog could still expire despite being kicked.
         """
         env = simpy.Environment()
-        model = make_model(env, default_timeout_cycles=5)
+        # A generous timeout relative to the kick period: each loop iteration
+        # below now costs 2 cycles (the 1-cycle wait plus kick's own 1-cycle
+        # ack delay), so a tight timeout close to that period would make this
+        # test sensitive to exact same-instant tie-breaking between the ack
+        # and the countdown tick rather than to the property under test.
+        model = make_model(env, default_timeout_cycles=20)
 
         def driver():
             yield model.arm()
@@ -44,7 +49,7 @@ class TestWatchdogIpModel(unittest.TestCase):
                 yield model.kick()
 
         env.process(driver())
-        env.run(until=25)
+        env.run(until=50)
 
         self.assertEqual(model.get_metrics()["kicks_received"], 20)
         self.assertEqual(model.get_metrics()["expirations"], 0)
@@ -68,11 +73,28 @@ class TestWatchdogIpModel(unittest.TestCase):
             yield model.disarm()
 
         env.process(driver())
-        env.run(until=30)
+
+        # expiry_latency_measured (template test_scenarios[1]): trace fsm_state
+        # transitions to pin exactly when ARMED is entered and when EXPIRED is,
+        # not just that both happened.
+        trace = []
+        previous = None
+        while env.peek() < 30:
+            env.step()
+            state = model.fsm_state["watchdog_main"]
+            if state != previous:
+                trace.append((env.now, state))
+                previous = state
 
         self.assertEqual(model.get_metrics()["expirations"], 1)
         self.assertEqual(model.get_metrics()["disarm_count"], 1)
         self.assertEqual(model.fsm_state["watchdog_main"], "DISARMED", "disarm did not clear the expired latch")
+
+        armed_at = next(t for t, state in trace if state == "ARMED")
+        expired_at = next(t for t, state in trace if state == "EXPIRED")
+        # 5 countdown_tick cycles (default_timeout_cycles=5) plus the 1-cycle
+        # expire delay declared in the template's watchdog_main.expire operation.
+        self.assertEqual(expired_at - armed_at, 6, "expiry did not land at the declared countdown + expire delay")
 
     def test_expired_latch_blocks_rearm_until_disarmed(self):
         """EXPIRED -> DISARMED is the only declared exit; ARM/KICK while expired
@@ -143,11 +165,16 @@ class TestWatchdogIpModel(unittest.TestCase):
         """
         env = simpy.Environment()
         model = make_model(env, default_timeout_cycles=5)
+        apply_elapsed = []
 
         def driver():
             yield model.arm()
             yield env.timeout(2)
+            requested_at = env.now
             yield model.configure_timeout(8)
+            # config_intake_apply_delay_measured (template test_scenarios[2]):
+            # the declared 2-cycle accept_config + apply_timeout delay.
+            apply_elapsed.append(env.now - requested_at)
             # the running countdown (5, now at 3 after 2 ticks) is unaffected:
             # 3 more cycles brings it to zero and expiry, not 8.
             yield env.timeout(10)
@@ -157,6 +184,7 @@ class TestWatchdogIpModel(unittest.TestCase):
 
         self.assertEqual(model.fsm_state["config_intake"], "IDLE")
         self.assertEqual(model.configured_timeout_cycles, 8)
+        self.assertEqual(apply_elapsed, [2], "accept_config + apply_timeout did not take the declared 2 cycles")
         self.assertEqual(
             model.get_metrics()["expirations"], 1, "the stored config must not have reset the running countdown"
         )

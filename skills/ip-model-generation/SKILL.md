@@ -144,4 +144,10 @@ unstated behavior from the DLD.
 - Do not leave scaffold TODO comments in finalized models.
 
 For detailed implementation and test rules, read
-`references/model_generation_rules.md`.
+`references/model_generation_rules.md`. Before writing any FSM process that
+races a resource request (`Store.get()`, `Resource.request()`, ...) against a
+timeout — `yield request_event | timeout_event` inside a loop — read
+`references/simpy_concurrency_patterns.md` first: two real bugs this
+project's own models shipped, verified against SimPy's actual source, both
+from the same mistake (a fresh request every iteration) that reads as
+perfectly reasonable code.

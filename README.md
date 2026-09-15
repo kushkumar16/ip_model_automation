@@ -299,9 +299,10 @@ python tools/run_ci.py --fail-fast
 It takes about a minute. The repo-wide stages are **read from
 `harness/ip_generation_loop.yaml`** (`scope: repo`) rather than listed again, so
 adding a gate to the pipeline adds it to CI automatically — a test asserts the
-two cannot drift apart. Three further guards protect artifacts rather than
-pipeline steps (model provenance, DLD normalization, overview sync) and are
-listed in `EXTRA_CHECKS` with the reason.
+two cannot drift apart. Six further guards protect artifacts rather than
+pipeline steps (model provenance, DLD normalization, overview sync, review
+findings, review-status sync, and the opt-in SystemC backend's own tests) and
+are listed in `EXTRA_CHECKS` with the reason.
 
 To run it automatically before every push, enable the tracked hook — once per
 clone:
@@ -560,6 +561,23 @@ it as reference material, not as something a target repo is expected to use.
    python tools/validate_ip_flow.py
    ```
 
+## SystemC Backend
+
+A second modeling backend, opt-in per IP alongside SimPy — see
+[systemc/README.md](systemc/README.md) for the full guide. Requires the
+SystemC development library (`apt-get install libsystemc-dev`; not a Python
+dependency, so it is not in `requirements.txt`). Short version:
+
+```shell
+# opt an IP in: add `modeling_backends: [simpy, systemc]` to its template's ip: block
+python tools/generate_systemc_scaffold.py templates/<ip_name>.template.yaml
+# implement the model, then:
+python tools/run_systemc_tests.py <ip_name>
+```
+
+`tools/run_ci.py`'s `systemc_tests` gate runs this for every opted-in IP and
+is a no-op otherwise.
+
 ## Key Files
 
 - `dlds/*_dld.md`: human-readable IP design documents (template authoring source).
@@ -603,4 +621,8 @@ it as reference material, not as something a target repo is expected to use.
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.
 - `tests/test_workflow.py`: registry, scaffold, and validation helper checks.
 - `tests/test_<ip_name>.py`: per-IP SimPy model tests.
+- `tools/generate_systemc_scaffold.py`: SystemC scaffold generator (opt-in per IP; see `systemc/README.md`).
+- `tools/run_systemc_tests.py`: compiles and runs each opted-in IP's SystemC testbench for real.
+- `systemc/README.md`: the SystemC backend guide — opting an IP in, layout, source-of-truth conventions, running the tests.
+- `systemc/models/<ip>.{h,cpp}`, `systemc/tests/test_<ip>.cpp`: SystemC model + testbench, one flat pair per opted-in IP.
 

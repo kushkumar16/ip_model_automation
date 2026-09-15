@@ -135,8 +135,19 @@ unstated behavior from the DLD.
 - Emit useful `CRITICAL`, `ERROR`, `WARNING`, `INFO`, and `DEBUG` events for
   fatal events, invalid/error paths, stalls/backpressure, command lifecycle,
   and detailed FSM transitions.
-- Do not create SystemC, C++ functional models, per-IP folders, `perf_model.py`, or `functional_model.py`.
+- Do not create SystemC or C++ functional models unless `ip.modeling_backends`
+  in the template names `systemc` -- see `systemc/README.md` for that opt-in
+  path (`tools/generate_systemc_scaffold.py`, `tools/run_systemc_tests.py`).
+  An IP without the field, or naming only `simpy`, gets exactly what this
+  skill has always produced.
+- Do not create per-IP folders, `perf_model.py`, or `functional_model.py`.
 - Do not leave scaffold TODO comments in finalized models.
 
 For detailed implementation and test rules, read
-`references/model_generation_rules.md`.
+`references/model_generation_rules.md`. Before writing any FSM process that
+races a resource request (`Store.get()`, `Resource.request()`, ...) against a
+timeout — `yield request_event | timeout_event` inside a loop — read
+`references/simpy_concurrency_patterns.md` first: two real bugs this
+project's own models shipped, verified against SimPy's actual source, both
+from the same mistake (a fresh request every iteration) that reads as
+perfectly reasonable code.

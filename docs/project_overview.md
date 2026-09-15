@@ -1176,37 +1176,45 @@ state can actually support is stated here.
 | `storage_pipeline_subsystem` | model | current | none |
 | `watchdog_ip` | model | current | none |
 
-No `normalization` review has been run against either live IP yet.
+No `normalization` review has been run against any of the 4 live IPs yet.
 
 Findings dismissed by name to date, from `decisions/<ip>.md`:
 - `arbitration_ip`: M28, M30, M44
 - `completion_ip`: M15, M33, M36, M37
 <!-- AUTOGEN:review-status:end -->
 
-## Modeled IPs (3)
+## Modeled IPs (4)
 
 | IP | What it models |
 | --- | --- |
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. |
 | `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. |
 | `storage_pipeline_subsystem` | Composes the two above: forwards a submitted command into `arbitration_ip`, forwards what it issues into `completion_ip`, and mirrors `completion_ip`'s backlog back into `arbitration_ip`'s issue readiness. |
+| `watchdog_ip` | Host-liveness countdown timer: arm/kick/disarm, latched expiry until disarmed, and a timeout configurable independent of any countdown already running. |
 
 ## What the gates currently cover
 
 Worth reading before a green run is taken for more than it says. `dld_normalization`
-still checks zero documents, because neither IP carries an author source
-(`dlds/<ip>_dld.src.md`) — both DLDs were written in-shape from the start, so
+still checks zero documents, because none of the four IPs carries an author source
+(`dlds/<ip>_dld.src.md`) — every DLD was written in-shape from the start, so
 `normalize_dld` and `review_normalization` have never run for real against
-either one. The subsystem wiring stage inside `validate_dld_flow.py` also
-checks zero subsystems.
+any of them. The subsystem wiring stage inside `validate_dld_flow.py`, by
+contrast, does check a real subsystem now: `storage_pipeline_subsystem`
+composes `arbitration_ip` and `completion_ip`, and its wiring passes for real,
+not against a synthetic fixture.
 
-`review_model` is a different story: both IPs have real review history now.
+`review_model` is a different story: all four IPs have real review history now.
 `reviews/arbitration_ip.model.findings.yaml` carries round ten's pass and
 `reviews/completion_ip.model.findings.yaml` carries round eleven's —
 `arbitration_ip` has been through six independent rounds since round five
 (five through ten), `completion_ip` three (five, six, eleven), each run as an
 isolated agent with no memory of the session that had just fixed the round
 before it, and no access to `decisions/*.md` or any prior round's findings.
+`storage_pipeline_subsystem` and `watchdog_ip` each carry their own real
+review history the same way — `watchdog_ip`'s in particular went through six
+dispatches end to end while it was being written, five straight rounds each
+finding something real before the sixth came back clean, the same isolation
+and no-memory-of-the-round-before contract throughout.
 Every finding any of these rounds filed is fixed or dismissed by name in
 `decisions/<ip>.md`. That is not the same claim as "these models are
 faithful": an empty findings list, or a fully-resolved one, records that a

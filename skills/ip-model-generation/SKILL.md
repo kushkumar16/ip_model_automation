@@ -135,7 +135,12 @@ unstated behavior from the DLD.
 - Emit useful `CRITICAL`, `ERROR`, `WARNING`, `INFO`, and `DEBUG` events for
   fatal events, invalid/error paths, stalls/backpressure, command lifecycle,
   and detailed FSM transitions.
-- Do not create SystemC, C++ functional models, per-IP folders, `perf_model.py`, or `functional_model.py`.
+- Do not create SystemC or C++ functional models unless `ip.modeling_backends`
+  in the template names `systemc` -- see `systemc/README.md` for that opt-in
+  path (`tools/generate_systemc_scaffold.py`, `tools/run_systemc_tests.py`).
+  An IP without the field, or naming only `simpy`, gets exactly what this
+  skill has always produced.
+- Do not create per-IP folders, `perf_model.py`, or `functional_model.py`.
 - Do not leave scaffold TODO comments in finalized models.
 
 For detailed implementation and test rules, read

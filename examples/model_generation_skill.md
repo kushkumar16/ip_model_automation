@@ -44,7 +44,11 @@ not contain IP model implementations.
 
 Do not generate:
 
-- `systemc/`
+- `systemc/` -- unless the template's `ip.modeling_backends` names `systemc`,
+  in which case that IP additionally gets `systemc/models/<ip>.h`/`.cpp` and
+  `systemc/tests/test_<ip>.cpp` via the separate opt-in path described in
+  `systemc/README.md`. This skill's own output (below) is unaffected either
+  way.
 - `perf_model.py`
 - `functional_model.py`
 - `soc_models.py`
@@ -146,7 +150,8 @@ python -m unittest discover -s tests
 - Run `tools/generate_model_scaffold.py` for new templates before model
   implementation.
 - Run unit tests.
-- Confirm no `systemc/` directory remains.
+- Confirm no `systemc/` directory remains, unless an IP's template opted into
+  the `systemc` backend (see `systemc/README.md`).
 - Confirm no per-IP Python model folders exist.
 - Confirm no `perf_model.py`, `functional_model.py`, or `soc_models.py` files
   remain.

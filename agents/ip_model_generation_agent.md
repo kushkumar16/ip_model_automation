@@ -120,7 +120,13 @@ stage is skipped entirely — you will not be invoked.
 - Do not promote a draft that still contains `TODO_REVIEW`.
 - Do not infer missing behavior from the DLD during model implementation
   (Stage 1): stop if the promoted template lacks required behavior.
-- Do not create SystemC or C++ functional models.
+- Do not create SystemC or C++ functional models **unless the template's
+  `ip.modeling_backends` explicitly names `systemc`** — an IP that omits the
+  field, or names only `simpy`, must get exactly what this contract has always
+  produced. An opted-in IP additionally gets `systemc/models/<ip>.h`/`.cpp`
+  and `systemc/tests/test_<ip>.cpp`; see `systemc/README.md` for that flow —
+  it is a separate generation path (`tools/generate_systemc_scaffold.py`,
+  `tools/run_systemc_tests.py`), not something to hand-derive here.
 - Do not create per-IP model folders.
 - Do not add `perf_model.py`, `functional_model.py`, or `soc_models.py`.
 - Do not remove existing IPs from registry or validation.

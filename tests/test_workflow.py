@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,123 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertIn("def accept_process", text)
             self.assertIn("def completion_scheduler_process", text)
             self.assertIn("def refill_process", text)
+
+    def _load_systemc_scaffold_generator(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "generate_systemc_scaffold", repo_root / "tools" / "generate_systemc_scaffold.py"
+        )
+        generator = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(generator)
+        return generator
+
+    def test_systemc_scaffold_generator_refuses_an_ip_not_opted_in(self):
+        """ip.modeling_backends is the switch: an IP that omits it, or names
+        only simpy, must not get a SystemC scaffold -- the default stays
+        exactly what it was before this generator existed."""
+        generator = self._load_systemc_scaffold_generator()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        with self.assertRaises(SystemExit):
+            generator.write_scaffold(repo_root / "templates" / "completion_ip.template.yaml", None, stdout=True)
+
+    def test_systemc_scaffold_generator_emits_compilable_header_and_source(self):
+        """End to end: scaffold a fresh IP's SystemC files from its template
+        and prove they actually compile against the real SystemC library --
+        not just that the generator produced *some* text."""
+        generator = self._load_systemc_scaffold_generator()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        if shutil.which("g++") is None or shutil.which("pkg-config") is None:
+            self.skipTest("g++/pkg-config not available in this environment")
+        pkg_config = subprocess.run(["pkg-config", "--exists", "systemc"], capture_output=True, text=True, timeout=10)
+        if pkg_config.returncode != 0:
+            self.skipTest("SystemC development library not installed")
+
+        template_path = repo_root / "templates" / "watchdog_ip.template.yaml"
+        template = generator._simpy_scaffold_module().load_template(template_path)
+        template = dict(template)
+        template["ip"] = dict(template["ip"])
+        template["ip"]["name"] = "scaffold_probe_ip"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_template = Path(tmpdir) / "scaffold_probe_ip.template.yaml"
+            require_yaml = generator._simpy_scaffold_module().require_yaml
+            with tmp_template.open("w", encoding="utf-8") as handle:
+                require_yaml().safe_dump(template, handle)
+
+            output_dir = Path(tmpdir) / "models"
+            header_path, source_path = generator.write_scaffold(tmp_template, output_dir, stdout=False)
+            self.assertTrue(header_path.is_file())
+            self.assertTrue(source_path.is_file())
+            self.assertIn("class ScaffoldProbeIpModel", header_path.read_text(encoding="utf-8"))
+
+            probe_main = Path(tmpdir) / "probe_main.cpp"
+            probe_main.write_text(
+                '#include "scaffold_probe_ip.h"\n'
+                "int sc_main(int argc, char* argv[]) {\n"
+                '    ScaffoldProbeIpModel m("m");\n'
+                "    sc_start(1, SC_NS);\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            binary = Path(tmpdir) / "probe_main"
+            pkg_config_flags = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", "systemc"], capture_output=True, text=True, timeout=10
+            ).stdout.split()
+            compiled = subprocess.run(
+                [
+                    "g++",
+                    "-std=c++17",
+                    "-I",
+                    str(output_dir),
+                    str(probe_main),
+                    str(source_path),
+                    "-o",
+                    str(binary),
+                    *pkg_config_flags,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, f"scaffold did not compile:\n{compiled.stdout}{compiled.stderr}")
+
+    def _load_run_systemc_tests(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_systemc_tests", repo_root / "tools" / "run_systemc_tests.py")
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_systemc_ips_discovers_only_opted_in_templates(self):
+        module = self._load_run_systemc_tests()
+        self.assertEqual(module.systemc_ips(), ["watchdog_ip"])
+
+    def test_watchdog_ip_systemc_testbench_compiles_and_passes_for_real(self):
+        """The real, permanent regression check: watchdog_ip's SystemC model
+        and testbench actually compile against the system SystemC library and
+        the resulting binary's own 6 scenario assertions all pass -- the
+        SystemC counterpart to `python -m unittest tests.test_watchdog_ip`."""
+        module = self._load_run_systemc_tests()
+        if shutil.which("g++") is None or shutil.which("pkg-config") is None:
+            self.skipTest("g++/pkg-config not available in this environment")
+        pkg_config = subprocess.run(["pkg-config", "--exists", "systemc"], capture_output=True, text=True, timeout=10)
+        if pkg_config.returncode != 0:
+            self.skipTest("SystemC development library not installed")
+
+        pkg_config_flags = module.require_pkg_config_systemc()
+        passed, output = module.compile_and_run("watchdog_ip", pkg_config_flags)
+        self.assertTrue(passed, f"watchdog_ip SystemC testbench failed:\n{output}")
+        self.assertIn("6/6 passed", output)
+
+    def test_compile_and_run_reports_missing_sources_clearly(self):
+        module = self._load_run_systemc_tests()
+        passed, output = module.compile_and_run("arbitration_ip", ["-lsystemc"])
+        self.assertFalse(passed)
+        self.assertIn("missing SystemC source file(s)", output)
 
     def test_generator_scaffold_does_not_ack_the_peer_at_submission(self):
         """The scaffold must not hand back the `input_q.put` event.

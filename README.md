@@ -271,6 +271,18 @@ blocking the run forever — defaults 300 / 1800) and a per-checkout lock file
 rather than letting two runs race on the same pipeline state and generated
 files; `--force-lock` overrides a lock that is actually stale.
 
+After a real (non-dry-run) attempt, `reports/<ip>.cost.json` records what
+each agent stage actually spent: dispatch count, wall-clock seconds always,
+and tokens when the dispatched agent CLI reported them (today, the `claude`
+profile's `--output-format json` result — a different vendor's CLI, or the
+same one without that flag, still gets dispatch/duration but tokens read as
+unknown, never a guessed or zeroed number). View it with:
+
+```shell
+python tools/report_pipeline_cost.py              # every reports/*.cost.json
+python tools/report_pipeline_cost.py arbitration_ip
+```
+
 ## Continuous Integration (local)
 
 CI here is **deliberately local**: the gates run on this machine, before a push,

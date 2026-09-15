@@ -68,7 +68,8 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -114,6 +115,13 @@ class RunOptions:
     answers "what would need an agent" from real, current gate results
     without spending anything: gates are read-only checks, safe to run for
     real, so only the dispatch itself is skipped.
+
+    stage_costs accumulates actuals per (ip, stage): dispatch count and
+    wall-clock seconds always (timed around the subprocess call itself, so
+    always known); token counts only when the dispatched command's own
+    output reports them (see _parse_agent_usage) -- unknown, not zero, for
+    an agent CLI that does not. Written to reports/<ip>.cost.json once per
+    IP at the end of its run (see write_cost_report).
     """
 
     gate_timeout: float = DEFAULT_GATE_TIMEOUT
@@ -121,6 +129,7 @@ class RunOptions:
     dry_run: bool = False
     dispatch_count: int = 0
     dry_run_estimate: int = 0
+    stage_costs: dict[str, dict[str, dict]] = field(default_factory=dict)
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -667,6 +676,67 @@ def resolve_agent_command(agent: str | None, agent_cmd: str | None, harness: dic
     return str(command)
 
 
+def _parse_agent_usage(stdout: str) -> dict[str, int] | None:
+    """Token usage from an agent CLI's own result, if it reported one.
+
+    Recognizes exactly one shape today: Claude Code's `-p --output-format
+    json` result object, whose top-level `usage` field carries
+    `input_tokens`/`output_tokens` (each optionally `cache_creation_
+    input_tokens`/`cache_read_input_tokens`, folded into input here since
+    both are still tokens the run spent). Any other CLI's output -- plain
+    text, a different JSON shape, an agent_profile that never asked for
+    structured output at all -- yields None. Never guessed: an agent that
+    did not report its usage costs nothing recorded, not zero.
+    """
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    input_tokens += usage.get("cache_creation_input_tokens", 0) or 0
+    input_tokens += usage.get("cache_read_input_tokens", 0) or 0
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def _record_stage_cost(options: RunOptions, ip_name: str, stage: str, duration_s: float, usage: dict | None) -> None:
+    per_ip = options.stage_costs.setdefault(ip_name, {})
+    entry = per_ip.setdefault(stage, {"dispatches": 0, "duration_s": 0.0, "input_tokens": None, "output_tokens": None})
+    entry["dispatches"] += 1
+    entry["duration_s"] += duration_s
+    if usage is not None:
+        entry["input_tokens"] = (entry["input_tokens"] or 0) + usage["input_tokens"]
+        entry["output_tokens"] = (entry["output_tokens"] or 0) + usage["output_tokens"]
+
+
+def write_cost_report(ip_name: str, options: RunOptions) -> Path | None:
+    """reports/<ip>.cost.json for this run's agent dispatches, or None if
+    the IP had none (nothing spent, nothing to report -- matches how a
+    dry run touches no real files)."""
+    stages = options.stage_costs.get(ip_name)
+    if not stages:
+        return None
+    totals = {"dispatches": 0, "duration_s": 0.0, "input_tokens": None, "output_tokens": None}
+    for entry in stages.values():
+        totals["dispatches"] += entry["dispatches"]
+        totals["duration_s"] += entry["duration_s"]
+        for key in ("input_tokens", "output_tokens"):
+            if entry[key] is not None:
+                totals[key] = (totals[key] or 0) + entry[key]
+    report = {"ip": ip_name, "stages": stages, "total": totals}
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"{ip_name}.cost.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str, options: RunOptions) -> bool:
     """Run the agent command with the prompt on stdin, or write a request file.
 
@@ -682,6 +752,7 @@ def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str,
         f"  {stage}: running agent (dispatch #{options.dispatch_count} this run, "
         f"timeout {options.agent_timeout:.0f}s): {agent_cmd}"
     )
+    started = time.monotonic()
     try:
         result = subprocess.run(
             agent_cmd,
@@ -692,11 +763,24 @@ def dispatch_agent(agent_cmd: str | None, ip_name: str, stage: str, prompt: str,
             errors="replace",
             shell=True,
             timeout=options.agent_timeout,
+            capture_output=True,
         )
     except subprocess.TimeoutExpired:
         print(f"  {stage}: agent TIMED OUT after {options.agent_timeout:.0f}s -- counted as a failed attempt")
+        _record_stage_cost(options, ip_name, stage, time.monotonic() - started, usage=None)
         return True
-    print(f"  {stage}: agent exited {result.returncode}")
+    duration = time.monotonic() - started
+    # Captured rather than streamed live, so usage can be parsed from it (see
+    # _parse_agent_usage) -- printed as one block right after the dispatch
+    # finishes instead, so nothing the agent said is actually lost.
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+    usage = _parse_agent_usage(result.stdout)
+    _record_stage_cost(options, ip_name, stage, duration, usage)
+    usage_note = f", {usage['input_tokens']} in / {usage['output_tokens']} out tokens" if usage else ""
+    print(f"  {stage}: agent exited {result.returncode} ({duration:.1f}s{usage_note})")
     return True
 
 
@@ -825,6 +909,7 @@ def dispatch_isolated_review(
             f"  {stage}: running agent (dispatch #{options.dispatch_count} this run, isolated worktree, "
             f"no memory of {ip_name}'s review history, timeout {options.agent_timeout:.0f}s): {agent_cmd}"
         )
+        started = time.monotonic()
         try:
             result = subprocess.run(
                 agent_cmd,
@@ -835,11 +920,21 @@ def dispatch_isolated_review(
                 errors="replace",
                 shell=True,
                 timeout=options.agent_timeout,
+                capture_output=True,
             )
         except subprocess.TimeoutExpired:
             print(f"  {stage}: agent TIMED OUT after {options.agent_timeout:.0f}s -- counted as a failed attempt")
+            _record_stage_cost(options, ip_name, stage, time.monotonic() - started, usage=None)
             return True
-        print(f"  {stage}: agent exited {result.returncode}")
+        duration = time.monotonic() - started
+        if result.stdout:
+            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+        usage = _parse_agent_usage(result.stdout)
+        _record_stage_cost(options, ip_name, stage, duration, usage)
+        usage_note = f", {usage['input_tokens']} in / {usage['output_tokens']} out tokens" if usage else ""
+        print(f"  {stage}: agent exited {result.returncode} ({duration:.1f}s{usage_note})")
         written = worktree_dir / "reviews" / f"{ip_name}.{kind}.findings.yaml"
         if written.is_file():
             dest = REPO_ROOT / "reviews" / f"{ip_name}.{kind}.findings.yaml"
@@ -1007,6 +1102,16 @@ def process_dld(source: Path, harness: dict, agent_cmd: str | None, options: Run
     """Run the harness's per-IP stages for one DLD source. Returns a status string."""
     dld_md = ensure_markdown_dld(source)
     ip_name = dld_tool.ip_name_from_path(dld_md)
+    try:
+        return _run_ip_stages(ip_name, dld_md, harness, agent_cmd, options)
+    finally:
+        # Written on every exit path -- dry-run/awaiting/failed included --
+        # so a partial run's real spend is not lost just because the IP
+        # did not reach "complete" this time.
+        write_cost_report(ip_name, options)
+
+
+def _run_ip_stages(ip_name: str, dld_md: Path, harness: dict, agent_cmd: str | None, options: RunOptions) -> str:
     print(f"\n=== {ip_name} ===")
 
     ctx = stage_context(harness, ip_name, dld_md)

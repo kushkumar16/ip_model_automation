@@ -66,8 +66,18 @@ model_review_contract: agents/model_review_agent.md
 # to success until a gate fails later. Observed with `--permission-mode
 # acceptEdits` alone, which auto-approves only commands already allow-listed in
 # .claude/settings.json.
+# The `claude` profile adds --output-format json so auto_ip_pipeline.py can
+# parse the result's `usage` field into reports/<ip>.cost.json (tokens spent
+# per stage). This does not change what you see: the runner captures every
+# dispatch's output regardless of format and prints it as one block right
+# after the dispatch finishes, rather than character-by-character while it
+# runs -- true of every profile here, not something --output-format json
+# specifically costs. codex/gemini keep their own default output; add an
+# equivalent structured-output flag to either, if their CLI has one, to get
+# token counts for them too -- see tools/auto_ip_pipeline._parse_agent_usage
+# for the one shape currently recognized.
 agent_profiles:
-  claude: claude -p --permission-mode acceptEdits --allowedTools "Bash(python:*)"
+  claude: claude -p --permission-mode acceptEdits --allowedTools "Bash(python:*)" --output-format json
   codex: codex exec --full-auto -
   gemini: gemini --yolo
 

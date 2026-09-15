@@ -24,6 +24,7 @@ IP_ARTIFACTS: Dict[str, IpArtifact] = {
         "dlds/storage_pipeline_subsystem_dld.md",
         "templates/storage_pipeline_subsystem.template.yaml",
     ),
+    "watchdog_ip": IpArtifact("watchdog_ip", "dlds/watchdog_ip_dld.md", "templates/watchdog_ip.template.yaml"),
 }
 
 

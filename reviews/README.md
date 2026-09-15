@@ -100,7 +100,7 @@ hand; `python tools/report_review_status.py --check` (an `EXTRA_CHECKS` gate in
 | `storage_pipeline_subsystem` | model | current | none |
 | `watchdog_ip` | model | current | none |
 
-No `normalization` review has been run against either live IP yet.
+No `normalization` review has been run against any of the 4 live IPs yet.
 
 Findings dismissed by name to date, from `decisions/<ip>.md`:
 - `arbitration_ip`: M28, M30, M44

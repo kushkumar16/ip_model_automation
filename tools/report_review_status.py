@@ -181,8 +181,10 @@ def generate() -> str:
         lines.append(f"| `{ip}` | {kind} | {status} | {found_cell} |")
 
     if not any(kind == "normalization" for _ip, kind in rows):
+        live_ips = sorted({ip for ip, _kind in rows})
+        subject = "the live IP" if len(live_ips) == 1 else f"any of the {len(live_ips)} live IPs"
         lines.append("")
-        lines.append("No `normalization` review has been run against either live IP yet.")
+        lines.append(f"No `normalization` review has been run against {subject} yet.")
 
     ledgers = [(ip, dismissals(ip)) for ip in sorted({ip for ip, _kind in rows})]
     ledgers = [(ip, d) for ip, d in ledgers if d]

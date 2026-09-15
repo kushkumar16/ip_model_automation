@@ -87,7 +87,8 @@ Fields:
 
 Timing:
 
-- Asserted the same cycle the countdown reaches zero.
+- Asserted one cycle after the countdown reaches zero (the FSM's declared
+  1-cycle `assert_expiry` delay, section 6.1/9).
 
 Wait model:
 

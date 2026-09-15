@@ -1,133 +1,39 @@
 ip: watchdog_ip
 kind: model
 template_sha256: 3dad68e9e8f19f13bda59cf41a88036903042935fd0b32ec5b5f27525eb86a4f
-model_sha256: cebe4fcda46eb044a51cc4e2403de20269d62abc5483afd6258f42f9aa73c896
-tests_sha256: b168d8353c0796f069981eb86d6f70f7e579f1cd1485fa195a1c19fcc585a694
+model_sha256: 6c4524324a9abab68637b9cb31f0d820f7d2591dc3b91ac64716f849656f90a1
+tests_sha256: 56deacf63db3656bbe7b74a380fcca3034c7a514f3667d06e8d440d94b641058
 findings:
-  - id: M1
+  - id: M6
     class: timing_mismatch
-    severity: high
-    claim: >-
-      The model applies no simulated delay for the KICK command's ARMED->ARMED
-      transition, even though the template declares a 1-cycle latency for it
-      through three independent fields that all agree with each other.
-    template: >-
-      templates/watchdog_ip.template.yaml fsm_processes[watchdog_main].transitions:
-      "{from: ARMED, to: ARMED, condition: kick_command_accepted,
-      actions: [reload_countdown], latency_cycles: 1}"; also
-      timing_model.fsm_process_delays.watchdog_main.operations:
-      "{name: kick, cycles: 1, ns: 2}"; also commands[KICK].timing_effects:
-      [watchdog_main_kick_delay].
-    model: >-
-      src/ip_model_automation/watchdog_ip.py:143-154, the
-      "if command == \"KICK\":" branch inside _run_armed(): it reloads
-      countdown_cycles, increments metrics/transition_counts, and calls
-      accepted.succeed() in the same simulated instant the KICK is received --
-      no "yield self.env.timeout(...)" runs before the ack. The constructor
-      accepts a kick_latency parameter (line 20) and stores it at
-      self.latency["kick"] (line 36), but that dict key is never read
-      anywhere in the file (grep confirms the only self.latency[...] reads
-      are for "reset", "arm", "countdown_tick", "expire", "accept_config",
-      "apply_timeout" -- "kick" and "disarm" are absent).
-    why: >-
-      Any consumer that times a KICK during an armed countdown -- e.g.
-      measuring the interval between issuing KICK and the ack, or the cycle
-      offset before the next countdown tick -- will observe zero cycles of
-      delay instead of the one cycle the transition, the timing model, and
-      the command's own timing_effects all declare. Because kick_latency is
-      dead code, no constructor override can ever produce the declared
-      timing either.
-  - id: M2
-    class: timing_mismatch
-    severity: high
-    claim: >-
-      The model applies no simulated delay for the DISARM command's
-      ARMED->DISARMED transition, even though the template declares a
-      1-cycle latency for it.
-    template: >-
-      templates/watchdog_ip.template.yaml fsm_processes[watchdog_main].transitions:
-      "{from: ARMED, to: DISARMED, condition: disarm_command_accepted,
-      actions: [cancel_countdown], latency_cycles: 1}"; also
-      timing_model.fsm_process_delays.watchdog_main.operations:
-      "{name: disarm, cycles: 1, ns: 2}"; also commands[DISARM].timing_effects:
-      [watchdog_main_disarm_delay].
-    model: >-
-      src/ip_model_automation/watchdog_ip.py:155-162, the
-      "if command == \"DISARM\":" branch inside _run_armed(): it clears
-      armed/countdown_cycles, increments metrics/transition_counts, and calls
-      accepted.succeed() with no "yield self.env.timeout(...)" beforehand.
-      The constructor's disarm_latency parameter (line 21) is stored at
-      self.latency["disarm"] (line 36) but that key is never read anywhere in
-      the file.
-    why: >-
-      A DISARM issued while armed takes effect and is acknowledged in zero
-      simulated cycles instead of the declared one, and no override of
-      disarm_latency can change that since the value is never consulted.
-  - id: M3
-    class: timing_mismatch
-    severity: high
-    claim: >-
-      The model applies no simulated delay for the DISARM command's
-      EXPIRED->DISARMED transition (clearing the expired latch), even though
-      the template declares a 1-cycle latency for it.
-    template: >-
-      templates/watchdog_ip.template.yaml fsm_processes[watchdog_main].transitions:
-      "{from: EXPIRED, to: DISARMED, condition: disarm_command_accepted,
-      actions: [clear_expired_latch], latency_cycles: 1}"; also
-      timing_model.fsm_process_delays.watchdog_main.operations:
-      "{name: disarm, cycles: 1, ns: 2}".
-    model: >-
-      src/ip_model_automation/watchdog_ip.py:187-197, _run_expired(): the
-      "if command == \"DISARM\":" branch clears self.expired and calls
-      accepted.succeed() with no "yield self.env.timeout(...)" beforehand,
-      the same self.latency["disarm"] dead key as M2.
-    why: >-
-      Clearing the expired latch takes effect and is acknowledged in zero
-      simulated cycles instead of the declared one; a downstream model or
-      test relying on the declared 1-cycle disarm delay to bound when the
-      watchdog can next be armed after an expiry would be timed incorrectly.
-  - id: M4
-    class: scenario_gap
     severity: medium
     claim: >-
-      test_scenarios[1] (countdown_reaches_zero_without_kick_expires)
-      declares expected_performance_properties: [expiry_latency_measured],
-      but the test written for it never records or asserts any timing value
-      for when expiry actually occurs.
+      The expiry_if transaction's timing_notes state the expired signal is
+      asserted the same cycle the countdown reaches zero, but the model
+      asserts it one cycle later, after the FSM's declared 1-cycle expire
+      delay.
     template: >-
-      templates/watchdog_ip.template.yaml test_scenarios[1].expected_performance_properties:
-      [expiry_latency_measured].
+      templates/watchdog_ip.template.yaml:44, expiry_access timing_notes:
+      "asserted the same cycle the countdown reaches zero; stays asserted
+      until the host disarms". This is also the transaction for expiry_if,
+      whose wait_model (lines 33-39) declares mode wait_for_ack_inline with
+      wait_points [watchdog_main.EXPIRED].
     model: >-
-      tests/test_watchdog_ip.py:53-75,
-      test_countdown_reaches_zero_without_kick_expires only asserts
-      get_metrics()["expirations"] == 1, get_metrics()["disarm_count"] == 1,
-      and the final fsm_state; it never reads env.now or otherwise captures
-      how many cycles elapsed before expiry.
+      src/ip_model_automation/watchdog_ip.py:171-182, _run_armed(): on
+      self.countdown_cycles reaching zero the method does
+      "get_event.cancel(); yield self.env.timeout(self.latency['expire']);
+      ...; self.expired = True", i.e. expired is set a full expire_latency
+      cycle (1 cycle, per the template's own watchdog_main.expire operation
+      at line 162 and the expiry_once_countdown_reaches_zero end_to_end_path
+      at lines 173-176) after the tick that decremented countdown_cycles to
+      zero, not in that same cycle.
     why: >-
-      A reader trusting the template's expected_performance_properties would
-      believe expiry latency is verified by this scenario's test; in fact a
-      regression that shifted countdown_tick_latency's or expire_latency's
-      effective timing would pass this test undetected.
-  - id: M5
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      test_scenarios[2] (configure_timeout_flows_independently_of_countdown)
-      declares expected_performance_properties:
-      [config_intake_apply_delay_measured], but the test written for it never
-      records or asserts the elapsed cycles for config_intake's
-      accept_config/apply_timeout delay.
-    template: >-
-      templates/watchdog_ip.template.yaml test_scenarios[2].expected_performance_properties:
-      [config_intake_apply_delay_measured].
-    model: >-
-      tests/test_watchdog_ip.py:138-179,
-      test_configure_timeout_flows_independently_of_countdown checks the
-      stored configured_timeout_cycles value and that a running countdown is
-      functionally unaffected, but never reads env.now around the
-      configure_timeout() call to confirm the declared 2-cycle
-      (accept_config + apply_timeout) apply delay.
-    why: >-
-      A reader trusting the template's expected_performance_properties would
-      believe the config_intake apply delay is verified here, when the test
-      only checks the functional stored value, not its timing.
+      A reader who trusts the expiry_if interface's timing_notes over the
+      FSM's own transition latency will expect expired to go high in the
+      exact cycle the countdown empties, and will misjudge the expiry
+      latency of any host logic built against that stated contract by one
+      cycle (2ns at the declared 500MHz clock). The template contradicts
+      itself here -- the FSM transition and timing_model both declare a
+      1-cycle assert_expiry delay that the model correctly follows -- but
+      the interface prose that a reader is most likely to consult for "when
+      does expired assert" says otherwise and was not corrected to match.

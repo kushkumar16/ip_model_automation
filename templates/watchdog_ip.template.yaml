@@ -41,7 +41,7 @@ interfaces:
       - name: expiry_access
         fields: [expired]
         handshake: level
-        timing_notes: asserted the same cycle the countdown reaches zero; stays asserted until the host disarms
+        timing_notes: asserted one cycle after the countdown reaches zero (the declared 1-cycle assert_expiry delay); stays asserted until the host disarms
 
 commands:
   - name: ARM

@@ -299,9 +299,10 @@ python tools/run_ci.py --fail-fast
 It takes about a minute. The repo-wide stages are **read from
 `harness/ip_generation_loop.yaml`** (`scope: repo`) rather than listed again, so
 adding a gate to the pipeline adds it to CI automatically — a test asserts the
-two cannot drift apart. Three further guards protect artifacts rather than
-pipeline steps (model provenance, DLD normalization, overview sync) and are
-listed in `EXTRA_CHECKS` with the reason.
+two cannot drift apart. Six further guards protect artifacts rather than
+pipeline steps (model provenance, DLD normalization, overview sync, review
+findings, review-status sync, and the opt-in SystemC backend's own tests) and
+are listed in `EXTRA_CHECKS` with the reason.
 
 To run it automatically before every push, enable the tracked hook — once per
 clone:
@@ -620,4 +621,8 @@ is a no-op otherwise.
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.
 - `tests/test_workflow.py`: registry, scaffold, and validation helper checks.
 - `tests/test_<ip_name>.py`: per-IP SimPy model tests.
+- `tools/generate_systemc_scaffold.py`: SystemC scaffold generator (opt-in per IP; see `systemc/README.md`).
+- `tools/run_systemc_tests.py`: compiles and runs each opted-in IP's SystemC testbench for real.
+- `systemc/README.md`: the SystemC backend guide — opting an IP in, layout, source-of-truth conventions, running the tests.
+- `systemc/models/<ip>.{h,cpp}`, `systemc/tests/test_<ip>.cpp`: SystemC model + testbench, one flat pair per opted-in IP.
 

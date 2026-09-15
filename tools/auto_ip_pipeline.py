@@ -924,12 +924,36 @@ def dispatch_isolated_review(
     if not agent_cmd:
         print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
         return False
+    subject_paths = _review_subject_paths(ip_name, kind)
     worktree_dir = provision_review_worktree(ip_name)
-    missing = [p for p in _review_subject_paths(ip_name, kind) if not (worktree_dir / p).is_file()]
-    if missing:
+    missing = [p for p in subject_paths if not (worktree_dir / p).is_file()]
+    # A subject file can exist at HEAD and still not be what the reviewer
+    # needs to see: an edit to an *existing* file, committed after this
+    # dispatch was already kicked off, or (the case that actually happened)
+    # simply not yet committed when the pipeline was invoked, leaves the
+    # worktree holding an older revision than the working tree. The reviewer
+    # then computes hashes against that older content, and the gate reads the
+    # resulting review as stale the moment it is copied back -- a wasted
+    # dispatch, the same wasted-cost failure mode the missing-file check above
+    # exists for, just one step further along.
+    stale = []
+    for path in subject_paths:
+        if path in missing:
+            continue
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", path], cwd=REPO_ROOT, capture_output=True, timeout=30
+        )
+        if diff.returncode != 0:
+            stale.append(path)
+    if missing or stale:
         cleanup_review_worktree(worktree_dir)
+        reasons = []
+        if missing:
+            reasons.append(f"missing at HEAD: {', '.join(missing)}")
+        if stale:
+            reasons.append(f"uncommitted changes not yet at HEAD: {', '.join(stale)}")
         print(
-            f"  {stage}: ABORTED before dispatch -- missing at HEAD: {', '.join(missing)}. "
+            f"  {stage}: ABORTED before dispatch -- {'; '.join(reasons)}. "
             "The isolated review worktree is built from `git worktree add HEAD`, so it only "
             f"sees committed content. Commit {ip_name}'s subject files, then re-run."
         )

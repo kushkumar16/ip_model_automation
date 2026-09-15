@@ -1262,6 +1262,63 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             ).stdout
             self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
 
+    def test_isolated_review_dispatch_aborts_on_an_existing_files_uncommitted_edit(self):
+        """A second, related way for a dispatch to see stale content: the
+        subject file is already committed, but was edited again after that --
+        the working tree has newer content than HEAD. This is the failure
+        this dogfooding round actually hit for real, a step past the
+        never-committed-at-all case above: a template got a field added, the
+        pipeline was invoked before that edit was committed, the reviewer
+        computed hashes against the *old* HEAD revision, and the gate read
+        the resulting review as stale the instant it was copied back --
+        wasting a real, paid ~$0.71 dispatch. dispatch_isolated_review must
+        catch this the same way: check first, never invoke the agent.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+            (root / "templates").mkdir()
+            (root / "src" / "ip_model_automation").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "templates" / "probe_ip.template.yaml").write_text("ip: {}\n", encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("", encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text("", encoding="utf-8")
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            (root / "reviews" / ".gitkeep").write_text("", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+
+            # The edit that matters: committed subject file, then changed
+            # again without a follow-up commit.
+            (root / "templates" / "probe_ip.template.yaml").write_text("ip: {name: probe_ip}\n", encoding="utf-8")
+
+            pipeline.REPO_ROOT = root
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            marker = root / "agent_ran.marker"
+            fake_agent = f"touch {marker}"
+            options = pipeline.RunOptions()
+
+            dispatched = pipeline.dispatch_isolated_review(
+                fake_agent, "probe_ip", "review_model", "model", "prompt", options
+            )
+
+            self.assertFalse(dispatched, "a review with a stale committed subject file must not count as dispatched")
+            self.assertFalse(marker.exists(), "the agent command ran despite the file's uncommitted edit")
+            self.assertEqual(options.dispatch_count, 0, "an aborted-before-dispatch review must not count as one")
+            listing = subprocess.run(
+                ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
+            ).stdout
+            self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
+
     def test_agent_dispatch_times_out_instead_of_hanging_forever(self):
         """R3: a wedged agent CLI must not block the pipeline indefinitely.
 

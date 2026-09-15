@@ -2,44 +2,5 @@ ip: watchdog_ip
 kind: model
 template_sha256: a700839ea41b5039a384d4f6d318cefdddbb568c5a7111e26824ba58c154408a
 model_sha256: 6c4524324a9abab68637b9cb31f0d820f7d2591dc3b91ac64716f849656f90a1
-tests_sha256: 4e1f0799a683651ef34457b6a79fb3a4062683d3425968c3088d8a495d77d8ac
-findings:
-  - id: M10
-    class: scenario_gap
-    severity: medium
-    claim: >-
-      The test written for template test_scenarios[0]
-      (kick_before_expiry_prevents_expiration) never measures the countdown
-      value, so it does not actually exercise the scenario's declared
-      expected_performance_properties entry
-      countdown_reset_to_full_timeout_on_kick -- it only checks that no
-      expiry occurred, which this particular drive pattern would pass under
-      even a partial or wrong-sized reload.
-    template: >-
-      templates/watchdog_ip.template.yaml:206-211, test_scenarios[0]
-      kick_before_expiry_prevents_expiration declares
-      expected_performance_properties: [countdown_reset_to_full_timeout_on_kick]
-      alongside expected_functional_behavior:
-      [countdown_reloaded_on_kick, no_expiry_asserted].
-    model: >-
-      tests/test_watchdog_ip.py:26-60,
-      test_kick_before_expiry_prevents_expiration configures a 20-cycle
-      timeout and kicks once per driver-side cycle (each loop iteration
-      costs 2 simulated cycles per its own comment, so kicks land roughly
-      every ~2-3 cycles), then only asserts kicks_received == 20,
-      expirations == 0, and fsm_state == "ARMED" at line 58-60. It never
-      reads model.countdown_cycles after a kick, so it cannot distinguish a
-      correct reload to the full configured_timeout_cycles (20) from a
-      reload to any smaller value that still comfortably exceeds the ~2-3
-      cycle gap between kicks -- e.g. a reload bug that only restored a
-      handful of cycles would still leave kicks_received == 20 and
-      expirations == 0 under this exact drive pattern.
-    why: >-
-      A regression that reloads the countdown to the wrong magnitude (as
-      opposed to not reloading at all, which the existing leak-regression
-      framing in this test's docstring already guards against) would pass
-      this test silently, since the assertions only observe the aggregate
-      absence of expiry rather than the reloaded value itself. A reader
-      citing this test as coverage for
-      countdown_reset_to_full_timeout_on_kick would be misled about what it
-      actually pins down.
+tests_sha256: b312b6c46e60b40c0f3c817afc2d1f8771eca6a7f4b1fa7a18c7849e144234a7
+findings: []

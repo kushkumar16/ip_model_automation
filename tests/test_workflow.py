@@ -2,6 +2,7 @@ import contextlib
 import copy
 import importlib.util
 import io
+import json
 import logging
 import os
 import re
@@ -1105,6 +1106,131 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertTrue(dispatched, "a timed-out attempt still counts as dispatched, so the loop moves on")
             self.assertLess(elapsed, 4.0, "dispatch_agent waited past the configured timeout")
             self.assertEqual(options.dispatch_count, 1)
+
+    def test_parse_agent_usage_reads_claude_json_result_and_rejects_anything_else(self):
+        """_parse_agent_usage recognizes exactly Claude Code's --output-format
+        json result shape and returns None for everything else -- never a
+        guess at tokens an agent CLI did not actually report."""
+        pipeline = self._load_pipeline()
+
+        claude_result = (
+            '{"type": "result", "subtype": "success", "is_error": false, "result": "done", '
+            '"usage": {"input_tokens": 1200, "cache_creation_input_tokens": 300, '
+            '"cache_read_input_tokens": 50, "output_tokens": 640}}'
+        )
+        usage = pipeline._parse_agent_usage(claude_result)
+        self.assertEqual(usage, {"input_tokens": 1200 + 300 + 50, "output_tokens": 640})
+
+        # Plain text (the default, non --output-format-json case for any
+        # agent CLI, including claude without the flag).
+        self.assertIsNone(pipeline._parse_agent_usage("I edited the model and tests. Done."))
+        # Valid JSON, but not this shape.
+        self.assertIsNone(pipeline._parse_agent_usage('{"ok": true}'))
+        self.assertIsNone(pipeline._parse_agent_usage(""))
+        self.assertIsNone(pipeline._parse_agent_usage("[1, 2, 3]"))
+
+    def test_dispatch_agent_records_and_reports_cost_when_usage_is_known(self):
+        """A fake 'agent' that prints a Claude-shaped JSON result: dispatch_agent
+        must record real dispatches/duration/tokens, and write_cost_report
+        (what process_dld calls on every exit path) must persist them."""
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports" / "agent_requests").mkdir(parents=True)
+            pipeline.REPO_ROOT = root
+            pipeline.REPORTS_DIR = root / "reports"
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            options = pipeline.RunOptions()
+
+            fake_agent = 'printf \'{"usage": {"input_tokens": 500, "output_tokens": 200}}\''
+            dispatched = pipeline.dispatch_agent(fake_agent, "probe_ip", "agent_implementation", "prompt", options)
+            self.assertTrue(dispatched)
+
+            entry = options.stage_costs["probe_ip"]["agent_implementation"]
+            self.assertEqual(entry["dispatches"], 1)
+            self.assertGreaterEqual(entry["duration_s"], 0.0)
+            self.assertEqual(entry["input_tokens"], 500)
+            self.assertEqual(entry["output_tokens"], 200)
+
+            written = pipeline.write_cost_report("probe_ip", options)
+            self.assertIsNotNone(written)
+            report = json.loads(written.read_text(encoding="utf-8"))
+            self.assertEqual(report["ip"], "probe_ip")
+            self.assertEqual(report["total"]["dispatches"], 1)
+            self.assertEqual(report["total"]["input_tokens"], 500)
+            self.assertEqual(report["total"]["output_tokens"], 200)
+
+    def test_dispatch_agent_without_usage_records_unknown_tokens_not_zero(self):
+        """An agent CLI that does not report usage (the common case -- plain
+        text output, or a vendor with no structured-output flag) must leave
+        tokens as None/unknown, never silently read as zero."""
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports" / "agent_requests").mkdir(parents=True)
+            pipeline.REPO_ROOT = root
+            pipeline.REPORTS_DIR = root / "reports"
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            options = pipeline.RunOptions()
+
+            dispatched = pipeline.dispatch_agent(
+                "echo 'edited the files'", "probe_ip", "complete_template", "prompt", options
+            )
+            self.assertTrue(dispatched)
+
+            entry = options.stage_costs["probe_ip"]["complete_template"]
+            self.assertEqual(entry["dispatches"], 1)
+            self.assertIsNone(entry["input_tokens"])
+            self.assertIsNone(entry["output_tokens"])
+
+            written = pipeline.write_cost_report("probe_ip", options)
+            report = json.loads(written.read_text(encoding="utf-8"))
+            self.assertIsNone(report["total"]["input_tokens"])
+
+    def test_write_cost_report_writes_nothing_for_an_ip_with_no_dispatches(self):
+        """No agent stage ran for this ip -- nothing spent, nothing to report,
+        matching how a dry run touches no real files."""
+        pipeline = self._load_pipeline()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports").mkdir()
+            pipeline.REPORTS_DIR = root / "reports"
+            options = pipeline.RunOptions()
+            self.assertIsNone(pipeline.write_cost_report("never_dispatched_ip", options))
+            self.assertEqual(list((root / "reports").glob("*.cost.json")), [])
+
+    def test_report_pipeline_cost_renders_known_and_unknown_tokens(self):
+        pipeline_report = self._load_pipeline_report_cost_tool()
+        report = {
+            "ip": "probe_ip",
+            "stages": {
+                "agent_implementation": {
+                    "dispatches": 2,
+                    "duration_s": 12.5,
+                    "input_tokens": 1500,
+                    "output_tokens": 800,
+                },
+                "review_model": {"dispatches": 1, "duration_s": 3.0, "input_tokens": None, "output_tokens": None},
+            },
+            "total": {"dispatches": 3, "duration_s": 15.5, "input_tokens": 1500, "output_tokens": 800},
+        }
+        lines = pipeline_report.render_report(report)
+        rendered = "\n".join(lines)
+        self.assertIn("probe_ip:", rendered)
+        self.assertIn("1,500 in / 800 out tokens", rendered)
+        self.assertIn("- in / - out tokens", rendered, "unknown tokens must render as '-', never 0")
+
+    def _load_pipeline_report_cost_tool(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "report_pipeline_cost", repo_root / "tools" / "report_pipeline_cost.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
 
     def test_gate_command_that_hangs_is_killed_and_reported_as_failed(self):
         """R3: the same timeout on the tool/gate side of run_stage_command."""

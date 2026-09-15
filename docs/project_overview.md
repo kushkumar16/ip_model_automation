@@ -673,6 +673,12 @@ Details worth knowing:
   file (`reports/.auto_ip_pipeline.lock`) refuses a second concurrent run
   rather than letting two runs race on the same pipeline state and generated
   files — `--force-lock` overrides a lock that is actually stale.
+- **See the cost after spending it**: every real run writes
+  `reports/<ip>.cost.json` — dispatch count and wall-clock seconds per agent
+  stage always, tokens when the dispatched CLI itself reported them (the
+  `claude` profile's `--output-format json` result today; a CLI that does not
+  report usage leaves tokens unknown rather than guessed or zeroed).
+  `python tools/report_pipeline_cost.py` renders it.
 
 ## Editing a DLD without rewriting the model
 
@@ -1260,6 +1266,10 @@ looked at all.
   current directory (`target_profile.yaml` or `.git`) rather than from the
   tooling's own install location — so pointing the pipeline at another
   codebase no longer requires cloning this repo alongside it.
+- **Agent spend is recorded, not just estimated**: `reports/<ip>.cost.json`
+  tracks real dispatch counts and wall-clock time per stage from every
+  unattended run, plus token counts where the dispatched agent CLI reported
+  them — `python tools/report_pipeline_cost.py` renders it.
 - Extractor calibration holds for every golden IP (FSM name set + count
   reproduce exactly).
 

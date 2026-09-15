@@ -888,6 +888,28 @@ def cleanup_review_worktree(worktree_dir: Path) -> None:
         print(f"  warning: `git worktree remove` timed out cleaning up {worktree_dir}; remove it by hand later.")
 
 
+def _review_subject_paths(ip_name: str, kind: str) -> list[str]:
+    """Relative paths the given review kind must actually read.
+
+    Used to fail fast in dispatch_isolated_review, before spending a real
+    agent dispatch, on the mistake this project's own dogfooding hit once:
+    provision_review_worktree builds the isolated checkout from `git worktree
+    add HEAD`, so it only ever sees *committed* content. Dispatching a review
+    against a brand-new IP whose files exist only in the working tree burns a
+    paid agent call before the agent itself can even discover -- and report
+    back -- that its subject files are missing.
+    """
+    if kind == "model":
+        return [
+            f"templates/{ip_name}.template.yaml",
+            f"src/ip_model_automation/{ip_name}.py",
+            f"tests/test_{ip_name}.py",
+        ]
+    if kind == "normalization":
+        return [f"dlds/{ip_name}_dld.src.md", f"dlds/{ip_name}_dld.md"]
+    raise ValueError(f"unknown review kind: {kind!r}")
+
+
 def dispatch_isolated_review(
     agent_cmd: str | None, ip_name: str, stage: str, kind: str, prompt: str, options: RunOptions
 ) -> bool:
@@ -902,8 +924,17 @@ def dispatch_isolated_review(
     if not agent_cmd:
         print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
         return False
-    options.dispatch_count += 1
     worktree_dir = provision_review_worktree(ip_name)
+    missing = [p for p in _review_subject_paths(ip_name, kind) if not (worktree_dir / p).is_file()]
+    if missing:
+        cleanup_review_worktree(worktree_dir)
+        print(
+            f"  {stage}: ABORTED before dispatch -- missing at HEAD: {', '.join(missing)}. "
+            "The isolated review worktree is built from `git worktree add HEAD`, so it only "
+            f"sees committed content. Commit {ip_name}'s subject files, then re-run."
+        )
+        return False
+    options.dispatch_count += 1
     try:
         print(
             f"  {stage}: running agent (dispatch #{options.dispatch_count} this run, isolated worktree, "

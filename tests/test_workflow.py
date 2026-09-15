@@ -1054,6 +1054,16 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             root = Path(tmp)
             (root / "decisions").mkdir()
             (root / "reviews").mkdir()
+            (root / "templates").mkdir()
+            (root / "src" / "ip_model_automation").mkdir(parents=True)
+            (root / "tests").mkdir()
+            # dispatch_isolated_review now checks these exist at HEAD before
+            # spending a dispatch (see _review_subject_paths) -- the worktree
+            # it dispatches into is built from `git worktree add HEAD`, so it
+            # only ever sees committed content, not merely a file on disk.
+            (root / "templates" / "probe_ip.template.yaml").write_text("ip: {}\n", encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("", encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text("", encoding="utf-8")
 
             def git(*args):
                 subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
@@ -1079,6 +1089,56 @@ class TestIpRegistryAndLayout(unittest.TestCase):
                 (root / "reviews" / "probe_ip.model.findings.yaml").read_text(encoding="utf-8"),
                 "ip: probe_ip\nkind: model\nfindings: []\n",
             )
+            listing = subprocess.run(
+                ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
+            ).stdout
+            self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
+
+    def test_isolated_review_dispatch_aborts_before_spending_a_dispatch_on_uncommitted_ip(self):
+        """provision_review_worktree builds from `git worktree add HEAD`, so a
+        brand-new IP whose files exist only in the working tree -- never
+        committed -- is invisible to the isolated review. Dispatching anyway
+        burns a real, paid agent call before the agent can discover this
+        itself (this dogfooding round hit it for real: a $0.37 review dispatch
+        against watchdog_ip came back refusing to fabricate a review because
+        its subject files did not exist in that checkout). dispatch_isolated_review
+        must now check first and never invoke the agent at all.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+            # Deliberately no templates/, src/, or tests/ subject files for
+            # probe_ip -- only committed content the working tree happens to
+            # have, which is exactly the gap that wasted a real dispatch.
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            (root / "reviews" / ".gitkeep").write_text("", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+
+            pipeline.REPO_ROOT = root
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            # An agent command that would prove it ran by writing a marker --
+            # if this file exists afterward, the check below failed to stop it.
+            marker = root / "agent_ran.marker"
+            fake_agent = f"touch {marker}"
+            options = pipeline.RunOptions()
+
+            dispatched = pipeline.dispatch_isolated_review(
+                fake_agent, "probe_ip", "review_model", "model", "prompt", options
+            )
+
+            self.assertFalse(dispatched, "a review with missing subject files must not count as dispatched")
+            self.assertFalse(marker.exists(), "the agent command ran despite missing subject files")
+            self.assertEqual(options.dispatch_count, 0, "an aborted-before-dispatch review must not count as one")
             listing = subprocess.run(
                 ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
             ).stdout

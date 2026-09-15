@@ -1174,6 +1174,7 @@ state can actually support is stated here.
 | `arbitration_ip` | model | current | none |
 | `completion_ip` | model | current | M37 (dismissed) |
 | `storage_pipeline_subsystem` | model | current | none |
+| `watchdog_ip` | model | current | none |
 
 No `normalization` review has been run against either live IP yet.
 

@@ -443,7 +443,20 @@ def extract_timing_table(lines: list[str], fsm_names: list[str]) -> dict[str, li
 
 def extract_open_items(lines: list[str]) -> list[str]:
     for raw_name, block in split_blocks(lines, re.compile(r"^#{2}\s+[\d.]*\s*(Open Items.*)$", re.IGNORECASE)):
-        return [strip_code(line.strip()[2:]) for line in block if line.strip().startswith("- ")]
+        items: list[str] = []
+        for line in block:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                items.append(strip_code(stripped[2:]))
+            elif stripped and items and line.startswith((" ", "\t")):
+                # An indented continuation line wrapping the bullet above it
+                # onto the next line (arbitration_ip_dld.md's own "Starvation
+                # guard threshold..." open item does this) -- naively taking
+                # only each bullet's first line silently truncated these in
+                # the gaps report, the same class of bug extract_commands()
+                # was fixed for (round fourteen's dogfood run).
+                items[-1] = f"{items[-1]} {stripped}"
+        return items
     return []
 
 
@@ -553,10 +566,31 @@ def build_draft(ip_name: str, text: str) -> tuple[dict[str, Any], list[str]]:
 
 
 def extract_description(lines: list[str]) -> str | None:
+    """The Purpose section's first sentence, joined across wrapped lines.
+
+    Taking only the paragraph's first physical line silently truncated
+    mid-sentence whenever the DLD's own prose wrapped before the first
+    period -- which all three of this repo's own DLDs already do
+    (arbitration_ip_dld.md's Purpose paragraph wraps at "...ingress sources
+    and"). This never surfaced as a wrong shipped description because a
+    human always replaces this value during review, but the truncated
+    fragment is not marked TODO_REVIEW -- unlike every other gap, it does
+    not ask to be looked at (round fourteen's dogfood run).
+    """
     for raw_name, block in split_blocks(lines, re.compile(r"^#{2}\s+[\d.]*\s*(Purpose.*)$", re.IGNORECASE)):
+        paragraph: list[str] = []
         for line in block:
-            if line.strip():
-                return line.strip()
+            stripped = line.strip()
+            if not stripped:
+                if paragraph:
+                    break  # end of the first paragraph
+                continue  # skip leading blank lines before it
+            paragraph.append(stripped)
+        if not paragraph:
+            continue
+        text = " ".join(paragraph)
+        match = re.search(r"^.*?[.!?](?=\s|$)", text)
+        return match.group(0) if match else text
     return None
 
 

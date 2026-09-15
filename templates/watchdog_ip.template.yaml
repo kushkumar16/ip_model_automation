@@ -1,0 +1,223 @@
+ip:
+  name: watchdog_ip
+  domain: soc_peripheral
+  description: The Watchdog IP monitors host liveness.
+  clock_domains:
+    - name: core_clk
+      frequency_mhz: 500
+  reset:
+    type: sync
+    behavior: clear_countdown_timeout_and_expired_latch_return_to_disarmed
+
+interfaces:
+  - name: host_control_if
+    type: command_accept
+    direction: input
+    clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: peer
+      wait_points: [watchdog_main.ARMED, watchdog_main.EXPIRED]
+      resumes_on: command_applied
+      source: dld
+      notes: "CONFIGURE_TIMEOUT is acknowledged by the Config Intake FSM instead (see config_intake); this wait model covers ARM/KICK/DISARM. Two wait points because DISARM (valid_conditions: watchdog_armed_or_expired) resolves from either ARMED or EXPIRED, and it is not until watchdog_main's outer loop resumes that fsm_state moves to DISARMED."
+    transactions:
+      - name: host_control_access
+        fields: [command, timeout_cycles]
+        handshake: valid_ready
+        timing_notes: one command accepted at a time; acknowledged once it has actually taken effect, not merely received
+  - name: expiry_if
+    type: status_output
+    direction: output
+    clock_domain: core_clk
+    wait_model:
+      mode: wait_for_ack_inline
+      requester: this_ip
+      wait_points: [watchdog_main.EXPIRED]
+      resumes_on: expiry_acknowledged
+      source: dld
+      notes: "the watchdog will not re-arm while EXPIRED -- the host must disarm first, which is how it acknowledges the expiry"
+    transactions:
+      - name: expiry_access
+        fields: [expired]
+        handshake: level
+        timing_notes: asserted one cycle after the countdown reaches zero (the declared 1-cycle assert_expiry delay); stays asserted until the host disarms
+
+commands:
+  - name: ARM
+    description: Arms the watchdog with the currently configured timeout, starting the countdown from that value.
+    fields: [cmd_id]
+    valid_conditions: [watchdog_disarmed]
+    completion_conditions: [countdown_loaded_from_configured_timeout]
+    error_conditions: []
+    functional_effects: [load_countdown_from_configured_timeout]
+    timing_effects: [watchdog_main_arm_delay]
+  - name: KICK
+    description: Reloads the countdown to the configured timeout; must be issued again before the countdown reaches zero, or the watchdog expires.
+    fields: [cmd_id]
+    valid_conditions: [watchdog_armed]
+    completion_conditions: [countdown_reloaded_from_configured_timeout]
+    error_conditions: []
+    functional_effects: [reload_countdown]
+    timing_effects: [watchdog_main_kick_delay]
+  - name: DISARM
+    description: Disarms the watchdog, canceling an in-progress countdown or clearing an expired latch, whichever applies.
+    fields: [cmd_id]
+    valid_conditions: [watchdog_armed_or_expired]
+    completion_conditions: [countdown_cancelled_or_expired_latch_cleared]
+    error_conditions: []
+    functional_effects: [cancel_countdown_or_clear_expired_latch]
+    timing_effects: [watchdog_main_disarm_delay]
+  - name: CONFIGURE_TIMEOUT
+    description: Sets the timeout window's cycle count used the next time the watchdog is armed; does not affect a countdown already running.
+    fields: [cmd_id, timeout_cycles]
+    valid_conditions: []
+    completion_conditions: [timeout_value_stored]
+    error_conditions: []
+    functional_effects: [store_configured_timeout]
+    timing_effects: [config_intake_apply_timeout_delay]
+
+fsm_processes:
+  - name: watchdog_main
+    purpose: Count down from the configured timeout once armed, and assert expiry if not kicked before the countdown reaches zero.
+    simpy_process: true
+    states: [RESET, DISARMED, ARMED, EXPIRED]
+    transitions:
+      - from: RESET
+        to: DISARMED
+        condition: reset_deasserted
+        actions: [clear_countdown_and_expired_latch]
+        latency_cycles: 1
+      - from: DISARMED
+        to: ARMED
+        condition: arm_command_accepted
+        actions: [load_countdown_from_configured_timeout]
+        latency_cycles: 1
+      - from: ARMED
+        to: ARMED
+        condition: kick_command_accepted
+        actions: [reload_countdown]
+        latency_cycles: 1
+      - from: ARMED
+        to: DISARMED
+        condition: disarm_command_accepted
+        actions: [cancel_countdown]
+        latency_cycles: 1
+      - from: ARMED
+        to: EXPIRED
+        condition: countdown_reached_zero_without_kick
+        actions: [assert_expiry]
+        latency_cycles: 1
+      - from: EXPIRED
+        to: DISARMED
+        condition: disarm_command_accepted
+        actions: [clear_expired_latch]
+        latency_cycles: 1
+    functional_responsibilities: [monitoring_host_liveness_via_periodic_kicks, asserting_expiry_on_timeout]
+    interfaces_touched: [host_control_if, expiry_if]
+    queues_used: []
+    resources_used: []
+  - name: config_intake
+    purpose: Accept a CONFIGURE_TIMEOUT command and store the new timeout for the next arm, independent of any countdown already running.
+    simpy_process: true
+    states: [IDLE, APPLY_TIMEOUT]
+    transitions:
+      - from: IDLE
+        to: APPLY_TIMEOUT
+        condition: configure_timeout_command_accepted
+        actions: [dequeue_configure_timeout_request]
+        latency_cycles: 1
+      - from: APPLY_TIMEOUT
+        to: IDLE
+        condition: timeout_value_stored
+        actions: [store_configured_timeout]
+        latency_cycles: 1
+    functional_responsibilities: [storing_the_configured_timeout_independent_of_the_running_countdown]
+    interfaces_touched: [host_control_if]
+    queues_used: []
+    resources_used: []
+
+fsm_relationships:
+  fsm_count: 2
+  parallel_processes:
+    - [watchdog_main, config_intake]
+  sequential_paths:
+    - name: configure_timeout_to_next_arm
+      path: [config_intake.APPLY_TIMEOUT, watchdog_main.ARMED]
+      description: A stored timeout value only takes effect the next time the Watchdog Main FSM arms; it never interrupts a countdown already running.
+  gating_relationships: []
+
+timing_model:
+  clock_mhz: 500
+  cycle_time_ns: 2
+  assumption: Hard-coded starter timing extracted from DLD.
+  fsm_process_delays:
+    - fsm: watchdog_main
+      mode: parallel_process
+      operations:
+        - {name: arm, cycles: 1, ns: 2}
+        - {name: kick, cycles: 1, ns: 2}
+        - {name: disarm, cycles: 1, ns: 2}
+        - {name: countdown_tick, cycles: 1, ns: 2}
+        - {name: expire, cycles: 1, ns: 2}
+    - fsm: config_intake
+      mode: parallel_process
+      operations:
+        - {name: accept_config, cycles: 1, ns: 2}
+        - {name: apply_timeout, cycles: 1, ns: 2}
+  end_to_end_paths:
+    - name: arm_to_first_countdown_tick
+      cycles: 1
+      ns: 2
+      path: [arm]
+    - name: expiry_once_countdown_reaches_zero
+      cycles: 1
+      ns: 2
+      path: [expire]
+    - name: configure_timeout_stored
+      cycles: 2
+      ns: 4
+      path: [accept_config, apply_timeout]
+
+functionality_model:
+  implemented_in_simpy: true
+  state_variables: [fsm_state, transition_counts, armed, countdown_cycles, configured_timeout_cycles, expired]
+  apis: [run, get_metrics, arm, kick, disarm, configure_timeout]
+  invariants:
+    - The countdown decrements only while armed.
+    - The watchdog does not re-arm while expired; DISARM must clear the expired latch first.
+    - A CONFIGURE_TIMEOUT never affects a countdown already running; it only takes effect on the next arm.
+  ignored_payload_details: []
+
+performance_model:
+  language: python
+  library: simpy
+  abstraction_level: transaction
+  model_functionality: true
+  model_fsm_processes: true
+  model_data_payloads: false
+  model_interface_backpressure: false
+  model_arbitration: false
+  model_queue_occupancy: false
+  model_latency_sources: [watchdog_main_countdown_tick_delay, config_intake_apply_timeout_delay]
+  metrics: [transition_counts, kicks_received, expirations, arm_count, disarm_count]
+
+test_scenarios:
+  - name: kick_before_expiry_prevents_expiration
+    description: A host that arms the watchdog and kicks it before the countdown reaches zero never sees an expiry.
+    input_sequence: [CONFIGURE_TIMEOUT, ARM, KICK]
+    expected_functional_behavior: [countdown_reloaded_on_kick, no_expiry_asserted]
+    expected_performance_properties: [countdown_reset_to_full_timeout_on_kick]
+    fsm_coverage: [watchdog_main.DISARMED, watchdog_main.ARMED]
+  - name: countdown_reaches_zero_without_kick_expires
+    description: A host that arms the watchdog and never kicks it sees the countdown reach zero and the watchdog expire, latched until disarmed.
+    input_sequence: [CONFIGURE_TIMEOUT, ARM]
+    expected_functional_behavior: [expiry_asserted_when_countdown_reaches_zero, expiry_latched_until_disarm]
+    expected_performance_properties: [expiry_latency_measured]
+    fsm_coverage: [watchdog_main.ARMED, watchdog_main.EXPIRED]
+  - name: configure_timeout_flows_independently_of_countdown
+    description: A CONFIGURE_TIMEOUT request is applied by the Config Intake FSM independently of whether the Watchdog Main FSM is currently counting down, and only takes effect on the next arm.
+    input_sequence: [ARM, CONFIGURE_TIMEOUT]
+    expected_functional_behavior: [configured_timeout_stored, running_countdown_unaffected]
+    expected_performance_properties: [config_intake_apply_delay_measured]
+    fsm_coverage: [config_intake.IDLE, config_intake.APPLY_TIMEOUT]

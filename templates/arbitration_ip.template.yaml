@@ -2,6 +2,7 @@ ip:
   name: arbitration_ip
   domain: nvme_controller
   description: Selects eligible commands through port, tenant, and SQ arbitration and issues them downstream.
+  modeling_backends: [simpy, systemc]
   clock_domains:
     - name: core_clk
       frequency_mhz: null

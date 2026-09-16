@@ -582,9 +582,10 @@ finding either review stage has filed — `review_normalization` or
 still what `reviews/*.findings.yaml` and `decisions/*.md` actually say), and
 `run_systemc_tests.py` (every IP whose template opts into the `systemc`
 backend still compiles and passes its SystemC testbench — currently
-`arbitration_ip`, `completion_ip`, and `watchdog_ip`; a no-op for any IP that
-doesn't opt in). Eleven gates in total; `python tools/run_ci.py --list`
-prints all of them with their commands.
+`arbitration_ip`, `completion_ip`, `storage_pipeline_subsystem`, and
+`watchdog_ip`; a no-op for any IP that doesn't opt in). Eleven gates in
+total; `python tools/run_ci.py --list` prints all of them with their
+commands.
 
 ## The automated pipeline runner
 
@@ -1195,7 +1196,7 @@ Findings dismissed by name to date, from `decisions/<ip>.md`:
 | --- | --- | --- |
 | `arbitration_ip` | Hierarchical port/tenant/SQ arbitration with pending bitmaps, RR/WRR policy, burst-limited issue pipeline. | SimPy, SystemC |
 | `completion_ip` | Command completion scheduling with per-tenant QoS tokens, window-based refill, output backpressure. | SimPy, SystemC |
-| `storage_pipeline_subsystem` | Composes the two above: forwards a submitted command into `arbitration_ip`, forwards what it issues into `completion_ip`, and mirrors `completion_ip`'s backlog back into `arbitration_ip`'s issue readiness. | SimPy |
+| `storage_pipeline_subsystem` | Composes the two above: forwards a submitted command into `arbitration_ip`, forwards what it issues into `completion_ip`, and mirrors `completion_ip`'s backlog back into `arbitration_ip`'s issue readiness. | SimPy, SystemC |
 | `watchdog_ip` | Host-liveness countdown timer: arm/kick/disarm, latched expiry until disarmed, and a timeout configurable independent of any countdown already running. | SimPy, SystemC |
 
 ## What the gates currently cover

@@ -79,14 +79,23 @@ class TestIpRegistryAndLayout(unittest.TestCase):
     def test_systemc_scaffold_generator_refuses_an_ip_not_opted_in(self):
         """ip.modeling_backends is the switch: an IP that omits it, or names
         only simpy, must not get a SystemC scaffold -- the default stays
-        exactly what it was before this generator existed."""
+        exactly what it was before this generator existed.
+
+        Every real IP in this repo is opted into systemc by now, so this
+        builds a synthetic not-opted-in template (a real, schema-valid one
+        with its modeling_backends line stripped) rather than depending on
+        one staying un-opted-in indefinitely.
+        """
         generator = self._load_systemc_scaffold_generator()
         repo_root = Path(__file__).resolve().parents[1]
+        watchdog_template = (repo_root / "templates" / "watchdog_ip.template.yaml").read_text(encoding="utf-8")
+        not_opted_in = "\n".join(line for line in watchdog_template.splitlines() if "modeling_backends" not in line)
 
-        with self.assertRaises(SystemExit):
-            generator.write_scaffold(
-                repo_root / "templates" / "storage_pipeline_subsystem.template.yaml", None, stdout=True
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "not_opted_in_ip.template.yaml"
+            template_path.write_text(not_opted_in.replace("watchdog_ip", "not_opted_in_ip"), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                generator.write_scaffold(template_path, None, stdout=True)
 
     def test_systemc_scaffold_generator_emits_compilable_header_and_source(self):
         """End to end: scaffold a fresh IP's SystemC files from its template
@@ -160,7 +169,9 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
     def test_systemc_ips_discovers_only_opted_in_templates(self):
         module = self._load_run_systemc_tests()
-        self.assertEqual(module.systemc_ips(), ["arbitration_ip", "completion_ip", "watchdog_ip"])
+        self.assertEqual(
+            module.systemc_ips(), ["arbitration_ip", "completion_ip", "storage_pipeline_subsystem", "watchdog_ip"]
+        )
 
     def test_watchdog_ip_systemc_testbench_compiles_and_passes_for_real(self):
         """The real, permanent regression check: watchdog_ip's SystemC model
@@ -212,9 +223,29 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         self.assertTrue(passed, f"completion_ip SystemC testbench failed:\n{output}")
         self.assertIn("5/5 passed", output)
 
+    def test_storage_pipeline_subsystem_systemc_testbench_compiles_and_passes_for_real(self):
+        """The SystemC counterpart to
+        `python -m unittest tests.test_storage_pipeline_subsystem`: an
+        ArbitrationIpModel and a CompletionIpModel sub-module composed
+        through the three glue processes, compiled and linked against
+        systemc/models/arbitration_ip.cpp and completion_ip.cpp too (a
+        composing model only #includes its member IPs' headers) and run
+        against the real SystemC library."""
+        module = self._load_run_systemc_tests()
+        if shutil.which("g++") is None or shutil.which("pkg-config") is None:
+            self.skipTest("g++/pkg-config not available in this environment")
+        pkg_config = subprocess.run(["pkg-config", "--exists", "systemc"], capture_output=True, text=True, timeout=10)
+        if pkg_config.returncode != 0:
+            self.skipTest("SystemC development library not installed")
+
+        pkg_config_flags = module.require_pkg_config_systemc()
+        passed, output = module.compile_and_run("storage_pipeline_subsystem", pkg_config_flags)
+        self.assertTrue(passed, f"storage_pipeline_subsystem SystemC testbench failed:\n{output}")
+        self.assertIn("3/3 passed", output)
+
     def test_compile_and_run_reports_missing_sources_clearly(self):
         module = self._load_run_systemc_tests()
-        passed, output = module.compile_and_run("storage_pipeline_subsystem", ["-lsystemc"])
+        passed, output = module.compile_and_run("no_such_ip", ["-lsystemc"])
         self.assertFalse(passed)
         self.assertIn("missing SystemC source file(s)", output)
 

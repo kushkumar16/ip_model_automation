@@ -5,8 +5,78 @@
 #include <tuple>
 
 namespace {
-std::vector<std::pair<std::string, int>> weighted(const std::vector<std::pair<std::string, int>>& pairs) {
-    return pairs;
+using Topology = ArbitrationIpModel::Topology;
+
+// DEFAULT_TOPOLOGY / DEFAULT_WEIGHTS from the SimPy model. Port and SQ
+// weights stay at these defaults regardless of caller overrides -- only
+// tenant_weight_override varies in practice (storage_pipeline_subsystem's
+// own flat {"T0": 1, "T1": 1} shorthand mirrors what _normalize_weights
+// does for an all-int weights dict: only the tenant level is touched).
+Topology default_topology() {
+    return {
+        {"port0", {{"T0", {"SQ0", "SQ1"}}, {"T1", {"SQ0", "SQ1", "SQ2", "SQ3"}}}},
+        {"port1", {{"T2", {"SQ0", "SQ1"}}, {"T3", {"SQ0"}}}},
+    };
+}
+std::map<std::string, int> default_port_weights() { return {{"port0", 1}, {"port1", 1}}; }
+std::map<std::string, int> default_tenant_weights() { return {{"T0", 1}, {"T1", 4}, {"T2", 2}, {"T3", 1}}; }
+std::map<std::string, int> default_sq_weights() { return {{"SQ0", 4}, {"SQ1", 2}, {"SQ2", 1}, {"SQ3", 1}}; }
+
+std::map<std::string, int> merge_weights(
+    std::map<std::string, int> base, const std::optional<std::map<std::string, int>>& override
+) {
+    if (override) {
+        for (auto& [name, weight] : *override) {
+            base[name] = weight;
+        }
+    }
+    return base;
+}
+
+int weight_of(const std::map<std::string, int>& weights, const std::string& name) {
+    auto it = weights.find(name);
+    return it == weights.end() ? 1 : it->second;
+}
+
+WeightedOrder build_port_policy(const Topology& topology, const std::map<std::string, int>& weights) {
+    std::vector<std::pair<std::string, int>> pairs;
+    for (auto& [port_id, tenants] : topology) {
+        (void)tenants;
+        pairs.push_back({port_id, weight_of(weights, port_id)});
+    }
+    return WeightedOrder(pairs);
+}
+
+std::map<std::string, WeightedOrder> build_tenant_policies(
+    const Topology& topology, const std::map<std::string, int>& weights
+) {
+    std::map<std::string, WeightedOrder> result;
+    for (auto& [port_id, tenants] : topology) {
+        std::vector<std::pair<std::string, int>> pairs;
+        for (auto& [tenant_id, sqs] : tenants) {
+            (void)sqs;
+            pairs.push_back({tenant_id, weight_of(weights, tenant_id)});
+        }
+        result.emplace(port_id, WeightedOrder(pairs));
+    }
+    return result;
+}
+
+std::map<std::string, WeightedOrder> build_sq_policies(
+    const Topology& topology, const std::map<std::string, int>& weights
+) {
+    std::map<std::string, WeightedOrder> result;
+    for (auto& [port_id, tenants] : topology) {
+        (void)port_id;
+        for (auto& [tenant_id, sqs] : tenants) {
+            std::vector<std::pair<std::string, int>> pairs;
+            for (auto& sq_id : sqs) {
+                pairs.push_back({sq_id, weight_of(weights, sq_id)});
+            }
+            result.emplace(tenant_id, WeightedOrder(pairs));
+        }
+    }
+    return result;
 }
 }  // namespace
 
@@ -14,20 +84,14 @@ ArbitrationIpModel::ArbitrationIpModel(
     sc_module_name name, int bitmap_latency, int port_scan_latency, int tenant_scan_latency, int sq_scan_latency,
     int grant_latency, int selection_accept_latency, int pending_count_latency, int burst_read_latency,
     int burst_calc_latency, int issue_latency, int burst_debit_latency, int weighted_order_rebuild_latency,
-    int reset_latency, int issue_slot_latency, int credit_refill_latency
+    int reset_latency, int issue_slot_latency, int credit_refill_latency, std::optional<Topology> topology_override,
+    std::optional<std::map<std::string, int>> tenant_weight_override
 )
     : sc_module(name),
-      port_policy(weighted({{"port0", 1}, {"port1", 1}})),
-      tenant_policies{
-          {"port0", WeightedOrder(weighted({{"T0", 1}, {"T1", 4}}))},
-          {"port1", WeightedOrder(weighted({{"T2", 2}, {"T3", 1}}))},
-      },
-      sq_policies{
-          {"T0", WeightedOrder(weighted({{"SQ0", 4}, {"SQ1", 2}}))},
-          {"T1", WeightedOrder(weighted({{"SQ0", 4}, {"SQ1", 2}, {"SQ2", 1}, {"SQ3", 1}}))},
-          {"T2", WeightedOrder(weighted({{"SQ0", 4}, {"SQ1", 2}}))},
-          {"T3", WeightedOrder(weighted({{"SQ0", 4}}))},
-      } {
+      topology(topology_override.value_or(default_topology())),
+      port_policy(build_port_policy(topology, default_port_weights())),
+      tenant_policies(build_tenant_policies(topology, merge_weights(default_tenant_weights(), tenant_weight_override))),
+      sq_policies(build_sq_policies(topology, default_sq_weights())) {
     latency["bitmap"] = sc_time(bitmap_latency, SC_NS);
     latency["port_scan"] = sc_time(port_scan_latency, SC_NS);
     latency["tenant_scan"] = sc_time(tenant_scan_latency, SC_NS);
@@ -45,9 +109,6 @@ ArbitrationIpModel::ArbitrationIpModel(
     latency["issue_slot"] = sc_time(issue_slot_latency, SC_NS);
     latency["credit_refill"] = sc_time(credit_refill_latency, SC_NS);
     latency["backpressure_retry"] = sc_time(1, SC_NS);
-
-    topology["port0"] = {{"T0", {"SQ0", "SQ1"}}, {"T1", {"SQ0", "SQ1", "SQ2", "SQ3"}}};
-    topology["port1"] = {{"T2", {"SQ0", "SQ1"}}, {"T3", {"SQ0"}}};
 
     for (auto& [port_id, tenants] : topology) {
         port_pending_bitmap[port_id] = false;
@@ -77,9 +138,10 @@ ArbitrationIpModel::ArbitrationIpModel(
 // Host-facing API
 // ---------------------------------------------------------------------- //
 void ArbitrationIpModel::enqueue(
-    const std::string& port_id, const std::string& tenant_id, const std::string& sq_id, const std::string& cmd_id
+    const std::string& port_id, const std::string& tenant_id, const std::string& sq_id, const std::string& cmd_id,
+    const std::string& kind, double size_kb
 ) {
-    queues[port_id][tenant_id][sq_id].push_back(cmd_id);
+    queues[port_id][tenant_id][sq_id].push_back({cmd_id, kind, size_kb});
     bitmap_dirty = true;
     wake_arbiter();
 }
@@ -488,7 +550,9 @@ void ArbitrationIpModel::issue_pipeline_process() {
 
         auto& queue = queues[selection.port_id][selection.tenant_id][selection.sq_id];
         for (int i = 0; i < cnt_issue; i++) {
-            issued_cmd_ids.push_back(queue.front());
+            const QueuedCommand& command = queue.front();
+            issued_cmd_ids.push_back(command.cmd_id);
+            issued.push_back({command.cmd_id, selection.tenant_id, command.kind, command.size_kb});
             queue.pop_front();
         }
 

@@ -61,6 +61,11 @@ class CompletionIpModel : public sc_module {
 
     std::map<std::string, long> get_metrics() const { return metrics; }
     std::size_t pending_count(const std::string& tenant_id) const;
+    // Sum of every touched tenant's pending queue length (SimPy:
+    // `sum(len(queue) for queue in self.pending.values())`), for a consumer
+    // (storage_pipeline_subsystem's backpressure monitor) that samples the
+    // whole backlog rather than one tenant.
+    std::size_t total_pending_count() const;
 
     std::map<std::string, std::string> fsm_state;
     std::set<std::string> eligible_tenants;
@@ -108,7 +113,11 @@ class CompletionIpModel : public sc_module {
 
     WindowSnapshot pending_snapshot;
 
-    std::deque<Command> input_queue;
+    struct QueuedSubmission {
+        Command command;
+        sc_event* accepted;
+    };
+    std::deque<QueuedSubmission> input_queue;
     sc_event input_notify;
 
     bool completion_port_busy = false;

@@ -2,6 +2,7 @@ ip:
   name: storage_pipeline_subsystem
   domain: soc_subsystem
   description: Connects the Arbitration IP and the Completion IP into one command-scheduling-and-completion pipeline via three glue processes.
+  modeling_backends: [simpy, systemc]
   clock_domains:
     - name: core_clk
       frequency_mhz: 500

@@ -61,9 +61,17 @@ void CompletionIpModel::set_tenant_alive(const std::string& tenant_id, bool aliv
 void CompletionIpModel::set_completion_ready(bool ready) { output_ready = ready; }
 
 void CompletionIpModel::submit(const Command& command) {
+    // accepted_cmd_if is wait_for_ack_inline: the caller blocks until the
+    // command actually lands in the pending queue (accept.ENQUEUE's own
+    // cost, plus any queue-full backpressure ahead of it), not merely until
+    // it is handed to accept_process's own input queue. A composing caller
+    // (storage_pipeline_subsystem's dispatch_bridge) relies on this to pace
+    // itself against completion_ip's real accept throughput, not flood it.
     ensure_tenant(command.tenant_id);
-    input_queue.push_back(command);
+    sc_event accepted;
+    input_queue.push_back({command, &accepted});
     input_notify.notify();
+    wait(accepted);
 }
 
 void CompletionIpModel::refill_once() {
@@ -75,6 +83,15 @@ void CompletionIpModel::refill_once() {
 std::size_t CompletionIpModel::pending_count(const std::string& tenant_id) const {
     auto it = pending.find(tenant_id);
     return it == pending.end() ? 0 : it->second.size();
+}
+
+std::size_t CompletionIpModel::total_pending_count() const {
+    std::size_t total = 0;
+    for (auto& [tenant_id, queue] : pending) {
+        (void)tenant_id;
+        total += queue.size();
+    }
+    return total;
 }
 
 // ---------------------------------------------------------------------- //
@@ -242,8 +259,9 @@ void CompletionIpModel::accept_process() {
         while (input_queue.empty()) {
             wait(input_notify);
         }
-        Command command = input_queue.front();
+        QueuedSubmission submission = input_queue.front();
         input_queue.pop_front();
+        Command command = submission.command;
 
         bool backpressured = false;
         while (pending_queue_full(command.tenant_id)) {
@@ -260,6 +278,9 @@ void CompletionIpModel::accept_process() {
         fsm_state["accept"] = "ENQUEUE";
         wait(latency["service"]);
         pending[command.tenant_id].push_back(command);
+        // The wait point completes here, not at submission: submit()'s
+        // caller was blocked on this exact event.
+        submission.accepted->notify();
         refresh_eligibility(command.tenant_id);
         if (!tenant_alive[command.tenant_id]) {
             metrics["tenant_inactive_stalls"]++;

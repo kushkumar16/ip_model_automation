@@ -20,6 +20,12 @@
 // env.timeout(N) already uses.
 class ArbitrationIpModel : public sc_module {
   public:
+    // port -> tenant -> [sq...]. Defaults to the standalone pilot's own
+    // 2-port/4-tenant topology; a caller composing this model into a larger
+    // subsystem (storage_pipeline_subsystem) injects a smaller one --
+    // mirroring the SimPy model's own `topology` constructor argument.
+    using Topology = std::map<std::string, std::map<std::string, std::vector<std::string>>>;
+
     SC_HAS_PROCESS(ArbitrationIpModel);
     explicit ArbitrationIpModel(
         sc_module_name name,
@@ -37,12 +43,26 @@ class ArbitrationIpModel : public sc_module {
         int weighted_order_rebuild_latency = 8,
         int reset_latency = 1,
         int issue_slot_latency = 1,
-        int credit_refill_latency = 10
+        int credit_refill_latency = 10,
+        std::optional<Topology> topology_override = std::nullopt,
+        std::optional<std::map<std::string, int>> tenant_weight_override = std::nullopt
     );
+
+    // A command as it survives arbitration untouched -- arbitration_ip.py
+    // never branches on kind (M44/M45), but the full Command object still
+    // flows through its queues and issued trace for a downstream consumer
+    // (storage_pipeline_subsystem's dispatch bridge) to forward on. Defaults
+    // mirror common.py's Command dataclass defaults (kind="READ", size_kb=4).
+    struct IssuedCommand {
+        std::string cmd_id;
+        std::string tenant_id;
+        std::string kind;
+        double size_kb;
+    };
 
     // Host-facing API, mirroring the SimPy model's public methods.
     void enqueue(const std::string& port_id, const std::string& tenant_id, const std::string& sq_id,
-                 const std::string& cmd_id);
+                 const std::string& cmd_id, const std::string& kind = "READ", double size_kb = 4.0);
     void configure_burst(std::optional<int> device, const std::map<std::string, int>& tenants,
                           const std::map<std::string, std::map<std::string, int>>& sqs);
     // qos_credit_if's eligibility_check fields. `field` is one of
@@ -53,7 +73,9 @@ class ArbitrationIpModel : public sc_module {
 
     std::map<std::string, long> get_metrics() const { return metrics; }
     const std::vector<std::string>& get_issued_cmd_ids() const { return issued_cmd_ids; }
+    const std::vector<IssuedCommand>& get_issued() const { return issued; }
     const std::vector<std::array<std::string, 3>>& get_selection_trace() const { return selection_trace; }
+    bool is_issue_ready() const { return output_ready; }
 
     std::map<std::string, std::string> fsm_state;
 
@@ -62,6 +84,11 @@ class ArbitrationIpModel : public sc_module {
         std::string port_id;
         std::string tenant_id;
         std::string sq_id;
+    };
+    struct QueuedCommand {
+        std::string cmd_id;
+        std::string kind;
+        double size_kb;
     };
 
     void arbiter_main_process();
@@ -104,8 +131,8 @@ class ArbitrationIpModel : public sc_module {
     std::map<std::string, sc_time> latency;
 
     // topology: port -> tenant -> [sq...], fixed at construction (mirrors
-    // DEFAULT_TOPOLOGY in the SimPy model).
-    std::map<std::string, std::map<std::string, std::vector<std::string>>> topology;
+    // DEFAULT_TOPOLOGY in the SimPy model, or an injected override).
+    Topology topology;
 
     WeightedOrder port_policy;
     std::map<std::string, WeightedOrder> tenant_policies;  // keyed by port_id
@@ -124,8 +151,8 @@ class ArbitrationIpModel : public sc_module {
     std::map<std::string, int> tenant_burst_available;
     std::map<std::string, std::map<std::string, int>> sq_burst_available;
 
-    // queues[port][tenant][sq] = command id FIFO
-    std::map<std::string, std::map<std::string, std::map<std::string, std::deque<std::string>>>> queues;
+    // queues[port][tenant][sq] = command FIFO
+    std::map<std::string, std::map<std::string, std::map<std::string, std::deque<QueuedCommand>>>> queues;
     std::map<std::string, bool> port_pending_bitmap;
     std::map<std::string, std::map<std::string, bool>> tenant_pending_bitmap;
     std::map<std::string, std::map<std::string, bool>> sq_pending_bitmap;
@@ -135,6 +162,7 @@ class ArbitrationIpModel : public sc_module {
     bool output_ready = true;
 
     std::vector<std::string> issued_cmd_ids;
+    std::vector<IssuedCommand> issued;
     std::vector<std::array<std::string, 3>> selection_trace;
     std::map<std::string, long> metrics;
 

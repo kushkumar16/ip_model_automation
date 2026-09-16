@@ -154,3 +154,12 @@ that exact transition, which is still what the model charges; M15's answer
 does not change: `dispatch_tick_ms` describes the QoS accounting window, not
 this transition's cost, and the transition's own declared cost is the one
 place the template states a number for it.
+
+**M40 dismissed:** the same finding as M33/M36/M37 above (`configure_tenant`/
+`set_tenant_alive`/`credit_tokens` all apply synchronously instead of gating
+on `qos_config_if`'s declared `wait_for_ack_inline` at `refill.REFILL_BASE`),
+re-filed a fourth time by the review that confirmed M38's fix, with no
+access to this file. Same gap, same reasoning, same conclusion: closing it
+for real needs `qos_config_if` to have its own always-running acknowledger,
+independent of a refill window a caller may never start (`start_refill_process`
+defaults to `False`) — nothing about that has changed since M33.

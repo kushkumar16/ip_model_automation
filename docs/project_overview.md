@@ -1178,7 +1178,7 @@ state can actually support is stated here.
 | IP | Kind | Review status | This round's findings |
 | --- | --- | --- | --- |
 | `arbitration_ip` | model | current | M45 (dismissed) |
-| `completion_ip` | model | stale — completion_ip.py changed since this review; a fresh round is owed | M38, M39 (superseded) |
+| `completion_ip` | model | current | M40 (dismissed) |
 | `storage_pipeline_subsystem` | model | current | none |
 | `watchdog_ip` | model | current | none |
 
@@ -1186,7 +1186,7 @@ No `normalization` review has been run against any of the 4 live IPs yet.
 
 Findings dismissed by name to date, from `decisions/<ip>.md`:
 - `arbitration_ip`: M28, M30, M44, M45
-- `completion_ip`: M15, M33, M36, M37, M39
+- `completion_ip`: M15, M33, M36, M37, M39, M40
 <!-- AUTOGEN:review-status:end -->
 
 ## Modeled IPs (4)

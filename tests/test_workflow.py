@@ -819,6 +819,67 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # someone writing a findings file will read it.
         self.assertIn("may never pass one", readme)
 
+    def _load_run_agent(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_agent", repo_root / "tools" / "run_agent.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_agent_catalog_matches_every_kind_agent_harness_stage(self):
+        """tools/run_agent.py's on-demand dispatch catalog cannot silently
+        drift from the harness: a new `kind: agent` stage with no catalog
+        entry would be invisible to `--list`, and a stale catalog entry for
+        a removed stage would offer a dispatch that no longer exists."""
+        run_agent = self._load_run_agent()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        import yaml  # noqa: PLC0415 -- the harness is the fixture here
+
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        declared_agent_stages = {s["name"] for s in harness["stages"] if s.get("kind") == "agent"}
+
+        self.assertEqual(set(run_agent.AGENT_CATALOG), declared_agent_stages)
+        for name, info in run_agent.AGENT_CATALOG.items():
+            self.assertTrue((repo_root / info["contract"]).is_file(), f"{name}: missing contract {info['contract']}")
+            self.assertTrue(info["does"].strip(), f"{name}: catalog entry has no description")
+
+    def test_run_agent_list_prints_every_catalog_entry(self):
+        run_agent = self._load_run_agent()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = run_agent.main(["--list"])
+        self.assertEqual(exit_code, 0)
+        output = buf.getvalue()
+        for name in run_agent.AGENT_CATALOG:
+            self.assertIn(name, output)
+
+    def test_run_agent_requires_an_ip_unless_listing(self):
+        run_agent = self._load_run_agent()
+        with self.assertRaises(SystemExit):
+            run_agent.main(["review_model"])  # no ip
+
+    def test_run_agent_dispatches_one_stage_without_the_full_pipeline_sequence(self):
+        """The whole point of this tool: dispatch exactly one named agent
+        stage for one IP directly, not as part of auto_ip_pipeline.py's full
+        per-IP walk through every harness stage in order. Proven against a
+        real stage/IP already in this repo (watchdog_ip's review_model,
+        whose gate currently passes) -- run_agent.py must still dispatch
+        when asked, unlike the automatic pipeline which would skip it."""
+        run_agent = self._load_run_agent()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = run_agent.main(["review_model", "watchdog_ip"])  # no --agent: writes a prompt, does not run
+        self.assertEqual(exit_code, 0)
+        output = buf.getvalue()
+        self.assertIn("gates currently pass", output)
+        self.assertIn("prompt request written", output)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        prompt_path = repo_root / "reports" / "agent_requests" / "watchdog_ip.review_model.prompt.md"
+        self.assertTrue(prompt_path.is_file())
+        self.assertIn("watchdog_ip", prompt_path.read_text(encoding="utf-8"))
+
     def test_ci_runs_every_repo_wide_gate_the_harness_declares(self):
         """CI reads the harness, so a new repo-wide gate cannot escape it.
 

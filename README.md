@@ -283,6 +283,29 @@ python tools/report_pipeline_cost.py              # every reports/*.cost.json
 python tools/report_pipeline_cost.py arbitration_ip
 ```
 
+### Running one agent stage directly
+
+`auto_ip_pipeline.py` only ever dispatches an agent stage automatically, as
+part of the full sequence above, and only once that stage's own gate fails.
+To see what every agent stage actually does and dispatch exactly one of them
+for one IP — on demand, regardless of whether its gate currently passes —
+use `tools/run_agent.py`:
+
+```shell
+python tools/run_agent.py --list                                # every stage, its contract, and its gate(s)
+python tools/run_agent.py review_model watchdog_ip --agent claude
+python tools/run_agent.py complete_template my_ip --agent-cmd "my-agent --auto"
+```
+
+It reuses `auto_ip_pipeline.py`'s own prompt builders and dispatch functions,
+so a stage dispatched this way gets exactly the same behavior an automatic
+run would give it — the two reviewers still run in an isolated worktree,
+cost is still recorded to `reports/<ip>.cost.json`, and a review dispatch
+against an IP whose subject files are missing or uncommitted at `HEAD` still
+aborts before spending anything. Without `--agent`/`--agent-cmd` it writes
+the prompt to `reports/agent_requests/<ip>.<stage>.prompt.md` and reports
+that, the same as the full pipeline's own default.
+
 ## Continuous Integration (local)
 
 CI here is **deliberately local**: the gates run on this machine, before a push,
@@ -590,6 +613,7 @@ is a no-op otherwise.
 - `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
 - `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
+- `tools/run_agent.py`: dispatches exactly one named agent stage for one IP on demand (`--list` for the catalog), reusing `auto_ip_pipeline.py`'s own dispatch functions.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs); with `--strict` it is the promotion gate, so it also rejects TODO_REVIEW markers, assumed-default wait models, and an unstamped normalization.
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.

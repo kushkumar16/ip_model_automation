@@ -10,7 +10,7 @@ from the sketch marked **[revised]**.
 **Problem it addresses:** the extractor (`tools/dld_to_template.py`) is
 deterministic and best-effort. It reads a specific set of markdown conventions
 (documented in
-[dld_extraction_rules.md](../../skills/ip-model-generation/references/dld_extraction_rules.md))
+[dld_extraction_rules.md](../../skills/dld-to-template/references/dld_extraction_rules.md))
 and degrades to `TODO_REVIEW` when they're absent. That determinism is a feature
 — it's what makes extractor calibration a regression test — but it means a DLD
 written in some other shape extracts badly, and a human has to hand-reshape it

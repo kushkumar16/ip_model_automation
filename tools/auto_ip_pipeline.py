@@ -88,7 +88,9 @@ REPORTS_DIR = REPO_ROOT / "reports"
 STATE_PATH = REPORTS_DIR / ".dld_pipeline_state.json"
 AGENT_REQUEST_DIR = REPORTS_DIR / "agent_requests"
 HARNESS_PATH = REPO_ROOT / "harness" / "ip_generation_loop.yaml"
-SKILL_PATH = REPO_ROOT / "skills" / "ip-model-generation" / "SKILL.md"
+DLD_SKILL_PATH = REPO_ROOT / "skills" / "dld-to-template" / "SKILL.md"
+MODEL_SKILL_PATH = REPO_ROOT / "skills" / "simpy-model-generation" / "SKILL.md"
+DLD_EXTRACTION_RULES_PATH = REPO_ROOT / "skills" / "dld-to-template" / "references" / "dld_extraction_rules.md"
 AGENT_CONTRACT_PATH = REPO_ROOT / "agents" / "ip_model_generation_agent.md"
 NORMALIZATION_CONTRACT_PATH = REPO_ROOT / "agents" / "dld_normalization_agent.md"
 LOCK_PATH = REPORTS_DIR / ".auto_ip_pipeline.lock"
@@ -450,7 +452,7 @@ def complete_template_prompt(ip_name: str, extra_context: str = "") -> str:
     return "\n".join(
         [
             f"Work in the repository at {REPO_ROOT}.",
-            f"Follow the skill instructions in {SKILL_PATH.relative_to(REPO_ROOT).as_posix()} (Stage 0)",
+            f"Follow the skill instructions in {DLD_SKILL_PATH.relative_to(REPO_ROOT).as_posix()}",
             f"and the agent contract in {AGENT_CONTRACT_PATH.relative_to(REPO_ROOT).as_posix()}.",
             "",
             f"Task: complete and promote the draft template for `{ip_name}`.",
@@ -568,7 +570,7 @@ def normalize_prompt(ip_name: str, extra_context: str = "") -> str:
             f"Work in the repository at {REPO_ROOT}.",
             f"Follow the agent contract in {NORMALIZATION_CONTRACT_PATH.relative_to(REPO_ROOT).as_posix()}",
             "and the target shape defined in",
-            "skills/ip-model-generation/references/dld_extraction_rules.md.",
+            f"{DLD_EXTRACTION_RULES_PATH.relative_to(REPO_ROOT).as_posix()}.",
             "",
             f"Task: rewrite dlds/{ip_name}_dld.src.md into dlds/{ip_name}_dld.md in the shape the",
             "extractor reads, changing structure only — never adding, removing, or altering an",
@@ -597,7 +599,7 @@ def implementation_prompt(ip_name: str, extra_context: str = "") -> str:
         [
             f"Work in the repository at {REPO_ROOT}.",
             f"Follow the agent contract in {AGENT_CONTRACT_PATH.relative_to(REPO_ROOT).as_posix()} and the",
-            f"skill instructions in {SKILL_PATH.relative_to(REPO_ROOT).as_posix()} (Template -> Model workflow).",
+            f"skill instructions in {MODEL_SKILL_PATH.relative_to(REPO_ROOT).as_posix()} (Template -> Model workflow).",
             "",
             f"Task: implement the SimPy model and unit tests for `{ip_name}` from its reviewed template.",
             f"- Model file: src/ip_model_automation/{ip_name}.py (a scaffold may already exist; fill it).",
@@ -924,12 +926,36 @@ def dispatch_isolated_review(
     if not agent_cmd:
         print(f"  {stage}: agent request written -> {request_path.relative_to(REPO_ROOT)}")
         return False
+    subject_paths = _review_subject_paths(ip_name, kind)
     worktree_dir = provision_review_worktree(ip_name)
-    missing = [p for p in _review_subject_paths(ip_name, kind) if not (worktree_dir / p).is_file()]
-    if missing:
+    missing = [p for p in subject_paths if not (worktree_dir / p).is_file()]
+    # A subject file can exist at HEAD and still not be what the reviewer
+    # needs to see: an edit to an *existing* file, committed after this
+    # dispatch was already kicked off, or (the case that actually happened)
+    # simply not yet committed when the pipeline was invoked, leaves the
+    # worktree holding an older revision than the working tree. The reviewer
+    # then computes hashes against that older content, and the gate reads the
+    # resulting review as stale the moment it is copied back -- a wasted
+    # dispatch, the same wasted-cost failure mode the missing-file check above
+    # exists for, just one step further along.
+    stale = []
+    for path in subject_paths:
+        if path in missing:
+            continue
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", path], cwd=REPO_ROOT, capture_output=True, timeout=30
+        )
+        if diff.returncode != 0:
+            stale.append(path)
+    if missing or stale:
         cleanup_review_worktree(worktree_dir)
+        reasons = []
+        if missing:
+            reasons.append(f"missing at HEAD: {', '.join(missing)}")
+        if stale:
+            reasons.append(f"uncommitted changes not yet at HEAD: {', '.join(stale)}")
         print(
-            f"  {stage}: ABORTED before dispatch -- missing at HEAD: {', '.join(missing)}. "
+            f"  {stage}: ABORTED before dispatch -- {'; '.join(reasons)}. "
             "The isolated review worktree is built from `git worktree add HEAD`, so it only "
             f"sees committed content. Commit {ip_name}'s subject files, then re-run."
         )

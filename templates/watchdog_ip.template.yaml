@@ -8,6 +8,7 @@ ip:
   reset:
     type: sync
     behavior: clear_countdown_timeout_and_expired_latch_return_to_disarmed
+  modeling_backends: [simpy, systemc]
 
 interfaces:
   - name: host_control_if

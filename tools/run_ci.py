@@ -85,6 +85,12 @@ EXTRA_CHECKS: list[tuple[str, str, str]] = [
         "python tools/report_review_status.py --check",
         "the generated review-status block in project_overview.md and reviews/README.md matches reality",
     ),
+    (
+        "systemc_tests",
+        "python tools/run_systemc_tests.py",
+        "every IP opted into the systemc backend (ip.modeling_backends) compiles and passes its SystemC "
+        "testbench -- a no-op if no IP has opted in",
+    ),
 ]
 
 

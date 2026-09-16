@@ -283,6 +283,29 @@ python tools/report_pipeline_cost.py              # every reports/*.cost.json
 python tools/report_pipeline_cost.py arbitration_ip
 ```
 
+### Running one agent stage directly
+
+`auto_ip_pipeline.py` only ever dispatches an agent stage automatically, as
+part of the full sequence above, and only once that stage's own gate fails.
+To see what every agent stage actually does and dispatch exactly one of them
+for one IP — on demand, regardless of whether its gate currently passes —
+use `tools/run_agent.py`:
+
+```shell
+python tools/run_agent.py --list                                # every stage, its contract, and its gate(s)
+python tools/run_agent.py review_model watchdog_ip --agent claude
+python tools/run_agent.py complete_template my_ip --agent-cmd "my-agent --auto"
+```
+
+It reuses `auto_ip_pipeline.py`'s own prompt builders and dispatch functions,
+so a stage dispatched this way gets exactly the same behavior an automatic
+run would give it — the two reviewers still run in an isolated worktree,
+cost is still recorded to `reports/<ip>.cost.json`, and a review dispatch
+against an IP whose subject files are missing or uncommitted at `HEAD` still
+aborts before spending anything. Without `--agent`/`--agent-cmd` it writes
+the prompt to `reports/agent_requests/<ip>.<stage>.prompt.md` and reports
+that, the same as the full pipeline's own default.
+
 ## Continuous Integration (local)
 
 CI here is **deliberately local**: the gates run on this machine, before a push,
@@ -299,9 +322,10 @@ python tools/run_ci.py --fail-fast
 It takes about a minute. The repo-wide stages are **read from
 `harness/ip_generation_loop.yaml`** (`scope: repo`) rather than listed again, so
 adding a gate to the pipeline adds it to CI automatically — a test asserts the
-two cannot drift apart. Three further guards protect artifacts rather than
-pipeline steps (model provenance, DLD normalization, overview sync) and are
-listed in `EXTRA_CHECKS` with the reason.
+two cannot drift apart. Six further guards protect artifacts rather than
+pipeline steps (model provenance, DLD normalization, overview sync, review
+findings, review-status sync, and the opt-in SystemC backend's own tests) and
+are listed in `EXTRA_CHECKS` with the reason.
 
 To run it automatically before every push, enable the tracked hook — once per
 clone:
@@ -352,7 +376,7 @@ python tools/report_model_coverage.py
 
 Check coding style — ruff lint + format over `src/`, `tools/`, and `tests/`
 (rules in `ruff.toml`, conventions documented in
-`skills/ip-model-generation/references/coding_style.md`; the automated
+`skills/simpy-model-generation/references/coding_style.md`; the automated
 pipeline runs this as a hard repo-wide gate):
 
 ```shell
@@ -560,6 +584,23 @@ it as reference material, not as something a target repo is expected to use.
    python tools/validate_ip_flow.py
    ```
 
+## SystemC Backend
+
+A second modeling backend, opt-in per IP alongside SimPy — see
+[systemc/README.md](systemc/README.md) for the full guide. Requires the
+SystemC development library (`apt-get install libsystemc-dev`; not a Python
+dependency, so it is not in `requirements.txt`). Short version:
+
+```shell
+# opt an IP in: add `modeling_backends: [simpy, systemc]` to its template's ip: block
+python tools/generate_systemc_scaffold.py templates/<ip_name>.template.yaml
+# implement the model, then:
+python tools/run_systemc_tests.py <ip_name>
+```
+
+`tools/run_ci.py`'s `systemc_tests` gate runs this for every opted-in IP and
+is a no-op otherwise.
+
 ## Key Files
 
 - `dlds/*_dld.md`: human-readable IP design documents (template authoring source).
@@ -572,6 +613,7 @@ it as reference material, not as something a target repo is expected to use.
 - `schemas/ip_model_template.schema.json`: JSON Schema for template *structure* — the enforced source of truth for the shape (validated by `template_lint.py` via `jsonschema`).
 - `target_profile.yaml` / `tools/target_profile.py`: the target profile — where models/tests/templates/DLDs live and how a model file and class are named. Defaults match this repo; edit or copy it to point the tooling at another SimPy codebase.
 - `tools/auto_ip_pipeline.py`: change-driven DLD -> template -> model -> tests runner.
+- `tools/run_agent.py`: dispatches exactly one named agent stage for one IP on demand (`--list` for the catalog), reusing `auto_ip_pipeline.py`'s own dispatch functions.
 - `tools/dld_to_template.py`: DLD -> draft template + gaps report extractor.
 - `tools/check_template_coverage.py`: DLD-coverage gate (template captures DLD FSMs); with `--strict` it is the promotion gate, so it also rejects TODO_REVIEW markers, assumed-default wait models, and an unstamped normalization.
 - `tools/validate_dld_flow.py`: end-to-end DLD -> template -> model -> test gate.
@@ -586,7 +628,7 @@ it as reference material, not as something a target repo is expected to use.
 - `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).
 - `tools/check_model_provenance.py`: records/checks which template revision each model was last built against (`templates/model_baselines.json`).
 - `tools/check_dld_normalization.py`: fidelity gate for the normalization stage — conservation of measurements and identifiers in both directions, FSM/state parity, wait-model provenance, unplaced accounting, plus the human review stamp (`dlds/normalization_baselines.json`).
-- `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
+- `ruff.toml`: lint/format rules; the prose conventions live in `skills/simpy-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.
@@ -595,7 +637,9 @@ it as reference material, not as something a target repo is expected to use.
 - `tools/run_loop_validation.py`: deterministic harness/agent loop validator.
 - `tools/validate_ip_flow.py`: unified validation command.
 - `examples/model_generation_skill.md`: LLM generation instructions.
-- `skills/ip-model-generation`: reusable, agent-portable skill (SKILL.md format) for template-driven IP model generation.
+- `skills/dld-to-template`: reusable, agent-portable skill (SKILL.md format) for the DLD -> reviewed template.yaml workflow alone, independent of what generates a model from it.
+- `skills/simpy-model-generation`: reusable, agent-portable skill for the template -> SimPy model + tests workflow, amending, and prompt packs.
+- `skills/systemc-model-generation`: reusable, agent-portable skill for the opt-in SystemC backend (see `systemc/README.md` for the directory layout it targets).
 - `harness/ip_generation_loop.yaml`: generation-loop stages and pass criteria.
 - `agents/ip_model_generation_agent.md`, `agents/dld_normalization_agent.md`: the two agent contracts — implementing a model from a template, and reshaping an off-shape DLD without changing what it claims.
 - `docs/proposals/normalize_dld_stage.md`: the normalization stage's design, its build order, and what it costs.
@@ -603,4 +647,8 @@ it as reference material, not as something a target repo is expected to use.
 - `src/ip_model_automation/*.py`: flat SimPy model implementations.
 - `tests/test_workflow.py`: registry, scaffold, and validation helper checks.
 - `tests/test_<ip_name>.py`: per-IP SimPy model tests.
+- `tools/generate_systemc_scaffold.py`: SystemC scaffold generator (opt-in per IP; see `systemc/README.md`).
+- `tools/run_systemc_tests.py`: compiles and runs each opted-in IP's SystemC testbench for real.
+- `systemc/README.md`: the SystemC backend guide — opting an IP in, layout, source-of-truth conventions, running the tests.
+- `systemc/models/<ip>.{h,cpp}`, `systemc/tests/test_<ip>.cpp`: SystemC model + testbench, one flat pair per opted-in IP.
 

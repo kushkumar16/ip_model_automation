@@ -266,7 +266,7 @@ stages:
     command: python tools/check_code_style.py
     required: true
     scope: repo
-    notes: Hard gate — ruff lint + format check (rules in ruff.toml, guide in skills/ip-model-generation/references/coding_style.md); run with --fix to auto-repair.
+    notes: Hard gate — ruff lint + format check (rules in ruff.toml, guide in skills/simpy-model-generation/references/coding_style.md); run with --fix to auto-repair.
   - name: code_coverage
     command: python tools/run_code_coverage.py --fail-under 95 --fail-under-file 95
     required: true

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,123 @@ class TestIpRegistryAndLayout(unittest.TestCase):
             self.assertIn("def accept_process", text)
             self.assertIn("def completion_scheduler_process", text)
             self.assertIn("def refill_process", text)
+
+    def _load_systemc_scaffold_generator(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "generate_systemc_scaffold", repo_root / "tools" / "generate_systemc_scaffold.py"
+        )
+        generator = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(generator)
+        return generator
+
+    def test_systemc_scaffold_generator_refuses_an_ip_not_opted_in(self):
+        """ip.modeling_backends is the switch: an IP that omits it, or names
+        only simpy, must not get a SystemC scaffold -- the default stays
+        exactly what it was before this generator existed."""
+        generator = self._load_systemc_scaffold_generator()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        with self.assertRaises(SystemExit):
+            generator.write_scaffold(repo_root / "templates" / "completion_ip.template.yaml", None, stdout=True)
+
+    def test_systemc_scaffold_generator_emits_compilable_header_and_source(self):
+        """End to end: scaffold a fresh IP's SystemC files from its template
+        and prove they actually compile against the real SystemC library --
+        not just that the generator produced *some* text."""
+        generator = self._load_systemc_scaffold_generator()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        if shutil.which("g++") is None or shutil.which("pkg-config") is None:
+            self.skipTest("g++/pkg-config not available in this environment")
+        pkg_config = subprocess.run(["pkg-config", "--exists", "systemc"], capture_output=True, text=True, timeout=10)
+        if pkg_config.returncode != 0:
+            self.skipTest("SystemC development library not installed")
+
+        template_path = repo_root / "templates" / "watchdog_ip.template.yaml"
+        template = generator._simpy_scaffold_module().load_template(template_path)
+        template = dict(template)
+        template["ip"] = dict(template["ip"])
+        template["ip"]["name"] = "scaffold_probe_ip"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_template = Path(tmpdir) / "scaffold_probe_ip.template.yaml"
+            require_yaml = generator._simpy_scaffold_module().require_yaml
+            with tmp_template.open("w", encoding="utf-8") as handle:
+                require_yaml().safe_dump(template, handle)
+
+            output_dir = Path(tmpdir) / "models"
+            header_path, source_path = generator.write_scaffold(tmp_template, output_dir, stdout=False)
+            self.assertTrue(header_path.is_file())
+            self.assertTrue(source_path.is_file())
+            self.assertIn("class ScaffoldProbeIpModel", header_path.read_text(encoding="utf-8"))
+
+            probe_main = Path(tmpdir) / "probe_main.cpp"
+            probe_main.write_text(
+                '#include "scaffold_probe_ip.h"\n'
+                "int sc_main(int argc, char* argv[]) {\n"
+                '    ScaffoldProbeIpModel m("m");\n'
+                "    sc_start(1, SC_NS);\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            binary = Path(tmpdir) / "probe_main"
+            pkg_config_flags = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", "systemc"], capture_output=True, text=True, timeout=10
+            ).stdout.split()
+            compiled = subprocess.run(
+                [
+                    "g++",
+                    "-std=c++17",
+                    "-I",
+                    str(output_dir),
+                    str(probe_main),
+                    str(source_path),
+                    "-o",
+                    str(binary),
+                    *pkg_config_flags,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, f"scaffold did not compile:\n{compiled.stdout}{compiled.stderr}")
+
+    def _load_run_systemc_tests(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_systemc_tests", repo_root / "tools" / "run_systemc_tests.py")
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_systemc_ips_discovers_only_opted_in_templates(self):
+        module = self._load_run_systemc_tests()
+        self.assertEqual(module.systemc_ips(), ["watchdog_ip"])
+
+    def test_watchdog_ip_systemc_testbench_compiles_and_passes_for_real(self):
+        """The real, permanent regression check: watchdog_ip's SystemC model
+        and testbench actually compile against the system SystemC library and
+        the resulting binary's own 6 scenario assertions all pass -- the
+        SystemC counterpart to `python -m unittest tests.test_watchdog_ip`."""
+        module = self._load_run_systemc_tests()
+        if shutil.which("g++") is None or shutil.which("pkg-config") is None:
+            self.skipTest("g++/pkg-config not available in this environment")
+        pkg_config = subprocess.run(["pkg-config", "--exists", "systemc"], capture_output=True, text=True, timeout=10)
+        if pkg_config.returncode != 0:
+            self.skipTest("SystemC development library not installed")
+
+        pkg_config_flags = module.require_pkg_config_systemc()
+        passed, output = module.compile_and_run("watchdog_ip", pkg_config_flags)
+        self.assertTrue(passed, f"watchdog_ip SystemC testbench failed:\n{output}")
+        self.assertIn("6/6 passed", output)
+
+    def test_compile_and_run_reports_missing_sources_clearly(self):
+        module = self._load_run_systemc_tests()
+        passed, output = module.compile_and_run("arbitration_ip", ["-lsystemc"])
+        self.assertFalse(passed)
+        self.assertIn("missing SystemC source file(s)", output)
 
     def test_generator_scaffold_does_not_ack_the_peer_at_submission(self):
         """The scaffold must not hand back the `input_q.put` event.
@@ -476,8 +594,8 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # follow -- was still pointing at the regenerated report.
         carriers = {
             "agents/ip_model_generation_agent.md": "decisions/<ip_name>.md",
-            "skills/ip-model-generation/SKILL.md": "decisions",
-            "skills/ip-model-generation/references/dld_extraction_rules.md": "decisions/<ip>.md",
+            "skills/dld-to-template/SKILL.md": "decisions",
+            "skills/dld-to-template/references/dld_extraction_rules.md": "decisions/<ip>.md",
         }
         # The wrong destination was written across a line break in one of them, so
         # the text is compared with its whitespace flattened.
@@ -700,6 +818,113 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # The asymmetry is the whole safety argument; it must be stated where
         # someone writing a findings file will read it.
         self.assertIn("may never pass one", readme)
+
+    def test_every_skill_has_valid_frontmatter_matching_its_directory(self):
+        """Each skills/<name>/SKILL.md must declare `name: <name>` matching
+        its own directory and a non-trivial `description`. The whole point
+        of splitting the former monolithic ip-model-generation skill into
+        dld-to-template, simpy-model-generation, and systemc-model-generation
+        was so each could be discovered and invoked independently -- a
+        missing or mismatched name would silently defeat that."""
+        repo_root = Path(__file__).resolve().parents[1]
+        skills_dir = repo_root / "skills"
+        skill_dirs = sorted(p for p in skills_dir.iterdir() if p.is_dir())
+        self.assertGreaterEqual(len(skill_dirs), 3, "expected at least the three split-out skills")
+
+        for skill_dir in skill_dirs:
+            skill_md = skill_dir / "SKILL.md"
+            with self.subTest(skill=skill_dir.name):
+                self.assertTrue(skill_md.is_file(), f"{skill_dir.name} has no SKILL.md")
+                text = skill_md.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("---\n"), "SKILL.md must open with YAML frontmatter")
+                frontmatter_end = text.index("\n---", 4)
+                frontmatter = yaml.safe_load(text[4:frontmatter_end])
+                self.assertEqual(
+                    frontmatter.get("name"), skill_dir.name, "frontmatter name must match its own directory"
+                )
+                description = frontmatter.get("description", "")
+                self.assertGreater(len(description), 40, "description must be substantive enough to trigger on")
+
+    def test_no_orphaned_skill_reference_files(self):
+        """Every file under a skill's references/ must actually be pointed
+        at from that skill's own SKILL.md -- an orphaned reference file is
+        either dead weight or, worse, content someone reading only SKILL.md
+        will never know exists."""
+        repo_root = Path(__file__).resolve().parents[1]
+        skills_dir = repo_root / "skills"
+        for skill_dir in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            references_dir = skill_dir / "references"
+            if not references_dir.is_dir():
+                continue
+            skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            for reference_file in sorted(references_dir.glob("*.md")):
+                with self.subTest(skill=skill_dir.name, reference=reference_file.name):
+                    self.assertIn(
+                        reference_file.name,
+                        skill_text,
+                        f"{reference_file.name} is never mentioned in its own SKILL.md",
+                    )
+
+    def _load_run_agent(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("run_agent", repo_root / "tools" / "run_agent.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_agent_catalog_matches_every_kind_agent_harness_stage(self):
+        """tools/run_agent.py's on-demand dispatch catalog cannot silently
+        drift from the harness: a new `kind: agent` stage with no catalog
+        entry would be invisible to `--list`, and a stale catalog entry for
+        a removed stage would offer a dispatch that no longer exists."""
+        run_agent = self._load_run_agent()
+        repo_root = Path(__file__).resolve().parents[1]
+
+        import yaml  # noqa: PLC0415 -- the harness is the fixture here
+
+        harness = yaml.safe_load((repo_root / "harness" / "ip_generation_loop.yaml").read_text(encoding="utf-8"))
+        declared_agent_stages = {s["name"] for s in harness["stages"] if s.get("kind") == "agent"}
+
+        self.assertEqual(set(run_agent.AGENT_CATALOG), declared_agent_stages)
+        for name, info in run_agent.AGENT_CATALOG.items():
+            self.assertTrue((repo_root / info["contract"]).is_file(), f"{name}: missing contract {info['contract']}")
+            self.assertTrue(info["does"].strip(), f"{name}: catalog entry has no description")
+
+    def test_run_agent_list_prints_every_catalog_entry(self):
+        run_agent = self._load_run_agent()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = run_agent.main(["--list"])
+        self.assertEqual(exit_code, 0)
+        output = buf.getvalue()
+        for name in run_agent.AGENT_CATALOG:
+            self.assertIn(name, output)
+
+    def test_run_agent_requires_an_ip_unless_listing(self):
+        run_agent = self._load_run_agent()
+        with self.assertRaises(SystemExit):
+            run_agent.main(["review_model"])  # no ip
+
+    def test_run_agent_dispatches_one_stage_without_the_full_pipeline_sequence(self):
+        """The whole point of this tool: dispatch exactly one named agent
+        stage for one IP directly, not as part of auto_ip_pipeline.py's full
+        per-IP walk through every harness stage in order. Proven against a
+        real stage/IP already in this repo (watchdog_ip's review_model,
+        whose gate currently passes) -- run_agent.py must still dispatch
+        when asked, unlike the automatic pipeline which would skip it."""
+        run_agent = self._load_run_agent()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = run_agent.main(["review_model", "watchdog_ip"])  # no --agent: writes a prompt, does not run
+        self.assertEqual(exit_code, 0)
+        output = buf.getvalue()
+        self.assertIn("gates currently pass", output)
+        self.assertIn("prompt request written", output)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        prompt_path = repo_root / "reports" / "agent_requests" / "watchdog_ip.review_model.prompt.md"
+        self.assertTrue(prompt_path.is_file())
+        self.assertIn("watchdog_ip", prompt_path.read_text(encoding="utf-8"))
 
     def test_ci_runs_every_repo_wide_gate_the_harness_declares(self):
         """CI reads the harness, so a new repo-wide gate cannot escape it.
@@ -1138,6 +1363,63 @@ class TestIpRegistryAndLayout(unittest.TestCase):
 
             self.assertFalse(dispatched, "a review with missing subject files must not count as dispatched")
             self.assertFalse(marker.exists(), "the agent command ran despite missing subject files")
+            self.assertEqual(options.dispatch_count, 0, "an aborted-before-dispatch review must not count as one")
+            listing = subprocess.run(
+                ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True
+            ).stdout
+            self.assertEqual(listing.count("\n"), 1, f"a review worktree was left behind:\n{listing}")
+
+    def test_isolated_review_dispatch_aborts_on_an_existing_files_uncommitted_edit(self):
+        """A second, related way for a dispatch to see stale content: the
+        subject file is already committed, but was edited again after that --
+        the working tree has newer content than HEAD. This is the failure
+        this dogfooding round actually hit for real, a step past the
+        never-committed-at-all case above: a template got a field added, the
+        pipeline was invoked before that edit was committed, the reviewer
+        computed hashes against the *old* HEAD revision, and the gate read
+        the resulting review as stale the instant it was copied back --
+        wasting a real, paid ~$0.71 dispatch. dispatch_isolated_review must
+        catch this the same way: check first, never invoke the agent.
+        """
+        pipeline = self._load_pipeline()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "decisions").mkdir()
+            (root / "reviews").mkdir()
+            (root / "templates").mkdir()
+            (root / "src" / "ip_model_automation").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "templates" / "probe_ip.template.yaml").write_text("ip: {}\n", encoding="utf-8")
+            (root / "src" / "ip_model_automation" / "probe_ip.py").write_text("", encoding="utf-8")
+            (root / "tests" / "test_probe_ip.py").write_text("", encoding="utf-8")
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            (root / "reviews" / ".gitkeep").write_text("", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+
+            # The edit that matters: committed subject file, then changed
+            # again without a follow-up commit.
+            (root / "templates" / "probe_ip.template.yaml").write_text("ip: {name: probe_ip}\n", encoding="utf-8")
+
+            pipeline.REPO_ROOT = root
+            pipeline.AGENT_REQUEST_DIR = root / "reports" / "agent_requests"
+            marker = root / "agent_ran.marker"
+            fake_agent = f"touch {marker}"
+            options = pipeline.RunOptions()
+
+            dispatched = pipeline.dispatch_isolated_review(
+                fake_agent, "probe_ip", "review_model", "model", "prompt", options
+            )
+
+            self.assertFalse(dispatched, "a review with a stale committed subject file must not count as dispatched")
+            self.assertFalse(marker.exists(), "the agent command ran despite the file's uncommitted edit")
             self.assertEqual(options.dispatch_count, 0, "an aborted-before-dispatch review must not count as one")
             listing = subprocess.run(
                 ["git", "worktree", "list"], cwd=root, capture_output=True, text=True, check=True

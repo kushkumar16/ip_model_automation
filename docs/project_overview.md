@@ -462,7 +462,7 @@ python -m unittest discover -s tests
 
 All Python code in `src/`, `tools/`, and `tests/` follows one written style
 guide:
-[skills/ip-model-generation/references/coding_style.md](../skills/ip-model-generation/references/coding_style.md).
+[skills/simpy-model-generation/references/coding_style.md](../skills/simpy-model-generation/references/coding_style.md).
 It has two halves:
 
 **Machine-enforced rules** — configured in `ruff.toml` at the repo root and
@@ -506,7 +506,7 @@ python tools/check_code_style.py --fix    # apply auto-fixes and reformat
 New models inherit the style at generation time: every prompt pack carries a
 "Coding Style" section pointing the implementing agent (human or LLM) at the
 guide, and the generation rules in
-`skills/ip-model-generation/references/model_generation_rules.md` include the
+`skills/simpy-model-generation/references/model_generation_rules.md` include the
 style check in their validation commands.
 
 ## The gates: what "validated" actually means
@@ -843,7 +843,8 @@ flowchart TB
         T11["check_dld_normalization.py"]
     end
     subgraph guidance["Guidance for humans/LLMs"]
-        SK["skills/ip-model-generation/"]
+        SK1["skills/dld-to-template/"]
+        SK2["skills/simpy-model-generation/"]
         HR["harness/ip_generation_loop.yaml"]
         AG["agents/ip_model_generation_agent.md"]
         AGN["agents/dld_normalization_agent.md"]
@@ -862,7 +863,8 @@ flowchart TB
     T5 --> MOD
     TPL --> MOD --> TST
     T8 --> T7
-    SK -.guides.-> T1
+    SK1 -.guides.-> T1
+    SK2 -.guides.-> MOD
     HR -.orchestrates.-> tools
     AG -.contract.-> MOD
     AGN -.contract.-> DLDS

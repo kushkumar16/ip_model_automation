@@ -376,7 +376,7 @@ python tools/report_model_coverage.py
 
 Check coding style — ruff lint + format over `src/`, `tools/`, and `tests/`
 (rules in `ruff.toml`, conventions documented in
-`skills/ip-model-generation/references/coding_style.md`; the automated
+`skills/simpy-model-generation/references/coding_style.md`; the automated
 pipeline runs this as a hard repo-wide gate):
 
 ```shell
@@ -628,7 +628,7 @@ is a no-op otherwise.
 - `tools/diff_template.py`: structured, blast-radius-tagged diff between two template revisions (`--amend-prompt` emits an agent amend instruction).
 - `tools/check_model_provenance.py`: records/checks which template revision each model was last built against (`templates/model_baselines.json`).
 - `tools/check_dld_normalization.py`: fidelity gate for the normalization stage — conservation of measurements and identifiers in both directions, FSM/state parity, wait-model provenance, unplaced accounting, plus the human review stamp (`dlds/normalization_baselines.json`).
-- `ruff.toml`: lint/format rules; the prose conventions live in `skills/ip-model-generation/references/coding_style.md`.
+- `ruff.toml`: lint/format rules; the prose conventions live in `skills/simpy-model-generation/references/coding_style.md`.
 - `tools/render_template_doc.py`: template -> human-readable Markdown/HTML renderer.
 - `docs/project_overview.md`: the single project document (intention, stage-by-stage flow diagrams, conventions, current status).
 - `tools/generate_model_scaffold.py`: SimPy scaffold generator.
@@ -637,7 +637,9 @@ is a no-op otherwise.
 - `tools/run_loop_validation.py`: deterministic harness/agent loop validator.
 - `tools/validate_ip_flow.py`: unified validation command.
 - `examples/model_generation_skill.md`: LLM generation instructions.
-- `skills/ip-model-generation`: reusable, agent-portable skill (SKILL.md format) for template-driven IP model generation.
+- `skills/dld-to-template`: reusable, agent-portable skill (SKILL.md format) for the DLD -> reviewed template.yaml workflow alone, independent of what generates a model from it.
+- `skills/simpy-model-generation`: reusable, agent-portable skill for the template -> SimPy model + tests workflow, amending, and prompt packs.
+- `skills/systemc-model-generation`: reusable, agent-portable skill for the opt-in SystemC backend (see `systemc/README.md` for the directory layout it targets).
 - `harness/ip_generation_loop.yaml`: generation-loop stages and pass criteria.
 - `agents/ip_model_generation_agent.md`, `agents/dld_normalization_agent.md`: the two agent contracts — implementing a model from a template, and reshaping an off-shape DLD without changing what it claims.
 - `docs/proposals/normalize_dld_stage.md`: the normalization stage's design, its build order, and what it costs.

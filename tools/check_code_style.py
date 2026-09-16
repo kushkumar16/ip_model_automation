@@ -2,7 +2,7 @@
 """Coding-style gate: ruff lint + format check over src/, tools/, and tests/.
 
 The rules live in ruff.toml (the machine-readable half of the coding style
-guide at skills/ip-model-generation/references/coding_style.md). Run with
+guide at skills/simpy-model-generation/references/coding_style.md). Run with
 --fix to apply auto-fixes and reformat instead of just checking.
 """
 

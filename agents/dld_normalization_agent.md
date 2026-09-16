@@ -7,7 +7,7 @@ all.** Like every other stage, it is agent-agnostic: the gate judges the output,
 not the author.
 
 Read this alongside
-[dld_extraction_rules.md](../skills/ip-model-generation/references/dld_extraction_rules.md),
+[dld_extraction_rules.md](../skills/dld-to-template/references/dld_extraction_rules.md),
 which defines the target shape, and
 [normalize_dld_stage.md](../docs/proposals/normalize_dld_stage.md), which explains
 why the stage is upstream of every other gate and replaces none of them.
@@ -27,7 +27,7 @@ your exit code; while it fails you are re-invoked with the failure log, up to
   conversion output, regenerated from the Word document, so an edit there is
   overwritten as well as out of contract.
 - Target: `dlds/<ip_name>_dld.md` — the file you write.
-- Target shape: `skills/ip-model-generation/references/dld_extraction_rules.md`.
+- Target shape: `skills/dld-to-template/references/dld_extraction_rules.md`.
 
 ## Responsibilities
 

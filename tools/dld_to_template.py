@@ -16,7 +16,7 @@ Rather than invent that behavior, the extractor:
 
 A human or LLM then completes the draft (replacing every ``TODO_REVIEW``), lints
 it, checks DLD coverage, and promotes it to the golden
-``templates/<ip>.template.yaml``. See ``skills/ip-model-generation``.
+``templates/<ip>.template.yaml``. See ``skills/dld-to-template``.
 """
 
 from __future__ import annotations

@@ -75,7 +75,7 @@ def render_prompt_pack(template: dict[str, Any], template_path: Path) -> str:
         "",
         "## Coding Style",
         "",
-        "- Follow `skills/ip-model-generation/references/coding_style.md` (ruff-enforced, config in `ruff.toml`):",
+        "- Follow `skills/simpy-model-generation/references/coding_style.md` (ruff-enforced, config in `ruff.toml`):",
         "  120-column formatting, double quotes, sorted imports (stdlib / third-party / first-party).",
         f"- Model class `{class_name}` with one `<fsm>_process` method per template FSM;",
         "  constructor takes `<operation>_latency` parameters and ends with `log_level`/`log_file`.",

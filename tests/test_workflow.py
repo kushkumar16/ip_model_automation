@@ -594,8 +594,8 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # follow -- was still pointing at the regenerated report.
         carriers = {
             "agents/ip_model_generation_agent.md": "decisions/<ip_name>.md",
-            "skills/ip-model-generation/SKILL.md": "decisions",
-            "skills/ip-model-generation/references/dld_extraction_rules.md": "decisions/<ip>.md",
+            "skills/dld-to-template/SKILL.md": "decisions",
+            "skills/dld-to-template/references/dld_extraction_rules.md": "decisions/<ip>.md",
         }
         # The wrong destination was written across a line break in one of them, so
         # the text is compared with its whitespace flattened.
@@ -818,6 +818,52 @@ class TestIpRegistryAndLayout(unittest.TestCase):
         # The asymmetry is the whole safety argument; it must be stated where
         # someone writing a findings file will read it.
         self.assertIn("may never pass one", readme)
+
+    def test_every_skill_has_valid_frontmatter_matching_its_directory(self):
+        """Each skills/<name>/SKILL.md must declare `name: <name>` matching
+        its own directory and a non-trivial `description`. The whole point
+        of splitting the former monolithic ip-model-generation skill into
+        dld-to-template, simpy-model-generation, and systemc-model-generation
+        was so each could be discovered and invoked independently -- a
+        missing or mismatched name would silently defeat that."""
+        repo_root = Path(__file__).resolve().parents[1]
+        skills_dir = repo_root / "skills"
+        skill_dirs = sorted(p for p in skills_dir.iterdir() if p.is_dir())
+        self.assertGreaterEqual(len(skill_dirs), 3, "expected at least the three split-out skills")
+
+        for skill_dir in skill_dirs:
+            skill_md = skill_dir / "SKILL.md"
+            with self.subTest(skill=skill_dir.name):
+                self.assertTrue(skill_md.is_file(), f"{skill_dir.name} has no SKILL.md")
+                text = skill_md.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("---\n"), "SKILL.md must open with YAML frontmatter")
+                frontmatter_end = text.index("\n---", 4)
+                frontmatter = yaml.safe_load(text[4:frontmatter_end])
+                self.assertEqual(
+                    frontmatter.get("name"), skill_dir.name, "frontmatter name must match its own directory"
+                )
+                description = frontmatter.get("description", "")
+                self.assertGreater(len(description), 40, "description must be substantive enough to trigger on")
+
+    def test_no_orphaned_skill_reference_files(self):
+        """Every file under a skill's references/ must actually be pointed
+        at from that skill's own SKILL.md -- an orphaned reference file is
+        either dead weight or, worse, content someone reading only SKILL.md
+        will never know exists."""
+        repo_root = Path(__file__).resolve().parents[1]
+        skills_dir = repo_root / "skills"
+        for skill_dir in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            references_dir = skill_dir / "references"
+            if not references_dir.is_dir():
+                continue
+            skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            for reference_file in sorted(references_dir.glob("*.md")):
+                with self.subTest(skill=skill_dir.name, reference=reference_file.name):
+                    self.assertIn(
+                        reference_file.name,
+                        skill_text,
+                        f"{reference_file.name} is never mentioned in its own SKILL.md",
+                    )
 
     def _load_run_agent(self):
         repo_root = Path(__file__).resolve().parents[1]

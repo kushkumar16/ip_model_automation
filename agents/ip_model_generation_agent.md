@@ -41,8 +41,9 @@ output to the same conventions.
 - Reviewed template: `templates/<ip_name>.template.yaml`
 - Prompt pack: `prompt_packs/<ip_name>.prompt.md`
 - Optional scaffold: `src/ip_model_automation/<ip_name>.py`
-- Skill rules: `skills/ip-model-generation/SKILL.md` and
-  `skills/ip-model-generation/references/dld_extraction_rules.md`
+- Skill rules for Stage 0 (DLD -> template): `skills/dld-to-template/SKILL.md`
+  and `skills/dld-to-template/references/dld_extraction_rules.md`
+- Skill rules for Stage 1/2 (template -> model): `skills/simpy-model-generation/SKILL.md`
 
 ## Responsibilities
 
@@ -124,9 +125,9 @@ stage is skipped entirely — you will not be invoked.
   `ip.modeling_backends` explicitly names `systemc`** — an IP that omits the
   field, or names only `simpy`, must get exactly what this contract has always
   produced. An opted-in IP additionally gets `systemc/models/<ip>.h`/`.cpp`
-  and `systemc/tests/test_<ip>.cpp`; see `systemc/README.md` for that flow —
-  it is a separate generation path (`tools/generate_systemc_scaffold.py`,
-  `tools/run_systemc_tests.py`), not something to hand-derive here.
+  and `systemc/tests/test_<ip>.cpp`; see the `systemc-model-generation` skill
+  (`skills/systemc-model-generation/SKILL.md`) for that flow — it is a
+  separate generation path, not something to hand-derive here.
 - Do not create per-IP model folders.
 - Do not add `perf_model.py`, `functional_model.py`, or `soc_models.py`.
 - Do not remove existing IPs from registry or validation.

@@ -164,12 +164,22 @@ class StoragePipelineSubsystemModel:
                 )
                 self.metrics["qos_configs_applied"] += 1
                 self.transition_counts["ACCEPT_QOS_CONFIG->APPLY_QOS_CONFIG"] += 1
-                # APPLY_QOS_CONFIG -> IDLE (action: acknowledge_host) is its
-                # own declared 1-cycle transition (round thirteen's M2).
-                yield self.env.timeout(1)
-                self.transition_counts["APPLY_QOS_CONFIG->IDLE"] += 1
+                # qos_configuration_if's wait point is APPLY_QOS_CONFIG,
+                # resuming on qos_config_applied; its timing_notes bound the
+                # ack "no further than the Completion IP's own
+                # configure_tenant already defers it" -- i.e. right here,
+                # not after one more transition. The ack used to wait for
+                # APPLY_QOS_CONFIG -> IDLE too, the same extra-cycle-late
+                # shape M2 fixed on the command path but never carried over
+                # here (round fourteen's M3).
                 accepted.succeed()
                 self.logger.debug("qos config applied tenant=%s budget=%s", tenant_id, token_budget)
+                # APPLY_QOS_CONFIG -> IDLE (action: acknowledge_host) is
+                # still its own declared 1-cycle transition, paid here,
+                # after the host's own ack -- the bridge's own return to
+                # IDLE is not on the host's critical path.
+                yield self.env.timeout(1)
+                self.transition_counts["APPLY_QOS_CONFIG->IDLE"] += 1
 
     def dispatch_bridge(self):
         # One issued-but-unforwarded command per pass, not a batch drain: the

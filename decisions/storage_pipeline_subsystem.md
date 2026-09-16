@@ -50,5 +50,32 @@ one-cycle-late charge.
 
 The review judged `qos_configuration_if`'s analogous path (`APPLY_QOS_CONFIG`'s
 own `acknowledge_host` transition) correct as written, using it as the
-control that makes the command path's deferral stand out; that read is not
-re-litigated here, and the QoS path is unchanged.
+control that makes the command path's deferral stand out. That read did not
+survive a second look: see M3 below.
+
+## qos_configuration_if's ack had the identical bug M2 fixed on the sibling path
+
+**M3 fixed:** the very next review round, dispatched after the M2 fix, found
+that `qos_configuration_if`'s ack has the identical extra-cycle-late shape
+M2 fixed on `command_intake_if` -- `configure_tenant(...)` is called on
+entering `APPLY_QOS_CONFIG` (the `qos_config_applied` event the interface
+names, and the point its timing_notes bound the ack against: "no further
+than the Completion IP's own `configure_tenant` already defers it"), but
+`accepted.succeed()` waited for one more full transition,
+`APPLY_QOS_CONFIG -> IDLE`. The earlier review's judgment that this path was
+"correct as written" was wrong; M2's own fix should have been carried over
+here at the time and was not.
+
+Fixed the same way as M2: `accepted.succeed()` moved to immediately after
+`configure_tenant(...)`, with `APPLY_QOS_CONFIG -> IDLE` keeping its own
+declared cost and transition count.
+
+**M4 fixed:** the same round noted `test_scenarios[1]`
+(`qos_config_flows_to_completion_ip`) declares
+`expected_performance_properties: [qos_config_applied_promptly]` but no
+test ever asserted anything about when the ack fires -- unlike the command
+path's own dedicated ack-timing test, this scenario's test would have
+stayed green through the entire M3 bug. Added
+`test_qos_config_ack_completes_at_apply_not_after_the_return_transition`,
+mutation-verified against the original one-cycle-late charge, closing both
+M3 and M4 in the same fix.

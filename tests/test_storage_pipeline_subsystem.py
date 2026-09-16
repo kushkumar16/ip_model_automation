@@ -124,6 +124,34 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
         completed_ids = {cmd.cmd_id for _time, cmd in model.completion.completed}
         self.assertEqual(completed_ids, {"c0", "c1", "c2", "c3"})
 
+    def test_qos_config_ack_completes_at_apply_not_after_the_return_transition(self):
+        """qos_configuration_if's ack ties to qos_config_applied -- bound "no
+        further than the Completion IP's own configure_tenant already defers
+        it" -- not to the bridge's own separate APPLY_QOS_CONFIG -> IDLE
+        return. The ack used to wait for that return transition too, the
+        same extra-cycle-late shape M2 fixed on the command path but never
+        carried over here (round fourteen's M3); this scenario declared
+        expected_performance_properties: [qos_config_applied_promptly] but
+        nothing here checked it before (round fourteen's M4).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env)
+        accepted = model.configure_qos("T0", 250.0)
+
+        acked_at = None
+        while env.peek() < 10:
+            env.step()
+            if accepted.processed and acked_at is None:
+                acked_at = env.now
+
+        self.assertIsNotNone(acked_at, "the ack never fired")
+        self.assertEqual(
+            acked_at,
+            2,
+            "must be acked at ACCEPT_QOS_CONFIG(1) + APPLY_QOS_CONFIG's own configure_tenant(1) = 2, "
+            "not one glue cycle later after the bridge's own return to IDLE",
+        )
+
     def test_qos_config_flows_to_completion_ip(self):
         """template test_scenarios[1]: qos_config_flows_to_completion_ip.
 

@@ -97,6 +97,13 @@ class TestCompletionIpModel(unittest.TestCase):
         BACKPRESSURE into ENQUEUE, skipping the state that says "ready to
         accept" on exactly the pass where a producer is watching for it, and the
         test that claimed to check the resumption could not tell the two apart.
+
+        BACKPRESSURE -> READY is declared latency_cycles: 0 (round thirteen's
+        M38), so READY and ENQUEUE now land at the same simulated instant --
+        a periodic once-per-cycle watcher can step right over a
+        zero-duration state between two of its samples. env.step() records
+        every state assignment regardless of how long it holds, which a
+        fixed-interval poll cannot.
         """
         env = simpy.Environment()
         model = CompletionIpModel(env, pending_depth=1, log_level="CRITICAL")
@@ -106,22 +113,21 @@ class TestCompletionIpModel(unittest.TestCase):
 
         seen = []
         previous = None
-
-        def watcher():
-            nonlocal previous
-            while True:
-                state = model.fsm_state["accept"]
-                if state != previous:
-                    seen.append(state)
-                    previous = state
-                yield env.timeout(1)
-
-        env.process(watcher())
-        env.run(until=40)
+        while env.peek() < 40:
+            env.step()
+            state = model.fsm_state["accept"]
+            if state != previous:
+                seen.append(state)
+                previous = state
         self.assertEqual(model.fsm_state["accept"], "BACKPRESSURE", "the second command was not held")
 
         model.pending["T0"].clear()
-        env.run(until=80)
+        while env.peek() < 80:
+            env.step()
+            state = model.fsm_state["accept"]
+            if state != previous:
+                seen.append(state)
+                previous = state
 
         resumption = seen[seen.index("BACKPRESSURE") :]
         self.assertIn("READY", resumption, "BACKPRESSURE -> READY was never taken")
@@ -129,6 +135,43 @@ class TestCompletionIpModel(unittest.TestCase):
             resumption.index("READY"),
             resumption.index("ENQUEUE"),
             "the queue-full command went straight to ENQUEUE",
+        )
+
+    def test_completion_backpressure_to_ready_costs_no_declared_cycles(self):
+        """BACKPRESSURE -> READY is declared latency_cycles: 0 -- the only
+        transition in this FSM the template prices at zero. The model used to
+        charge a full retry_latency cycle for it anyway (round thirteen's
+        M38): a command recovering from backpressure sat in READY for
+        retry_latency cycles before ENQUEUE could even start, though the
+        template says this transition itself costs nothing. retry_latency is
+        set well away from 0 here so a leftover charge cannot hide.
+        """
+        env = simpy.Environment()
+        model = CompletionIpModel(env, pending_depth=1, retry_latency=5, log_level="CRITICAL")
+        model.configure_tenant("T0", read=0, write=0, read_bw=0, write_bw=0)
+        model.submit(Command("a", "READ", tenant_id="T0", size_kb=1))
+        model.submit(Command("b", "READ", tenant_id="T0", size_kb=1))
+        env.run(until=40)
+        self.assertEqual(model.fsm_state["accept"], "BACKPRESSURE", "the second command was not held")
+
+        model.pending["T0"].clear()
+        entered_ready = None
+        entered_enqueue = None
+        while env.peek() < 80:
+            env.step()
+            state = model.fsm_state["accept"]
+            if state == "READY" and entered_ready is None:
+                entered_ready = env.now
+            elif state == "ENQUEUE" and entered_ready is not None and entered_enqueue is None:
+                entered_enqueue = env.now
+                break
+
+        self.assertIsNotNone(entered_ready, "BACKPRESSURE -> READY was never taken")
+        self.assertIsNotNone(entered_enqueue, "READY -> ENQUEUE was never taken")
+        self.assertEqual(
+            entered_enqueue,
+            entered_ready,
+            "BACKPRESSURE -> READY must cost 0 declared cycles, not retry_latency",
         )
 
     def test_completion_idle_scheduler_waits_instead_of_selecting(self):

@@ -201,15 +201,20 @@ class CompletionIpModel:
                 yield self.env.timeout(self.retry_latency)
 
             if backpressured:
-                # BACKPRESSURE -> READY on queue_space_available, then
-                # READY -> ENQUEUE. The model used to fall straight from
-                # BACKPRESSURE into ENQUEUE, so the declared resumption was
-                # never taken and the state that says "ready to accept" was
-                # skipped on exactly the pass where a producer is watching for
-                # it. The test that claimed to check the resumption could not
-                # tell the two apart.
+                # BACKPRESSURE -> READY on queue_space_available, declared
+                # latency_cycles: 0 -- the only transition in this FSM the
+                # template charges nothing for. The model used to fall
+                # straight from BACKPRESSURE into ENQUEUE with no yield
+                # between them, so the state that says "ready to accept" was
+                # skipped on exactly the pass where a producer is watching
+                # for it; a bare env.timeout(0) is enough to make READY its
+                # own observable step without spending the cycle the
+                # template says this transition doesn't cost (round
+                # thirteen's M38 -- the retry_latency this used to charge
+                # here was the queue_full retry's own cost bleeding into a
+                # transition the template prices separately, at zero).
                 self.fsm_state["accept"] = "READY"
-                yield self.env.timeout(self.retry_latency)
+                yield self.env.timeout(0)
 
             # accepted_cmd_if is wait_for_ack_inline: the producer's accept
             # completes here, as the command lands in the pending queue. The

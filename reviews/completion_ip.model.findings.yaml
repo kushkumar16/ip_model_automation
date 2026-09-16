@@ -1,44 +1,75 @@
 ip: completion_ip
 kind: model
-template_sha256: 3be0d38a41015bb215b3c3fcca649174f1f1da3ee2b9640fd67c4c6b4f556ea2
+template_sha256: c67c14eb601c9701c3cb44672a204b58f3b9b6c7b3a58405130e56740f0f8928
 model_sha256: 90270c9554b9e90470eecccdf5e4f0e2e04bf31eebd7cf77528c4c601e75b9a1
 tests_sha256: 442eaf5d190bcf9371aed51c53762cffc6e26601ebb9679211dbf143d5f4d6bc
 findings:
-  - id: M37
-    class: wait_model_impl
+  - id: M38
+    class: timing_mismatch
     severity: high
     claim: >-
-      qos_config_if is declared wait_for_ack_inline with its wait point at
-      refill.REFILL_BASE and resumes_on config_applied -- i.e. a peer's
-      tenant_config transaction should be gated so it takes effect (and is
-      acked) when the refill FSM reaches REFILL_BASE -- but configure_tenant
-      applies the new token/liveness values synchronously at call time, with
-      no wait, no returned ack event, and no relation to the refill process's
-      state at all.
+      accept's BACKPRESSURE -> READY transition is declared latency_cycles: 0
+      but the model charges a full retry_latency cycle for it.
     template: >-
-      templates/completion_ip.template.yaml interfaces[1] (qos_config_if):
-      wait_model.mode=wait_for_ack_inline, wait_model.wait_points=[refill.REFILL_BASE],
-      wait_model.resumes_on=config_applied, wait_model.requester=peer.
+      templates/completion_ip.template.yaml fsm_processes[accept].transitions,
+      the BACKPRESSURE -> READY entry (condition queue_space_available,
+      actions: [], latency_cycles: 0) -- the only transition in this FSM
+      declared at 0 cycles, against 1 for every other accept transition.
     model: >-
-      src/ip_model_automation/completion_ip.py configure_tenant()
-      (lines 99-115) writes self.tokens/self.base_tokens/self.tenant_alive and
-      returns None immediately; refill_process() (lines 515-548) only ever
-      calls _restore_base_tokens() as the periodic top-up action on its own
-      ASSESS_USAGE -> REFILL_BASE transition and never reads or applies
-      anything a configure_tenant call is waiting on, because configure_tenant
-      does not wait on anything. Reproduced empirically: calling
-      configure_tenant("T0", read=5, ...) while env.run() has left the refill
-      process sitting in WAIT_WINDOW (nowhere near REFILL_BASE) updates
-      model.tokens["T0"]["read"] to 5.0 immediately, in the same call, with
-      model.fsm_state["refill"] still reading "WAIT_WINDOW".
+      src/ip_model_automation/completion_ip.py:203-212, inside
+      accept_process(): once the pending-queue-full while loop exits, the
+      model sets fsm_state["accept"] = "READY" and then does
+      `yield self.env.timeout(self.retry_latency)` (line 212) before moving on
+      to ENQUEUE, charging retry_latency (default 1, non-zero) cycles to a
+      transition the template declares free.
     why: >-
-      Any scenario that reconfigures a tenant mid-run (a live QoS budget
-      change, or a liveness toggle) takes effect and is "acked" instantly in
-      the model instead of at the next refill.REFILL_BASE boundary the
-      contract declares, so timing computed from when a configuration change
-      becomes visible to the scheduler -- or from when a caller is entitled to
-      assume it has been applied -- will not match a design that honors the
-      declared inline-ack gate. No test in tests/test_completion_ip.py drives
-      configure_tenant/set_tenant_alive/credit_tokens concurrently with the
-      refill process to exercise (or pin) this wait point at all, so the gap
-      is currently unguarded by any assertion.
+      Verified by instrumenting the model directly (pending_depth=1,
+      retry_latency=3): a command backpressured at t=2 that has queue space
+      restored is observed entering READY at t=5 and ENQUEUE only at t=8 --
+      the full retry_latency (3 cycles) is spent sitting in READY before the
+      enqueue even starts, though the template says this transition itself
+      costs nothing. Every recovery from BACKPRESSURE is delayed by one extra
+      retry_latency cycle beyond what the declared FSM timing says, and a
+      caller timing the accept path against the template would be off by
+      exactly that amount. A `yield self.env.timeout(0)` would have made the
+      READY state observable (the actual bug this code's own comment says it
+      was fixing) without spending the cycle the template declares this
+      transition does not cost.
+  - id: M39
+    class: fsm_structure
+    severity: high
+    claim: >-
+      completion_scheduler's WAIT_TOKENS -> SELECT_TENANT transition is
+      declared on condition next_dispatch_tick_or_refill, tied to
+      qos.dispatch_tick_ms; the model never implements a dispatch-tick
+      condition at all and instead retakes the transition after a fixed
+      retry_latency cycle every time.
+    template: >-
+      templates/completion_ip.template.yaml fsm_processes[completion_scheduler].
+      transitions, the WAIT_TOKENS -> SELECT_TENANT entry (condition
+      next_dispatch_tick_or_refill), read together with qos.dispatch_tick_ms:
+      1 (ms) and resources[completion_output_port].bandwidth:
+      one_completion_per_dispatch_tick.
+    model: >-
+      src/ip_model_automation/completion_ip.py:409-416, inside
+      completion_scheduler(): on a token stall the model does
+      `yield self.env.timeout(self.retry_latency)` then `continue`, retrying
+      the select on a fixed cycle-level cadence (retry_latency defaults to 1
+      cycle / 2ns). Neither `dispatch_tick_ms` nor any 1ms-scale timeout
+      appears anywhere in the file (grep confirms no reference), so nothing in
+      the model corresponds to "next dispatch tick" at all -- only "or
+      refill" is even partially honoured, via configure_tenant/credit_tokens
+      refreshing eligibility, and that path does not go through this
+      transition either since a token-sufficient tenant becoming eligible
+      wakes the scheduler from IDLE, not from WAIT_TOKENS.
+    why: >-
+      qos.dispatch_tick_ms (1ms = 500,000 cycles at the declared 500MHz/2ns
+      clock) is a real, distinct parameter from window_ms (which the model
+      does faithfully implement as refill_window = 5,000,000 cycles = 10ms,
+      matching qos.window_ms: 10). Its complete absence here means a
+      token-starved tenant is re-polled roughly 500,000x more often than the
+      declared dispatch-tick cadence implies, so token_stalls counts and the
+      simulated recovery timing after a partial-token stall are governed
+      entirely by retry_latency, a knob the template never associates with
+      this transition, rather than by anything resembling
+      next_dispatch_tick_or_refill.

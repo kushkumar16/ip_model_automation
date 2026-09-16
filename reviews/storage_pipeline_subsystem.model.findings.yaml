@@ -1,6 +1,42 @@
 ip: storage_pipeline_subsystem
 kind: model
-template_sha256: 4eea1dbeebeb18f46dfb9090b5e81fb3a68b366a67c9534a7c52557201154fc3
+template_sha256: 2e699282ae10f069c7f0edd1ac119868eb925526a041cb6e847473fa8146cb1d
 model_sha256: 9929403891a67898a81e13706a60c1ea6b69ac8619227e4f41f2e735c7eead90
 tests_sha256: fb8e6df43fa50fa294858fbc527437efcf283aa8ccad8ba9e1fcd0d6eab4711b
-findings: []
+findings:
+  - id: M2
+    class: wait_model_impl
+    severity: medium
+    claim: >-
+      command_intake_if's inline ack fires a full extra 1-cycle transition
+      later than the point the template says the accept is given, so a host
+      that submits a command is acked one cycle (2ns) later than the
+      contract states.
+    template: >-
+      templates/storage_pipeline_subsystem.template.yaml command_intake_if's
+      transaction command_intake_access timing_notes: "accepted once handed
+      to the Arbitration IP's own ingress queue, not merely queued at the
+      subsystem boundary" -- i.e. the ack is tied to the
+      enqueue_into_arbitration_ip action on the ACCEPT_COMMAND ->
+      FORWARD_TO_ARBITRATION transition, not to any later transition.
+    model: >-
+      src/ip_model_automation/storage_pipeline_subsystem.py:129-137. Line
+      129 calls self.arbitration.enqueue(payload) -- the handoff to the
+      Arbitration IP's ingress queue that the timing_notes names as the
+      accept point (confirmed synchronous: arbitration_ip.py's enqueue()
+      appends to self.queues[...] directly, no yield). But accepted.succeed()
+      is not called until line 137, after one more full
+      self.env.timeout(1) at line 135 for the separate
+      FORWARD_TO_ARBITRATION -> IDLE (acknowledge_host) transition. The
+      model's own submit() docstring (lines 92-99) says the wait "completes
+      there" at the moment the command "was handed to the Arbitration IP",
+      which is exactly the line-129 event the code does not actually
+      resolve on.
+    why: >-
+      Any caller of submit() (or a test) that measures accept latency, or
+      that composes this subsystem's ack timing into a larger pipeline
+      budget, gets a value one glue cycle higher than the template commits
+      to. The QoS-config path (qos_configuration_if) acks correctly at its
+      last pre-IDLE state (APPLY_QOS_CONFIG's own acknowledge_host
+      transition), which is what makes the command path's extra deferral
+      stand out as a real discrepancy rather than a house style choice.

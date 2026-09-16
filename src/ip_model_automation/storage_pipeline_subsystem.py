@@ -129,13 +129,21 @@ class StoragePipelineSubsystemModel:
                 self.arbitration.enqueue(payload)
                 self.metrics["commands_submitted"] += 1
                 self.transition_counts["ACCEPT_COMMAND->FORWARD_TO_ARBITRATION"] += 1
-                # FORWARD_TO_ARBITRATION -> IDLE (action: acknowledge_host)
-                # is its own declared 1-cycle transition, not a free return
-                # to IDLE (round thirteen's M2).
-                yield self.env.timeout(1)
-                self.transition_counts["FORWARD_TO_ARBITRATION->IDLE"] += 1
+                # command_intake_if's wait point is ACCEPT_COMMAND, resuming
+                # on command_forwarded; its timing_notes tie the accept to
+                # enqueue_into_arbitration_ip specifically -- the action the
+                # transitions table declares on this exact transition, paid
+                # above. The ack used to wait one more full transition,
+                # through FORWARD_TO_ARBITRATION -> IDLE, acking the host a
+                # cycle later than the contract states (round thirteen's M2).
                 accepted.succeed()
                 self.logger.debug("command forwarded cmd=%s", payload.cmd_id)
+                # FORWARD_TO_ARBITRATION -> IDLE (action: acknowledge_host)
+                # is still its own declared 1-cycle transition, paid here,
+                # after the host's own ack -- the bridge's own return to
+                # IDLE is not on the host's critical path.
+                yield self.env.timeout(1)
+                self.transition_counts["FORWARD_TO_ARBITRATION->IDLE"] += 1
             else:
                 tenant_id, token_budget = payload
                 self.fsm_state["intake_bridge"] = "ACCEPT_QOS_CONFIG"

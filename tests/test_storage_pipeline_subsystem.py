@@ -43,6 +43,34 @@ def make_subsystem(env, **overrides):
 
 
 class TestStoragePipelineSubsystemModel(unittest.TestCase):
+    def test_command_ack_completes_at_enqueue_not_after_the_return_transition(self):
+        """command_intake_if's ack ties to enqueue_into_arbitration_ip --
+        the action ACCEPT_COMMAND -> FORWARD_TO_ARBITRATION's own transitions
+        table entry declares -- not to the bridge's own separate
+        FORWARD_TO_ARBITRATION -> IDLE return. The ack used to wait for that
+        return transition too, acking the host one glue cycle later than
+        command_intake_if's timing_notes state (round thirteen's M2 was
+        about giving that return transition its own declared cost, a
+        different question from when the host's own ack fires).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env)
+        accepted = model.submit(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        acked_at = None
+        while env.peek() < 10:
+            env.step()
+            if accepted.processed and acked_at is None:
+                acked_at = env.now
+
+        self.assertIsNotNone(acked_at, "the ack never fired")
+        self.assertEqual(
+            acked_at,
+            2,
+            "must be acked at ACCEPT_COMMAND(1) + FORWARD_TO_ARBITRATION's own enqueue(1) = 2, "
+            "not one glue cycle later after the bridge's own return to IDLE",
+        )
+
     def test_command_flows_end_to_end(self):
         """template test_scenarios[0]: command_flows_end_to_end.
 

@@ -27,3 +27,28 @@ Re-stamped model provenance against the corrected template
 (`check_model_provenance.py --stamp storage_pipeline_subsystem`);
 `diff_template.py` reports no change, since the connections table sits
 outside the fields it tracks (FSMs, timing, interfaces, commands).
+
+## command_intake_if's ack fired one glue cycle late
+
+**M2 fixed:** `command_intake_if`'s transaction `timing_notes` tie the host's
+accept to `enqueue_into_arbitration_ip` -- the action the transitions table
+declares on `ACCEPT_COMMAND -> FORWARD_TO_ARBITRATION` itself -- not to any
+later transition. The model called `accepted.succeed()` one more full
+transition later, after `FORWARD_TO_ARBITRATION -> IDLE`'s own
+`acknowledge_host` action, acking the host a cycle later than the contract
+states. Filed by an isolated review dispatched after
+`modeling_backends: [simpy, systemc]` was added to
+`storage_pipeline_subsystem.template.yaml` for the SystemC backend pilot.
+
+Fixed by moving `accepted.succeed()` to immediately after
+`arbitration.enqueue(payload)`, still inside the same transition's own
+cost -- `FORWARD_TO_ARBITRATION -> IDLE` keeps its own declared 1-cycle
+cost and its own transition count, just no longer gates the host's ack.
+`test_command_ack_completes_at_enqueue_not_after_the_return_transition`
+pins the corrected timing, mutation-verified against the original
+one-cycle-late charge.
+
+The review judged `qos_configuration_if`'s analogous path (`APPLY_QOS_CONFIG`'s
+own `acknowledge_host` transition) correct as written, using it as the
+control that makes the command path's deferral stand out; that read is not
+re-litigated here, and the QoS path is unchanged.

@@ -79,3 +79,42 @@ stayed green through the entire M3 bug. Added
 `test_qos_config_ack_completes_at_apply_not_after_the_return_transition`,
 mutation-verified against the original one-cycle-late charge, closing both
 M3 and M4 in the same fix.
+
+## command_intake_if's wait_points named the wrong state
+
+**M5 fixed:** the review that confirmed M3's fix found `command_intake_if`'s
+`wait_points: [intake_bridge.ACCEPT_COMMAND]` doesn't match the state the
+ack actually fires in (`FORWARD_TO_ARBITRATION`, per the M2 fix above). The
+sibling `qos_configuration_if` already names the right state
+(`APPLY_QOS_CONFIG`, matching where its own ack fires), which is what
+exposed the asymmetry.
+
+The model is not what moved: `dlds/storage_pipeline_subsystem_dld.md` §6.1's
+own FSM state description is explicit and specific --
+"`FORWARD_TO_ARBITRATION`: hand the command to `arbitration_ip.enqueue` and
+acknowledge the host" -- exactly matching both M2's fix and this interface's
+own `timing_notes` ("accepted once handed to the Arbitration IP's own
+ingress queue"). §4.1's terser "Waits in: `intake_bridge.ACCEPT_COMMAND`"
+reads more naturally as naming where the wait *begins* (the state the item
+was dequeued into) than where it *resolves* -- the DLD's own two sections
+say different things about the same fact, same shape as M1's
+connections-table-vs-transitions-table contradiction above, and resolved
+the same way: the model and the more specific source agree, so the
+looser/ambiguous field is what changed. `wait_points` now reads
+`[intake_bridge.FORWARD_TO_ARBITRATION]`.
+
+Re-stamped model provenance against the corrected template
+(`check_model_provenance.py --stamp storage_pipeline_subsystem`).
+
+## no_output_stall_below_the_backlog_limit was never actually checked
+
+**M6 fixed:** the same round noted `test_scenarios[2]`
+(`completion_backlog_throttles_arbitration_issue_readiness`) declares
+`expected_performance_properties: [no_output_stall_below_the_backlog_limit]`,
+but its test only ever drives the backlog to and past the configured limit
+-- nothing exercises the below-the-limit case the property actually names,
+so a regression that throttled prematurely (an off-by-one, or throttling on
+any nonzero backlog) would pass unnoticed. Added
+`test_no_output_stall_when_backlog_stays_below_the_limit`, which submits a
+real backlog that never reaches the limit and samples `issue_throttled`/
+`arbitration.output_ready` at every step of the run, not just at the end.

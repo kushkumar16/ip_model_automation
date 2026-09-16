@@ -207,6 +207,36 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
         self.assertTrue(model.arbitration.output_ready)
         self.assertEqual(len(model.completion.completed), 5)
 
+    def test_no_output_stall_when_backlog_stays_below_the_limit(self):
+        """template test_scenarios[2]'s other declared property:
+        no_output_stall_below_the_backlog_limit. The scenario test above
+        only exercises reaching and draining the limit; this one submits a
+        real backlog that never reaches it and checks issue readiness is
+        never disturbed at any point during the run, not just checked once
+        at the end (round fourteen's M6).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env, completion_backlog_limit=3)
+        for i in range(2):
+            model.submit(Command(f"c{i}", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        throttled_at_any_point = False
+        while env.peek() < 120:
+            env.step()
+            if model.issue_throttled or not model.arbitration.output_ready:
+                throttled_at_any_point = True
+
+        self.assertFalse(
+            throttled_at_any_point,
+            "issue readiness must not be disturbed while the backlog never reaches the configured limit",
+        )
+        self.assertEqual(len(model.completion.completed), 2)
+        self.assertGreater(
+            model.transition_counts["SAMPLE_BACKLOG->SAMPLE_BACKLOG"],
+            0,
+            "the held-steady transition must actually fire while nothing changes",
+        )
+
     def test_metrics_snapshot_is_a_copy(self):
         env = simpy.Environment()
         model = make_subsystem(env)

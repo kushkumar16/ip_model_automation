@@ -1,69 +1,71 @@
 ip: storage_pipeline_subsystem
 kind: model
 template_sha256: 2e699282ae10f069c7f0edd1ac119868eb925526a041cb6e847473fa8146cb1d
-model_sha256: 2e90b283b190d824428e9ea10f2205e757e0788bf1389f4a596917075c245b35
-tests_sha256: 72afbb466e378d5f2abc9a70b51ead552c344e53854685568f556ea50dd50a69
+model_sha256: 44881a04e7ebc550a56114f45fac16a19ed3a94a5a2cbd0e0114f56d82b9f0bc
+tests_sha256: d2a9ad0e3d8ce526a6876bd7f0d700b5f1630fda74e22031f9e4b2724d1caa9a
 findings:
-  - id: M3
-    class: timing_mismatch
-    severity: high
+  - id: M5
+    class: wait_model_impl
+    severity: medium
     claim: >-
-      qos_configuration_if's host ack fires one glue cycle after the config
-      is actually applied to the Completion IP, not at the qos_config_applied
-      event the interface names as the resume condition -- the same
-      extra-cycle-late-ack pattern the model's own comments say was already
-      found and fixed on the command_intake_if path (round thirteen's M2),
-      but that fix was never carried over to this path.
+      command_intake_if's wait_points names intake_bridge.ACCEPT_COMMAND as the
+      state occupied while the host's ack is pending, but the model actually
+      fires that ack while intake_bridge is sitting in FORWARD_TO_ARBITRATION,
+      one state later.
     template: >-
-      qos_configuration_if.wait_model declares `wait_points:
-      [intake_bridge.APPLY_QOS_CONFIG]` and `resumes_on: qos_config_applied`
-      (templates/storage_pipeline_subsystem.template.yaml:48-49), and its
-      transaction's timing_notes state the ack is "applied synchronously
-      once the bridge reaches the config state, no further than the
-      Completion IP's own configure_tenant already defers it"
-      (templates/storage_pipeline_subsystem.template.yaml:55).
+      templates/storage_pipeline_subsystem.template.yaml command_intake_if.wait_model
+      (lines 29-35): "wait_points: [intake_bridge.ACCEPT_COMMAND]". The
+      sibling qos_configuration_if.wait_model (lines 45-50) follows the
+      convention this codebase uses elsewhere (e.g. completion_ip's
+      accept_cmd_if names accept.ENQUEUE, the exact state held across its
+      service_latency and succeeded in): it names
+      intake_bridge.APPLY_QOS_CONFIG, and the model does hold that exact
+      state when its own accepted.succeed() fires.
     model: >-
-      src/ip_model_automation/storage_pipeline_subsystem.py:158-171 --
-      self.completion.configure_tenant(...) is called at line 158, while the
-      bridge is already in APPLY_QOS_CONFIG (2 glue cycles after dequeue),
-      which is the qos_config_applied event and the point the timing_notes
-      bound the delay against. But accepted.succeed() is deferred to line
-      171, after one more `yield self.env.timeout(1)` for the separate
-      APPLY_QOS_CONFIG -> IDLE transition (3 cycles total), the same shape
-      of bug the model's own comment at lines 132-138 describes fixing for
-      command_intake_if: acking one glue cycle later than the transition
-      that actually performs the effect the interface names.
+      src/ip_model_automation/storage_pipeline_subsystem.py lines 124-139:
+      self.fsm_state["intake_bridge"] is set to "ACCEPT_COMMAND" at line 124,
+      then to "FORWARD_TO_ARBITRATION" at line 127 before the second
+      yield self.env.timeout(1) at line 128; accepted.succeed() at line 139
+      runs after that second timeout, while self.fsm_state["intake_bridge"]
+      still reads "FORWARD_TO_ARBITRATION", not "ACCEPT_COMMAND".
     why: >-
-      A host waiting on configure_qos() is resumed a full glue cycle later
-      than "no further than the Completion IP's own configure_tenant already
-      defers it" commits to, and later than the resumes_on: qos_config_applied
-      event the interface names -- a simulated timing error on this
-      interface's own inline-ack path, of exactly the kind already confirmed
-      as a real bug and fixed on the sibling command path.
-  - id: M4
+      Anyone reading fsm_state to observe which state a wait_for_ack_inline
+      interface is blocked in -- the way this codebase already treats that
+      field elsewhere (completion_ip's own accept.ENQUEUE note: "the state is
+      entered before the enqueue is charged so that it is held for the whole
+      operation") -- would watch intake_bridge.ACCEPT_COMMAND for the host's
+      ack and never see it complete there; the ack always fires one state
+      later, in FORWARD_TO_ARBITRATION, exactly the class of drift
+      completion_ip.template.yaml's own completion_queue_if.notes records
+      having happened once already ("wait point used to name EMIT while this
+      note named STALL_OUTPUT, and the two could not both be true").
+  - id: M6
     class: scenario_gap
     severity: medium
     claim: >-
-      test_scenarios[1] (qos_config_flows_to_completion_ip) declares
-      expected_performance_properties: [qos_config_applied_promptly], but
-      the test written for it never asserts anything about when the config
-      is applied or the host is acked -- only that it eventually happens by
-      an arbitrarily generous deadline.
+      test_scenarios[2]'s expected_performance_properties names
+      no_output_stall_below_the_backlog_limit, but the test named for that
+      scenario never drives or checks a case where the backlog stays below
+      the configured limit; it only exercises reaching and then draining the
+      limit.
     template: >-
-      templates/storage_pipeline_subsystem.template.yaml:255-260 --
-      test_scenarios[1].expected_performance_properties: [qos_config_applied_promptly].
+      templates/storage_pipeline_subsystem.template.yaml lines 261-266,
+      test_scenarios[2] completion_backlog_throttles_arbitration_issue_readiness:
+      "expected_performance_properties: [no_output_stall_below_the_backlog_limit]".
     model: >-
-      tests/test_storage_pipeline_subsystem.py:127-150 --
-      test_qos_config_flows_to_completion_ip runs `env.run(until=10)` and
-      then checks accepted.processed, qos_configs_applied, the four token
-      values, and two transition counts, with no assertion on env.now (or
-      any other measure of promptness), unlike the command scenario's
-      dedicated ack-timing test
-      (test_command_ack_completes_at_enqueue_not_after_the_return_transition,
-      tests/test_storage_pipeline_subsystem.py:46-72), which does pin down
-      exactly when its ack fires.
+      tests/test_storage_pipeline_subsystem.py lines 180-208,
+      test_completion_backlog_throttles_arbitration_issue_readiness: submits
+      5 commands against completion_backlog_limit=2 with completion held
+      not-ready from the start, so the backlog is at or above the limit for
+      the entire first phase of the test; it asserts issue_throttled becomes
+      True and later False, but no assertion anywhere in the file checks
+      that arbitration.output_ready (or issue_throttled) stays True/False
+      while the backlog is genuinely below the configured limit.
     why: >-
-      This test would pass unchanged even if the ack were delayed by an
-      arbitrary number of extra cycles (as in M3), so a reader relying on it
-      to see qos_config_applied_promptly exercised is misled -- the scenario
-      it is named for is not actually checking the property it names.
+      The scenario's stated performance property -- that issue readiness is
+      not disturbed while the backlog has not reached the limit -- is left
+      unverified; a regression that throttled issue readiness prematurely
+      (e.g. an off-by-one in the >= comparison, or a monitor that throttles
+      on any nonzero backlog) would pass every test in this file while
+      silently violating a property the template claims this scenario
+      covers.

@@ -43,6 +43,34 @@ def make_subsystem(env, **overrides):
 
 
 class TestStoragePipelineSubsystemModel(unittest.TestCase):
+    def test_command_ack_completes_at_enqueue_not_after_the_return_transition(self):
+        """command_intake_if's ack ties to enqueue_into_arbitration_ip --
+        the action ACCEPT_COMMAND -> FORWARD_TO_ARBITRATION's own transitions
+        table entry declares -- not to the bridge's own separate
+        FORWARD_TO_ARBITRATION -> IDLE return. The ack used to wait for that
+        return transition too, acking the host one glue cycle later than
+        command_intake_if's timing_notes state (round thirteen's M2 was
+        about giving that return transition its own declared cost, a
+        different question from when the host's own ack fires).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env)
+        accepted = model.submit(Command("c0", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        acked_at = None
+        while env.peek() < 10:
+            env.step()
+            if accepted.processed and acked_at is None:
+                acked_at = env.now
+
+        self.assertIsNotNone(acked_at, "the ack never fired")
+        self.assertEqual(
+            acked_at,
+            2,
+            "must be acked at ACCEPT_COMMAND(1) + FORWARD_TO_ARBITRATION's own enqueue(1) = 2, "
+            "not one glue cycle later after the bridge's own return to IDLE",
+        )
+
     def test_command_flows_end_to_end(self):
         """template test_scenarios[0]: command_flows_end_to_end.
 
@@ -95,6 +123,34 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
         self.assertEqual(len(model.completion.completed), 4)
         completed_ids = {cmd.cmd_id for _time, cmd in model.completion.completed}
         self.assertEqual(completed_ids, {"c0", "c1", "c2", "c3"})
+
+    def test_qos_config_ack_completes_at_apply_not_after_the_return_transition(self):
+        """qos_configuration_if's ack ties to qos_config_applied -- bound "no
+        further than the Completion IP's own configure_tenant already defers
+        it" -- not to the bridge's own separate APPLY_QOS_CONFIG -> IDLE
+        return. The ack used to wait for that return transition too, the
+        same extra-cycle-late shape M2 fixed on the command path but never
+        carried over here (round fourteen's M3); this scenario declared
+        expected_performance_properties: [qos_config_applied_promptly] but
+        nothing here checked it before (round fourteen's M4).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env)
+        accepted = model.configure_qos("T0", 250.0)
+
+        acked_at = None
+        while env.peek() < 10:
+            env.step()
+            if accepted.processed and acked_at is None:
+                acked_at = env.now
+
+        self.assertIsNotNone(acked_at, "the ack never fired")
+        self.assertEqual(
+            acked_at,
+            2,
+            "must be acked at ACCEPT_QOS_CONFIG(1) + APPLY_QOS_CONFIG's own configure_tenant(1) = 2, "
+            "not one glue cycle later after the bridge's own return to IDLE",
+        )
 
     def test_qos_config_flows_to_completion_ip(self):
         """template test_scenarios[1]: qos_config_flows_to_completion_ip.
@@ -150,6 +206,36 @@ class TestStoragePipelineSubsystemModel(unittest.TestCase):
         self.assertFalse(model.issue_throttled, "backlog drained but issue readiness was never restored")
         self.assertTrue(model.arbitration.output_ready)
         self.assertEqual(len(model.completion.completed), 5)
+
+    def test_no_output_stall_when_backlog_stays_below_the_limit(self):
+        """template test_scenarios[2]'s other declared property:
+        no_output_stall_below_the_backlog_limit. The scenario test above
+        only exercises reaching and draining the limit; this one submits a
+        real backlog that never reaches it and checks issue readiness is
+        never disturbed at any point during the run, not just checked once
+        at the end (round fourteen's M6).
+        """
+        env = simpy.Environment()
+        model = make_subsystem(env, completion_backlog_limit=3)
+        for i in range(2):
+            model.submit(Command(f"c{i}", "READ", port_id="port0", tenant_id="T0", sq_id="SQ0"))
+
+        throttled_at_any_point = False
+        while env.peek() < 120:
+            env.step()
+            if model.issue_throttled or not model.arbitration.output_ready:
+                throttled_at_any_point = True
+
+        self.assertFalse(
+            throttled_at_any_point,
+            "issue readiness must not be disturbed while the backlog never reaches the configured limit",
+        )
+        self.assertEqual(len(model.completion.completed), 2)
+        self.assertGreater(
+            model.transition_counts["SAMPLE_BACKLOG->SAMPLE_BACKLOG"],
+            0,
+            "the held-steady transition must actually fire while nothing changes",
+        )
 
     def test_metrics_snapshot_is_a_copy(self):
         env = simpy.Environment()

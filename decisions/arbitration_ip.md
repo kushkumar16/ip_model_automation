@@ -101,3 +101,13 @@ does not close until the DLD's own open item is resolved and the template
 re-promoted through review, at which point the model can implement whatever
 is actually decided; a future review re-finding the same gap under a new id
 is this same dismissal repeated, not a new question.
+
+**M45 dismissed:** exactly that repeat, filed by an isolated review dispatched
+after `modeling_backends: [simpy, systemc]` was added to
+`arbitration_ip.template.yaml` for the SystemC backend pilot (a routing field;
+the SimPy model and its FLUSH gap are unchanged). Same claim as M44, same
+`dlds/arbitration_ip_dld.md` §13 Open Items citation, same reason it stays
+open. The new `systemc/models/arbitration_ip.{h,cpp}` SystemC port carries the
+identical gap for the identical reason: it does not track `Command.kind`
+either, so there is nothing FLUSH-specific to port until the DLD's open item
+is resolved on the SimPy side first.

@@ -2,6 +2,7 @@ ip:
   name: storage_pipeline_subsystem
   domain: soc_subsystem
   description: Connects the Arbitration IP and the Completion IP into one command-scheduling-and-completion pipeline via three glue processes.
+  modeling_backends: [simpy, systemc]
   clock_domains:
     - name: core_clk
       frequency_mhz: 500
@@ -28,10 +29,18 @@ interfaces:
     wait_model:
       mode: wait_for_ack_inline
       requester: peer
-      wait_points: [intake_bridge.ACCEPT_COMMAND]
+      wait_points: [intake_bridge.FORWARD_TO_ARBITRATION]
       resumes_on: command_forwarded
       source: dld
-      notes: the host is told the command was accepted, not that it has completed; completion is observed separately, through the Completion IP's own record.
+      notes: >-
+        the host is told the command was accepted, not that it has completed;
+        completion is observed separately, through the Completion IP's own
+        record. The ack fires in FORWARD_TO_ARBITRATION (matching the sibling
+        qos_configuration_if convention and
+        dlds/storage_pipeline_subsystem_dld.md's own FSM state description --
+        "hand the command to arbitration_ip.enqueue and acknowledge the
+        host"), not in ACCEPT_COMMAND, where the DLD's terser wait-model
+        summary alone would suggest (round fourteen's M5).
     transactions:
       - name: command_intake_access
         fields: [cmd_id, kind, port_id, tenant_id, sq_id]

@@ -1,6 +1,42 @@
 ip: arbitration_ip
 kind: model
-template_sha256: b94e75f6372be3359def9d436f8d6a9313251ba5d76371e3ca75385c5bdbc0d5
+template_sha256: a8d2e904a7f1d3d3a0391ec2bd0c31c29378f35228633c7b6e6cb9c902c876d6
 model_sha256: 9bbcf6226dec46e30b814c65a7175c07ec3bf430836f1f277fbeb50330c978f9
 tests_sha256: ce367b562e51f0627896375e3d0400deb99cae2623546badc38e8cc099be7cc5
-findings: []
+findings:
+  - id: M45
+    class: fsm_structure
+    severity: high
+    claim: >-
+      FLUSH's declared ordering-barrier gating and effect are never modeled:
+      the model arbitrates every command (READ, WRITE, FLUSH) through the
+      exact same path, gated only by tenant_alive/credit, and never branches
+      on command kind anywhere.
+    template: >-
+      templates/arbitration_ip.template.yaml:87-94, the FLUSH command block.
+      Unlike READ/WRITE (lines 71-86), FLUSH's valid_conditions list
+      `ordering_barrier_clear` in place of `tenant_alive`, its
+      functional_effects list `preserve_ordering` ahead of `update_bitmaps`,
+      and its error_conditions is `[ordering_barrier_timeout]` rather than
+      `[tenant_inactive, malformed_descriptor]` -- a deliberately distinct,
+      fully-declared gating and effect set for this command, not an
+      unspecified detail.
+    model: >-
+      src/ip_model_automation/arbitration_ip.py: `_select_tenant`
+      (lines 366-380) gates every candidate solely on
+      `self.tenant_credit[tenant_id]["tenant_alive"]` and
+      `sample_eligibility`, and `_scan_candidate`/`_select_sq`
+      (lines 382-386, 622-649) add no further check -- there is no
+      ordering-barrier state, no `preserve_ordering` action, and no
+      `ordering_barrier_timeout` path anywhere in the file. `Command.kind`
+      (common.py) is never read by arbitration_ip.py: a `grep` for
+      `.kind`, `flush`, `barrier`, or `ordering` in the model returns
+      nothing.
+    why: >-
+      A FLUSH command is granted or stalled exactly as a READ/WRITE would
+      be: blocked by a dead/out-of-credit tenant the template never asks
+      FLUSH to check, while the ordering barrier the template does declare
+      for it -- the one condition `preserve_ordering` exists to protect --
+      is never sampled, so a FLUSH could be granted and issued ahead of
+      commands its own barrier was supposed to hold back, and no test can
+      ever see the difference because no test ever enqueues a FLUSH.

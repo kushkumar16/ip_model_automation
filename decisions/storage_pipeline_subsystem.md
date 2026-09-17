@@ -27,3 +27,94 @@ Re-stamped model provenance against the corrected template
 (`check_model_provenance.py --stamp storage_pipeline_subsystem`);
 `diff_template.py` reports no change, since the connections table sits
 outside the fields it tracks (FSMs, timing, interfaces, commands).
+
+## command_intake_if's ack fired one glue cycle late
+
+**M2 fixed:** `command_intake_if`'s transaction `timing_notes` tie the host's
+accept to `enqueue_into_arbitration_ip` -- the action the transitions table
+declares on `ACCEPT_COMMAND -> FORWARD_TO_ARBITRATION` itself -- not to any
+later transition. The model called `accepted.succeed()` one more full
+transition later, after `FORWARD_TO_ARBITRATION -> IDLE`'s own
+`acknowledge_host` action, acking the host a cycle later than the contract
+states. Filed by an isolated review dispatched after
+`modeling_backends: [simpy, systemc]` was added to
+`storage_pipeline_subsystem.template.yaml` for the SystemC backend pilot.
+
+Fixed by moving `accepted.succeed()` to immediately after
+`arbitration.enqueue(payload)`, still inside the same transition's own
+cost -- `FORWARD_TO_ARBITRATION -> IDLE` keeps its own declared 1-cycle
+cost and its own transition count, just no longer gates the host's ack.
+`test_command_ack_completes_at_enqueue_not_after_the_return_transition`
+pins the corrected timing, mutation-verified against the original
+one-cycle-late charge.
+
+The review judged `qos_configuration_if`'s analogous path (`APPLY_QOS_CONFIG`'s
+own `acknowledge_host` transition) correct as written, using it as the
+control that makes the command path's deferral stand out. That read did not
+survive a second look: see M3 below.
+
+## qos_configuration_if's ack had the identical bug M2 fixed on the sibling path
+
+**M3 fixed:** the very next review round, dispatched after the M2 fix, found
+that `qos_configuration_if`'s ack has the identical extra-cycle-late shape
+M2 fixed on `command_intake_if` -- `configure_tenant(...)` is called on
+entering `APPLY_QOS_CONFIG` (the `qos_config_applied` event the interface
+names, and the point its timing_notes bound the ack against: "no further
+than the Completion IP's own `configure_tenant` already defers it"), but
+`accepted.succeed()` waited for one more full transition,
+`APPLY_QOS_CONFIG -> IDLE`. The earlier review's judgment that this path was
+"correct as written" was wrong; M2's own fix should have been carried over
+here at the time and was not.
+
+Fixed the same way as M2: `accepted.succeed()` moved to immediately after
+`configure_tenant(...)`, with `APPLY_QOS_CONFIG -> IDLE` keeping its own
+declared cost and transition count.
+
+**M4 fixed:** the same round noted `test_scenarios[1]`
+(`qos_config_flows_to_completion_ip`) declares
+`expected_performance_properties: [qos_config_applied_promptly]` but no
+test ever asserted anything about when the ack fires -- unlike the command
+path's own dedicated ack-timing test, this scenario's test would have
+stayed green through the entire M3 bug. Added
+`test_qos_config_ack_completes_at_apply_not_after_the_return_transition`,
+mutation-verified against the original one-cycle-late charge, closing both
+M3 and M4 in the same fix.
+
+## command_intake_if's wait_points named the wrong state
+
+**M5 fixed:** the review that confirmed M3's fix found `command_intake_if`'s
+`wait_points: [intake_bridge.ACCEPT_COMMAND]` doesn't match the state the
+ack actually fires in (`FORWARD_TO_ARBITRATION`, per the M2 fix above). The
+sibling `qos_configuration_if` already names the right state
+(`APPLY_QOS_CONFIG`, matching where its own ack fires), which is what
+exposed the asymmetry.
+
+The model is not what moved: `dlds/storage_pipeline_subsystem_dld.md` §6.1's
+own FSM state description is explicit and specific --
+"`FORWARD_TO_ARBITRATION`: hand the command to `arbitration_ip.enqueue` and
+acknowledge the host" -- exactly matching both M2's fix and this interface's
+own `timing_notes` ("accepted once handed to the Arbitration IP's own
+ingress queue"). §4.1's terser "Waits in: `intake_bridge.ACCEPT_COMMAND`"
+reads more naturally as naming where the wait *begins* (the state the item
+was dequeued into) than where it *resolves* -- the DLD's own two sections
+say different things about the same fact, same shape as M1's
+connections-table-vs-transitions-table contradiction above, and resolved
+the same way: the model and the more specific source agree, so the
+looser/ambiguous field is what changed. `wait_points` now reads
+`[intake_bridge.FORWARD_TO_ARBITRATION]`.
+
+Re-stamped model provenance against the corrected template
+(`check_model_provenance.py --stamp storage_pipeline_subsystem`).
+
+## no_output_stall_below_the_backlog_limit was never actually checked
+
+**M6 fixed:** the same round noted `test_scenarios[2]`
+(`completion_backlog_throttles_arbitration_issue_readiness`) declares
+`expected_performance_properties: [no_output_stall_below_the_backlog_limit]`,
+but its test only ever drives the backlog to and past the configured limit
+-- nothing exercises the below-the-limit case the property actually names,
+so a regression that throttled prematurely (an off-by-one, or throttling on
+any nonzero backlog) would pass unnoticed. Added
+`test_no_output_stall_when_backlog_stays_below_the_limit`, which submits a
+real backlog that never reaches the limit and samples `issue_throttled`/
+`arbitration.output_ready` at every step of the run, not just at the end.

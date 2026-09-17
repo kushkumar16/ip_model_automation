@@ -85,6 +85,14 @@ def compile_and_run(ip_name: str, pkg_config_flags: list[str]) -> tuple[bool, st
         rel = ", ".join(str(p.relative_to(REPO_ROOT)) for p in missing)
         return False, f"missing SystemC source file(s): {rel}"
 
+    # A composing model (e.g. storage_pipeline_subsystem, which embeds
+    # ArbitrationIpModel/CompletionIpModel as sub-modules) only #includes its
+    # member IPs' headers, not their .cpp -- so every model source under
+    # systemc/models/ is linked in, not just this IP's own. Cheap: a handful
+    # of small translation units, and it can never drift out of sync with
+    # whatever models/*.cpp actually exist.
+    other_sources = sorted(p for p in MODELS_DIR.glob("*.cpp") if p != source)
+
     with tempfile.TemporaryDirectory(prefix=f"systemc-{ip_name}-") as tmp:
         binary = Path(tmp) / ip_name
         compile_cmd = [
@@ -95,6 +103,7 @@ def compile_and_run(ip_name: str, pkg_config_flags: list[str]) -> tuple[bool, st
             str(MODELS_DIR),
             str(test_source),
             str(source),
+            *(str(p) for p in other_sources),
             "-o",
             str(binary),
             *pkg_config_flags,

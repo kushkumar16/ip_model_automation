@@ -121,3 +121,45 @@ concurrently with a running refill process. Same gap, same reasoning, same
 conclusion as M33: closing it for real needs `qos_config_if` to have its own
 always-running acknowledger, independent of a refill window a caller may
 never start — nothing about that has changed since M33/M36.
+
+## BACKPRESSURE -> READY's declared zero cost
+
+**M38 fixed:** `accept`'s `BACKPRESSURE -> READY` transition is declared
+`latency_cycles: 0` — the only transition in this FSM the template prices at
+nothing — but the model charged a full `retry_latency` cycle for it anyway,
+inherited from the queue-full retry loop the resumption sits right after.
+Filed by an isolated review dispatched after `modeling_backends: [simpy,
+systemc]` was added to `completion_ip.template.yaml` for the SystemC backend
+pilot, and confirmed empirically (`pending_depth=1, retry_latency=5`: the
+recovering command spent 5 cycles sitting in `READY` it should not have
+spent). Fixed by charging `env.timeout(0)` instead of `env.timeout(retry_latency)`
+on that edge — still its own observable step (SimPy schedules a 0-delay
+timeout as a real event, distinct from the state either side of it), at the
+cost the template actually declares.
+`test_completion_backpressure_to_ready_costs_no_declared_cycles` pins it,
+mutation-verified against the original `retry_latency` charge. The pre-existing
+`test_completion_backpressure_resumes_through_ready` used a periodic
+once-per-cycle watcher to trace the resumption, which can no longer see a
+now-zero-duration `READY` between two of its own samples; it was rewritten to
+single-step via `env.step()` instead, which records every state assignment
+regardless of how long it holds.
+
+## Token-stall retry cadence, re-filed a second time
+
+**M39 dismissed:** the same claim as M15 above (`WAIT_TOKENS -> SELECT_TENANT`
+should follow `qos.dispatch_tick_ms` rather than the model's fixed
+`retry_latency`), re-filed by the same isolated review that found M38, with
+no access to this file. The template still declares `latency_cycles: 1` on
+that exact transition, which is still what the model charges; M15's answer
+does not change: `dispatch_tick_ms` describes the QoS accounting window, not
+this transition's cost, and the transition's own declared cost is the one
+place the template states a number for it.
+
+**M40 dismissed:** the same finding as M33/M36/M37 above (`configure_tenant`/
+`set_tenant_alive`/`credit_tokens` all apply synchronously instead of gating
+on `qos_config_if`'s declared `wait_for_ack_inline` at `refill.REFILL_BASE`),
+re-filed a fourth time by the review that confirmed M38's fix, with no
+access to this file. Same gap, same reasoning, same conclusion: closing it
+for real needs `qos_config_if` to have its own always-running acknowledger,
+independent of a refill window a caller may never start (`start_refill_process`
+defaults to `False`) — nothing about that has changed since M33.

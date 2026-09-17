@@ -2,6 +2,7 @@ ip:
   name: completion_ip
   domain: nvme_controller
   description: Tracks command completion, applies QoS token rules, and emits host-facing completions.
+  modeling_backends: [simpy, systemc]
   clock_domains:
     - name: core_clk
       frequency_mhz: null

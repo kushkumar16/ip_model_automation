@@ -553,10 +553,15 @@ python tools/run_ci.py                 # about a minute
 python tools/run_ci.py --install-hook  # once per clone: run it before every push
 ```
 
-This is the repo's CI, and it is **local by choice** — there is no hosted
-runner. The gate list is read from the harness, so adding a `scope: repo` stage
-adds it to CI with no code change. Running locally gives up two things a hosted
-runner provides, so the tool replaces both: it checks that the declared
+This is the repo's CI. `.github/workflows/ci.yml` runs the identical command
+on GitHub Actions, against a clean checkout, on every push and pull request —
+that hosted run is the actual enforcement backstop, showing as a PR status
+check so a failing gate is visible to a reviewer without anyone running
+anything locally. The gate list is read from the harness, so adding a
+`scope: repo` stage adds it to both the local command and the hosted workflow
+with no code change. The local hook exists so the same gates can be caught
+before a push instead of only after one, and it closes two gaps a hosted-only
+setup would still have for the pre-push case: it checks that the declared
 dependencies are actually installed (locally a gate can quietly depend on a
 package one machine happens to have), and it warns when the working tree is
 dirty, because then the files being checked are not the commits being pushed.
@@ -1250,12 +1255,16 @@ looked at all.
   tests it passes. Both may only report findings, never approve; a finding
   blocks `check_review_findings` until it is fixed (which invalidates the
   review) or dismissed by name in `decisions/<ip>.md`.
-- **Every gate runs in one command, locally.** `python tools/run_ci.py` runs the
-  repo-wide gates — read from the harness, so adding a stage adds it to CI — and
-  `.githooks/pre-push` runs them before a push. There is no hosted CI by choice,
-  so the runner replaces what a hosted one gives free: it checks that the
-  declared dependencies are actually installed, and says so when the working
-  tree is dirty and the files checked are not the commits being pushed.
+- **Every gate runs in one command, and hosted on every PR.** `python
+  tools/run_ci.py` runs the repo-wide gates — read from the harness, so adding
+  a stage adds it to CI — and `.github/workflows/ci.yml` runs the same command
+  on GitHub Actions on every push and pull request, so a failing gate shows as
+  a PR status check rather than depending on anyone remembering to run
+  anything. `.githooks/pre-push` runs the same gates locally before a push,
+  closing the two gaps a hosted-only setup would still leave for that earlier
+  moment: it checks that the declared dependencies are actually installed, and
+  says so when the working tree is dirty and the files checked are not the
+  commits being pushed.
 - The change-driven runner (`auto_ip_pipeline.py`), readable template docs
   (Markdown + HTML), and the performance-experiments layer are in place.
 - A written coding style guide with a ruff-based `code_style` hard gate keeps

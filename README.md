@@ -306,12 +306,9 @@ aborts before spending anything. Without `--agent`/`--agent-cmd` it writes
 the prompt to `reports/agent_requests/<ip>.<stage>.prompt.md` and reports
 that, the same as the full pipeline's own default.
 
-## Continuous Integration (local)
+## Continuous Integration
 
-CI here is **deliberately local**: the gates run on this machine, before a push,
-and nowhere else. Without it a branch can be pushed and merged with a failing
-coverage threshold, a stale Word overview, or an unstamped normalization, and
-nothing says so. One command runs all of them:
+One command runs every repo-wide gate:
 
 ```shell
 python tools/run_ci.py            # every repo-wide gate, full report
@@ -327,29 +324,38 @@ pipeline steps (model provenance, DLD normalization, overview sync, review
 findings, review-status sync, and the opt-in SystemC backend's own tests) and
 are listed in `EXTRA_CHECKS` with the reason.
 
-To run it automatically before every push, enable the tracked hook — once per
-clone:
+**Hosted, on every push and pull request:** `.github/workflows/ci.yml` runs the
+same command on GitHub Actions against a clean checkout — installs
+`libsystemc-dev` and `requirements.txt` from scratch, then `python
+tools/run_ci.py`. This is the actual enforcement backstop: a PR shows the
+result as a status check, so a failing gate is visible to a reviewer without
+anyone having to run anything locally.
+
+**Locally, before you push:** enable the tracked pre-push hook — once per
+clone — to catch a failing gate before it ever reaches GitHub:
 
 ```shell
 python tools/run_ci.py --install-hook
 ```
 
-Running locally instead of on a hosted runner costs two things, so the runner
-replaces both:
+Running locally instead of only on the hosted runner has two gaps the hook
+tool itself closes, so a local run is not weaker than the hosted one for the
+same commit:
 
-- **A clean environment.** A hosted runner installs `requirements.txt` from
+- **A clean environment.** The hosted runner installs `requirements.txt` from
   scratch, so an undeclared dependency fails on the first run; locally a gate can
   depend on a package someone installed by hand and pass forever, until a fresh
   clone. The declared set is checked before any gate runs, and a test asserts
   every third-party import under `tools/` is declared.
-- **A defined commit.** A hosted runner tests the commit that was pushed; a local
-  hook tests the files on disk. With a dirty tree those differ, so the run says
-  so rather than letting you believe the pushed commits were checked.
+- **A defined commit.** The hosted runner tests the commit that was pushed; a
+  local hook tests the files on disk. With a dirty tree those differ, so the run
+  says so rather than letting you believe the pushed commits were checked.
 
-`SKIP_CI=1 git push` bypasses it for a work-in-progress branch, and says plainly
-that nothing was verified. The escape hatch is deliberate: a hook that cannot be
-bypassed gets disabled outright the first time it is inconvenient, and then it
-protects nothing.
+`SKIP_CI=1 git push` bypasses the local hook for a work-in-progress branch, and
+says plainly that nothing was verified locally — the hosted workflow still runs
+on the pushed commit regardless, since it isn't gated by that variable. The
+escape hatch is deliberate: a hook that cannot be bypassed gets disabled
+outright the first time it is inconvenient, and then it protects nothing.
 
 ## Daily Validation
 

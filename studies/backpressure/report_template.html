@@ -1,0 +1,444 @@
+<title>Backpressure Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@87,500;87,700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: single reading column (~72ch) for prose; charts break out to a wider figure track; results read top-down, summary first. */
+:root {
+  --bg: #f6f7f8;
+  --surface: #fcfcfb;
+  --fg: #16191d;
+  --fg-2: #4c525a;
+  --fg-3: #7a8089;
+  --rule: #dde1e5;
+  --grid: #e9ecef;
+  --accent: #2a5fa8;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --seq: #1f5fae;
+  --warn: #b35c00;
+  --code-bg: #eef1f4;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121416; --surface: #1a1a19; --fg: #eef0f2; --fg-2: #b9bec5; --fg-3: #8a9099;
+    --rule: #2f3338; --grid: #262a2e; --accent: #7fb0f0;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --seq: #5b9ef0; --warn: #f0a050; --code-bg: #22262a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121416; --surface: #1a1a19; --fg: #eef0f2; --fg-2: #b9bec5; --fg-3: #8a9099;
+  --rule: #2f3338; --grid: #262a2e; --accent: #7fb0f0;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --seq: #5b9ef0; --warn: #f0a050; --code-bg: #22262a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.6 var(--font-body); }
+.wrap { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 80px; display: grid; gap: 56px; }
+.prose { max-width: 70ch; }
+h1, h2, h3 { font-family: var(--font-display); font-stretch: 87%; text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: clamp(2rem, 5vw, 2.9rem); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; font-weight: 700; }
+h3 { font-size: 1.05rem; font-weight: 500; color: var(--fg-2); }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+.eyebrow { font: 500 0.75rem/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+header { display: grid; gap: 16px; }
+header .lede { font-size: 1.15rem; color: var(--fg-2); max-width: 64ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 20px; font: 400 0.8rem/1.4 var(--font-mono); color: var(--fg-3); }
+
+.topology { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; overflow-x: auto; }
+.topology svg { display: block; min-width: 640px; width: 100%; height: auto; }
+.topology text { font-family: var(--font-mono); }
+
+.findings { display: grid; gap: 0; border-top: 2px solid var(--fg); }
+.finding { display: grid; grid-template-columns: 11rem 1fr; gap: 20px; padding-block: 16px; border-bottom: 1px solid var(--rule); }
+.finding .k { font: 700 1.5rem/1.1 var(--font-display); font-stretch: 87%; font-variant-numeric: tabular-nums; }
+.finding .k small { display: block; font: 400 0.75rem/1.3 var(--font-mono); color: var(--fg-3); margin-top: 4px; letter-spacing: 0.02em; }
+.finding p { min-width: 0; }
+.finding a { color: var(--accent); }
+
+section.exp { display: grid; gap: 20px; }
+section.exp > .head { display: grid; gap: 8px; }
+.q { font-style: italic; color: var(--fg-2); }
+.setup { font: 400 0.8rem/1.5 var(--font-mono); color: var(--fg-3); }
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 20px; }
+figure { margin: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 16px 10px; min-width: 0; display: grid; gap: 8px; }
+figcaption { font: 600 0.92rem/1.3 var(--font-body); }
+figcaption span { display: block; font-weight: 400; color: var(--fg-3); font-size: 0.8rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--fg-2); }
+.legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.legend i.ref { background: repeating-linear-gradient(90deg, var(--fg-3) 0 4px, transparent 4px 7px); }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--fg-3); font: 400 11px var(--font-mono); }
+.chart .axis-title { fill: var(--fg-2); font-family: var(--font-body); font-size: 12px; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 8px; font: 400 0.75rem/1.45 var(--font-mono); color: var(--fg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.12); white-space: nowrap; z-index: 2; }
+.tip b { font-weight: 500; }
+.tip i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+details { font-size: 0.82rem; }
+summary { cursor: pointer; color: var(--fg-3); font-family: var(--font-mono); font-size: 0.75rem; }
+summary:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; width: 100%; }
+th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th { font: 500 0.72rem/1.3 var(--font-mono); color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.04em; }
+th:first-child, td:first-child { text-align: left; }
+.takeaway { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; max-width: 72ch; display: grid; gap: 8px; }
+.takeaway b { font-weight: 600; }
+.heat td.cell { font-family: var(--font-mono); font-size: 0.8rem; text-align: center; min-width: 3.5rem; }
+.heat td.cell.hi { color: #fff; }
+.heat .corner { color: var(--fg-3); font: 500 0.72rem var(--font-mono); }
+.rules table td { white-space: normal; text-align: left; vertical-align: top; }
+.rules table td:first-child { font-weight: 600; width: 13rem; }
+.rules table td:last-child { font-family: var(--font-mono); font-size: 0.8rem; }
+.note { color: var(--fg-2); font-size: 0.92rem; }
+ul.plain { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; }
+@media (max-width: 640px) {
+  .finding { grid-template-columns: 1fr; gap: 6px; }
+  .rules table td:first-child { width: auto; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">SimPy study · request / response pipeline</div>
+    <h1>Backpressure Study</h1>
+    <p class="lede">How FIFO depth, response-handler latency, issue rate, flow-control delay and latency variance decide whether a request/response pipeline keeps its throughput or stalls back to the source.</p>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <div class="topology" aria-label="Pipeline topology">
+    <svg viewBox="0 0 900 170" role="img" aria-label="Requester to request FIFO to responder to response FIFO to response handler, with backpressure flowing back">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--fg-2)"></path></marker>
+        <marker id="ahw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--warn)"></path></marker>
+      </defs>
+      <g font-size="13">
+        <rect x="10" y="40" width="130" height="56" rx="4" fill="var(--surface)" stroke="var(--fg-2)"></rect>
+        <text x="75" y="66" text-anchor="middle" fill="var(--fg)">Requester</text>
+        <text x="75" y="84" text-anchor="middle" fill="var(--fg-3)" font-size="11">issue_interval</text>
+
+        <g fill="var(--code-bg)" stroke="var(--fg-3)">
+          <rect x="182" y="50" width="22" height="36"></rect><rect x="204" y="50" width="22" height="36"></rect><rect x="226" y="50" width="22" height="36"></rect><rect x="248" y="50" width="22" height="36"></rect>
+        </g>
+        <text x="226" y="110" text-anchor="middle" fill="var(--fg-3)" font-size="11">req_fifo_depth</text>
+
+        <rect x="312" y="40" width="150" height="56" rx="4" fill="var(--surface)" stroke="var(--fg-2)"></rect>
+        <text x="387" y="66" text-anchor="middle" fill="var(--fg)">Responder ×N</text>
+        <text x="387" y="84" text-anchor="middle" fill="var(--fg-3)" font-size="11">service_latency</text>
+
+        <g fill="var(--code-bg)" stroke="var(--fg-3)">
+          <rect x="504" y="50" width="22" height="36"></rect><rect x="526" y="50" width="22" height="36"></rect><rect x="548" y="50" width="22" height="36"></rect><rect x="570" y="50" width="22" height="36"></rect>
+        </g>
+        <text x="548" y="110" text-anchor="middle" fill="var(--fg-3)" font-size="11">resp_fifo_depth</text>
+
+        <rect x="634" y="40" width="190" height="56" rx="4" fill="var(--surface)" stroke="var(--fg-2)"></rect>
+        <text x="729" y="66" text-anchor="middle" fill="var(--fg)">Response handler ×M</text>
+        <text x="729" y="84" text-anchor="middle" fill="var(--fg-3)" font-size="11">handler_latency</text>
+
+        <g stroke="var(--fg-2)" stroke-width="1.5" fill="none">
+          <line x1="140" y1="68" x2="178" y2="68" marker-end="url(#ah)"></line>
+          <line x1="270" y1="68" x2="308" y2="68" marker-end="url(#ah)"></line>
+          <line x1="462" y1="68" x2="500" y2="68" marker-end="url(#ah)"></line>
+          <line x1="592" y1="68" x2="630" y2="68" marker-end="url(#ah)"></line>
+        </g>
+        <path d="M729,100 L729,140 L75,140 L75,100" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#ahw)"></path>
+        <text x="402" y="160" text-anchor="middle" fill="var(--warn)" font-size="11">backpressure: full FIFO stalls the stage before it · credits · max_outstanding</text>
+        <text x="75" y="24" text-anchor="middle" fill="var(--fg-3)" font-size="11">block | drop</text>
+        <text x="226" y="36" text-anchor="middle" fill="var(--fg-3)" font-size="11">ready | credit</text>
+      </g>
+    </svg>
+  </div>
+
+  <section class="prose" style="display:grid;gap:16px">
+    <h2>What the runs show</h2>
+    <div class="findings">
+      <div class="finding"><div class="k">1 / slowest<small>throughput ceiling</small></div><p>Throughput never exceeded the slowest stage's rate. FIFO depth decides how close to that ceiling you get when latencies vary. It never moves the ceiling. See <a href="#load">load</a> and <a href="#handler">handler</a>.</p></div>
+      <div class="finding"><div class="k">18 → 105 cycles<small>latency cliff</small></div><p>With a constant handler, raising <code>handler_latency</code> from 10 to 10.5 cycles (just past the 10-cycle issue interval) filled both FIFOs. Median latency jumped from 18 to 105 cycles, and the requester was stalled 5% of the time. Past that point, the latency is roughly the total buffering (8 entries) times the handler period.</p></div>
+      <div class="finding"><div class="k">8.5% → 0.8%<small>responder stall, exp handler</small></div><p>An exponential handler at 70% load stalled the responder 8.5% of the time with a response FIFO of depth 1, 0.8% at depth 4, and 0% at depth 8. A bimodal (heavy-tail) handler at the same mean needed depth 12–16. It lost 6% throughput at depth 1. A constant handler needed no FIFO at all.</p></div>
+      <div class="finding"><div class="k">depth ≈ B − T<sub>burst</sub>/T<sub>svc</sub><small>burst sizing</small></div><p>With the drop policy, a burst of B back-to-back requests needed a request FIFO of about B minus the requests served during the burst. At burst length 16, depth 12 still lost 12.5% of requests; depth 16 lost none.</p></div>
+      <div class="finding"><div class="k">depth / L<sub>credit</sub><small>credit loop cap</small></div><p>With credit flow control, throughput matched <code>min(offered, depth / credit_return_latency)</code> exactly. A depth-2 FIFO with a 32-cycle credit loop ran at 62.5% of offered load, even though every stage was fast enough.</p></div>
+      <div class="finding"><div class="k">λ × loaded RTT<small>outstanding cap</small></div><p>Size <code>max_outstanding</code> using the loaded round trip, not the unloaded one. At 10 cycles per request the unloaded round trip is 14 cycles, which suggests 2 are enough. In practice 2 reached only 72% of offered load, and it took 6–8 to reach the uncapped result.</p></div>
+      <div class="finding"><div class="k">depth moves loss into latency<small>trade-off</small></div><p>A deeper FIFO turns stalls or drops into queueing delay. For the exponential responder, going from depth 4 to 16 raised throughput from 93% to 99.8% of offered load. The cost was p99 latency, which rose from 91 to 167 cycles.</p></div>
+    </div>
+  </section>
+
+  <section class="exp" id="load">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 1 · issue rate</div>
+      <h2>Offered load against throughput and latency</h2>
+      <p class="q">Where does the pipeline saturate, and what happens to latency on the way there?</p>
+      <p class="setup" data-setup="load"></p>
+    </div>
+    <div class="figs">
+      <figure><figcaption>Throughput<span>completed requests per cycle vs offered rate · dashed: ideal (offered, capped at responder 1/8)</span></figcaption><div class="chart" data-chart="load-thr"></div></figure>
+      <figure><figcaption>p99 end-to-end latency<span>cycles, from issue attempt to handler done</span></figcaption><div class="chart" data-chart="load-p99"></div></figure>
+    </div>
+    <div class="takeaway">
+      <p><b>Reading it.</b> Poisson arrivals with exponential service and handler times. With depth 2, the pipeline delivered only 87% of the offered 0.1 req/cycle, well below saturation. That is because a blocked requester loses its issue slots. Depth 16 held 99.8% at the same load, but p99 latency rose from 82 to 169 cycles.</p>
+      <p><b>Rule.</b> Choose depth for the lowest utilization at which you need full throughput. Then accept that latency grows with depth once the offered rate is close to the slowest stage's rate.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="handler">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 2 · response handler latency</div>
+      <h2>A slow handler stalls every stage upstream</h2>
+      <p class="q">When the response handler is the slowest stage, how far back does the stall travel?</p>
+      <p class="setup" data-setup="handler"></p>
+    </div>
+    <div class="figs">
+      <figure><figcaption>Throughput<span>req/cycle · dashed: min(1/issue, 1/service, 1/handler)</span></figcaption><div class="chart" data-chart="handler-thr"></div></figure>
+      <figure><figcaption>Median latency<span>cycles</span></figcaption><div class="chart" data-chart="handler-p50"></div></figure>
+    </div>
+    <figure>
+      <figcaption>Where the stall shows up (constant handler)<span>fraction of time each stage is blocked, and average FIFO occupancy</span></figcaption>
+      <div class="tbl" data-table="handler-prop"></div>
+    </figure>
+    <div class="takeaway">
+      <p><b>Reading it.</b> The constant handler shows a hard cliff. At 10 cycles it has no effect. At 10.5, both FIFOs sit full, the responder is blocked 24% of the time and the requester 5%. The exponential handler degrades gradually instead: at 9 cycles (90% handler utilization) it already loses 1.7% of throughput and its p99 latency is 131 cycles.</p>
+      <p><b>Rule.</b> Keep handler utilization below about 85% when handler latency varies. Buffering cannot fix a mean handler rate that is too slow; it only delays the point where the stall reaches the source.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="resp_depth">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 3 · response FIFO depth</div>
+      <h2>Response FIFO depth against handler jitter</h2>
+      <p class="q">How deep must the response FIFO be to keep a jittery handler from stalling the responder?</p>
+      <p class="setup" data-setup="resp_depth"></p>
+    </div>
+    <div class="figs">
+      <figure><figcaption>Responder stall<span>fraction of responder time blocked on a full response FIFO</span></figcaption><div class="chart" data-chart="resp-stall"></div></figure>
+      <figure><figcaption>p99 end-to-end latency<span>cycles</span></figcaption><div class="chart" data-chart="resp-p99"></div></figure>
+    </div>
+    <div class="takeaway">
+      <p><b>Reading it.</b> All handler distributions have the same 7-cycle mean. Constant and uniform (±50%) handlers never back up, so depth 1 is enough. The exponential handler needs depth 4–8. The bimodal handler (10% of responses take 5.5× the mean) needs 12–16. For the bimodal handler, p99 latency hardly changes with depth, because the slow responses set the tail.</p>
+      <p><b>Rule.</b> Size the response FIFO for the handler's latency variance, not its mean. Measure the handler's p99 service time and cover the responses that arrive during it.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="burst">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 4 · issue burstiness</div>
+      <h2>Absorbing bursts without dropping requests</h2>
+      <p class="q">How much request FIFO does a bursty source need before it stops losing requests?</p>
+      <p class="setup" data-setup="burst"></p>
+    </div>
+    <figure>
+      <figcaption>Fraction of requests dropped<span>rows: burst length (requests, 1 cycle apart) · columns: request FIFO depth · average rate fixed at 1 per 10 cycles</span></figcaption>
+      <div class="tbl heat" data-heat="burst"></div>
+    </figure>
+    <div class="takeaway">
+      <p><b>Reading it.</b> The average rate is well inside capacity (80% responder utilization), yet a shallow FIFO drops up to 81% of the requests in a 32-request burst. The responder handles about one request per 8 cycles during a burst. Losses therefore stop once depth is about B − B/8: depth 4 for B=4, 8 for B=8, 16 for B=16, and 32 for B=32 (the next depth tested).</p>
+      <p><b>Rule.</b> Size the request FIFO for the longest burst: <code>B − B·gap/service</code>. Under the block policy, a FIFO that is too shallow stalls the source instead of dropping requests.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="credit">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 5 · flow-control delay</div>
+      <h2>Credit return latency against request FIFO depth</h2>
+      <p class="q">How does a slow credit return limit throughput for each FIFO depth?</p>
+      <p class="setup" data-setup="credit"></p>
+    </div>
+    <div class="figs">
+      <figure><figcaption>Throughput<span>req/cycle vs credit return latency (cycles)</span></figcaption><div class="chart" data-chart="credit-thr"></div></figure>
+      <figure><figcaption>Requester stall<span>fraction of time the requester waits for a credit</span></figcaption><div class="chart" data-chart="credit-stall"></div></figure>
+    </div>
+    <div class="takeaway">
+      <p><b>Reading it.</b> Every stage is fast enough, and the request FIFO is empty on average. The limit is the credit loop: each credit makes one trip per <code>credit_return_latency</code>, so throughput is capped at <code>depth / L</code>. Depth 2 hits the cap at L = 20. Depth 4 hits it at L = 40. Depth 8 and 16 never hit it in this range.</p>
+      <p><b>Rule.</b> Choose credit-based FIFO depth ≥ <code>issue_rate × credit round trip</code>, including pipeline stages on the return path. This is a bandwidth-delay product, not a buffering requirement.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="outstanding">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 6 · outstanding requests</div>
+      <h2>How many requests must be in flight</h2>
+      <p class="q">How many requests must be allowed in flight to reach full rate?</p>
+      <p class="setup" data-setup="outstanding"></p>
+    </div>
+    <div class="figs">
+      <figure><figcaption>Throughput as a fraction of offered<span>by max_outstanding · two offered rates</span></figcaption><div class="chart" data-chart="out-ach"></div></figure>
+      <figure><figcaption>p99 end-to-end latency<span>cycles</span></figcaption><div class="chart" data-chart="out-p99"></div></figure>
+    </div>
+    <div class="takeaway">
+      <p><b>Reading it.</b> By Little's law, the in-flight count equals throughput × round trip. The unloaded round trip is 14 cycles, but with queueing it is about 33 cycles at 0.1 req/cycle, so about 3.3 requests are in flight on average. Variance pushes the practical requirement to 6–8. Beyond that, the cap has no effect and the FIFO depths set the limit.</p>
+      <p><b>Rule.</b> Size <code>max_outstanding</code> ≥ offered rate × p90 loaded round trip. Use a smaller value on purpose if you need to bound latency.</p>
+    </div>
+  </section>
+
+  <section class="exp" id="tail">
+    <div class="head prose">
+      <div class="eyebrow">Experiment 7 · responder latency variance</div>
+      <h2>Same mean, different spread</h2>
+      <p class="q">With the mean fixed, what does latency spread alone cost?</p>
+      <p class="setup" data-setup="tail"></p>
+    </div>
+    <figure>
+      <figcaption>Responder service distribution × FIFO depth<span>mean service latency 8 cycles in every row; both FIFOs at the depth shown</span></figcaption>
+      <div class="tbl" data-table="tail"></div>
+    </figure>
+    <div class="takeaway">
+      <p><b>Reading it.</b> At depth 4, going from a constant to a bimodal responder cost 9.5 points of throughput (97.7% → 88.2%). The mean was the same in both cases, and the responder was only 80% utilized. Depth 16 recovered the throughput, but p99 latency rose to 200 cycles.</p>
+      <p><b>Rule.</b> When latency has a tail, add depth where the tail occurs. Track p99 latency and stall fraction, not just the mean.</p>
+    </div>
+  </section>
+
+  <section class="prose rules" style="display:grid;gap:16px">
+    <h2>Sizing rules from this study</h2>
+    <div class="tbl">
+      <table>
+        <tbody>
+          <tr><td>Throughput ceiling</td><td>min(1/issue, N/service, M/handler, depth/L_credit, outstanding/RTT)</td></tr>
+          <tr><td>Request FIFO, bursts</td><td>≥ B − B·gap/service_latency</td></tr>
+          <tr><td>Request FIFO, credits</td><td>≥ issue_rate × credit round trip</td></tr>
+          <tr><td>Response FIFO</td><td>cover handler variance: exp ≈ 4–8, heavy tail ≈ 12–16 at 70% load</td></tr>
+          <tr><td>Outstanding cap</td><td>≥ issue_rate × loaded p90 RTT (not the unloaded RTT)</td></tr>
+          <tr><td>Stage utilization</td><td>keep the stages with variable latency ≤ ~85%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="prose" style="display:grid;gap:12px">
+    <h2>Method and limits</h2>
+    <ul class="plain note">
+      <li>Model: <code>studies/backpressure/backpressure_sim.py</code>. Runs: <code>run_study.py</code>, with results in <code>results/study_results.csv</code>.</li>
+      <li id="method-line"></li>
+      <li>Latency is measured from when the requester tried to issue, so time the source spends stalled counts toward it. A blocked requester does not make up missed slots (it is a stalling source, not a source with an unbounded queue).</li>
+      <li>Responder workers may complete out of order. There is no reorder buffer and no arbitration between several requesters. The ready signal is instant unless <code>flow_control=credit</code>.</li>
+    </ul>
+  </section>
+</div>
+
+<script>
+const DATA = /*__STUDY_DATA__*/null;
+const SERIES = ["--s1", "--s2", "--s3", "--s4"];
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const exp = (id) => DATA.experiments.find((e) => e.id === id);
+const fmt = (v, d = 3) => (typeof v === "number" ? (Math.abs(v) >= 100 ? v.toFixed(0) : Number(v.toPrecision(d)).toString()) : String(v));
+const pct = (v) => (v * 100).toFixed(1) + "%";
+
+function niceTicks(min, max, n = 5) {
+  const span = max - min || 1;
+  const step0 = span / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= n) || 10 * mag;
+  const out = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+
+function lineChart(host, opt) {
+  const W = 480, H = 280, m = { l: 52, r: 14, t: 10, b: 44 };
+  const series = opt.series;
+  const allX = series.flatMap((s) => s.pts.map((p) => p[0]));
+  const allY = series.flatMap((s) => s.pts.map((p) => p[1])).concat(opt.ref ? opt.ref.map((p) => p[1]) : []);
+  const xmin = opt.xmin ?? Math.min(...allX), xmax = opt.xmax ?? Math.max(...allX);
+  const ymin = opt.ymin ?? 0;
+  const yticks = niceTicks(ymin, opt.ymax ?? Math.max(...allY) * 1.05);
+  const ymax = yticks[yticks.length - 1];
+  const xticks = opt.xticks || niceTicks(xmin, xmax, 6);
+  const X = (v) => m.l + ((v - xmin) / (xmax - xmin)) * (W - m.l - m.r);
+  const Y = (v) => H - m.b - ((v - ymin) / (ymax - ymin)) * (H - m.t - m.b);
+  const yf = opt.yfmt || fmt;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${opt.label}">`;
+  yticks.forEach((t) => { s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--grid)" stroke-width="1"/><text x="${m.l - 6}" y="${Y(t) + 4}" text-anchor="end">${yf(t)}</text>`; });
+  s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(ymin)}" y2="${Y(ymin)}" stroke="var(--fg-3)" stroke-width="1"/>`;
+  xticks.forEach((t) => { s += `<text x="${X(t)}" y="${H - m.b + 16}" text-anchor="middle">${fmt(t)}</text>`; });
+  s += `<text class="axis-title" x="${(m.l + W - m.r) / 2}" y="${H - 6}" text-anchor="middle">${opt.xlabel}</text>`;
+  if (opt.ref) s += `<polyline points="${opt.ref.map((p) => `${X(p[0])},${Y(p[1])}`).join(" ")}" fill="none" stroke="var(--fg-3)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
+  series.forEach((ser, i) => {
+    const pts = ser.pts.map((p) => `${X(p[0])},${Y(p[1])}`).join(" ");
+    s += `<polyline points="${pts}" fill="none" stroke="var(${SERIES[i]})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    ser.pts.forEach((p) => { s += `<circle cx="${X(p[0])}" cy="${Y(p[1])}" r="3" fill="var(${SERIES[i]})" stroke="var(--surface)" stroke-width="1.5"/>`; });
+  });
+  s += `<line class="xh" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="var(--fg-3)" stroke-width="1" visibility="hidden"/>`;
+  s += `<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent" class="hit"/>`;
+  s += `</svg>`;
+  const legend = `<div class="legend">${series.map((ser, i) => `<span><i style="background:var(${SERIES[i]})"></i>${ser.name}</span>`).join("")}${opt.ref ? `<span><i class="ref"></i>${opt.refName || "reference"}</span>` : ""}</div>`;
+  host.innerHTML = legend + s;
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+  const svg = host.querySelector("svg"), xh = svg.querySelector(".xh");
+  const xs = [...new Set(allX)].sort((a, b) => a - b);
+  function move(ev) {
+    const r = svg.getBoundingClientRect();
+    const px = ((ev.clientX - r.left) / r.width) * W;
+    const xv = xs.reduce((a, b) => (Math.abs(X(b) - px) < Math.abs(X(a) - px) ? b : a));
+    xh.setAttribute("x1", X(xv)); xh.setAttribute("x2", X(xv)); xh.setAttribute("visibility", "visible");
+    const rows = series.map((ser, i) => { const p = ser.pts.find((q) => q[0] === xv); return p ? `<div><i style="background:var(${SERIES[i]})"></i>${ser.name}: <b>${(opt.tipfmt || yf)(p[1])}</b></div>` : ""; }).join("");
+    tip.innerHTML = `<div>${opt.xlabel.split(" (")[0]}: <b>${fmt(xv)}</b></div>${rows}`;
+    tip.hidden = false;
+    const hr = host.getBoundingClientRect();
+    const left = (X(xv) / W) * r.width + (r.left - hr.left);
+    tip.style.top = (r.top - hr.top + 8) + "px";
+    tip.style.left = left > hr.width / 2 ? `${left - tip.offsetWidth - 12}px` : `${left + 12}px`;
+  }
+  svg.querySelector(".hit").addEventListener("pointermove", move);
+  svg.querySelector(".hit").addEventListener("pointerleave", () => { tip.hidden = true; xh.setAttribute("visibility", "hidden"); });
+  // Data table for every chart (contrast relief + exact values)
+  const det = document.createElement("details");
+  det.innerHTML = `<summary>Show data</summary><div class="tbl"><table><thead><tr><th>${opt.xlabel}</th>${series.map((x) => `<th>${x.name}</th>`).join("")}</tr></thead><tbody>${xs.map((xv) => `<tr><td>${fmt(xv)}</td>${series.map((ser) => { const p = ser.pts.find((q) => q[0] === xv); return `<td>${p ? (opt.tipfmt || yf)(p[1]) : "–"}</td>`; }).join("")}</tr>`).join("")}</tbody></table></div>`;
+  host.parentElement.appendChild(det);
+}
+
+function seriesOf(e, yKey, name, xMap = (x) => x) {
+  const order = [...new Set(e.rows.map((r) => r.series))];
+  return order.map((sv) => ({ name: name(sv), pts: e.rows.filter((r) => r.series === sv).map((r) => [xMap(r.x), r[yKey]]).sort((a, b) => a[0] - b[0]) }));
+}
+
+function render() {
+  const b = DATA.baseline;
+  document.getElementById("meta").innerHTML = [
+    `${DATA.experiments.reduce((n, e) => n + e.rows.length, 0)} configurations × ${DATA.seeds} seeds`,
+    `${(b.sim_time / 1000).toFixed(0)}k cycles per run, ${(b.warmup / 1000).toFixed(0)}k warm-up`,
+    `baseline: issue 1/${b.issue_interval}, service ${b.service_latency}, handler ${b.handler_latency}, FIFOs ${b.req_fifo_depth}/${b.resp_fifo_depth}`,
+  ].map((t) => `<span>${t}</span>`).join("");
+  document.getElementById("method-line").textContent = `Each point is the mean of ${DATA.seeds} seeds, ${b.sim_time.toLocaleString()} cycles each, with the first ${b.warmup.toLocaleString()} cycles discarded as warm-up. Unless an experiment overrides them, the settings are: issue every ${b.issue_interval} cycles, service ${b.service_latency} cycles, handler ${b.handler_latency} cycles, both FIFOs depth ${b.req_fifo_depth}, one responder, one handler, and ready/valid flow control with blocking.`;
+  DATA.experiments.forEach((e) => {
+    const el = document.querySelector(`[data-setup="${e.id}"]`);
+    if (el) el.textContent = `swept ${e.x_name} × ${e.series_name}` + (Object.keys(e.overrides).length ? ` · ${Object.entries(e.overrides).map(([k, v]) => `${k}=${v}`).join(", ")}` : "");
+  });
+  const chart = (key, opt) => lineChart(document.querySelector(`[data-chart="${key}"]`), opt);
+
+  const load = exp("load");
+  const lx = (x) => 1 / x;
+  chart("load-thr", { label: "Throughput vs offered rate", series: seriesOf(load, "throughput", (s) => `depth ${s}`, lx), xlabel: "offered rate (req/cycle)", xmin: 0, xmax: 0.17, xticks: [0, 0.04, 0.08, 0.12, 0.16], ref: [[0, 0], [0.125, 0.125], [0.17, 0.125]], refName: "ideal", yfmt: (v) => v.toFixed(2), tipfmt: (v) => v.toFixed(4) });
+  chart("load-p99", { label: "p99 latency vs offered rate", series: seriesOf(load, "lat_p99", (s) => `depth ${s}`, lx), xlabel: "offered rate (req/cycle)", xmin: 0, xmax: 0.17, xticks: [0, 0.04, 0.08, 0.12, 0.16] });
+
+  const h = exp("handler");
+  const cap = h.rows.filter((r) => r.series === "const").map((r) => [r.x, Math.min(0.1, 1 / 8, 1 / r.x)]);
+  chart("handler-thr", { label: "Throughput vs handler latency", series: seriesOf(h, "throughput", (s) => `${s} handler`), xlabel: "handler latency (cycles)", ref: cap, refName: "capacity", yfmt: (v) => v.toFixed(2), tipfmt: (v) => v.toFixed(4) });
+  chart("handler-p50", { label: "Median latency vs handler latency", series: seriesOf(h, "lat_p50", (s) => `${s} handler`), xlabel: "handler latency (cycles)" });
+  const hc = h.rows.filter((r) => r.series === "const");
+  document.querySelector('[data-table="handler-prop"]').innerHTML = `<table><thead><tr><th>handler latency</th><th>throughput</th><th>handler util</th><th>resp FIFO avg</th><th>responder stalled</th><th>req FIFO avg</th><th>requester stalled</th><th>p50 latency</th></tr></thead><tbody>${hc.map((r) => `<tr><td>${fmt(r.x)}</td><td>${r.throughput.toFixed(4)}</td><td>${pct(r.handler_util)}</td><td>${r.resp_fifo_avg.toFixed(2)}</td><td>${pct(r.resp_stall_frac)}</td><td>${r.req_fifo_avg.toFixed(2)}</td><td>${pct(r.req_stall_frac)}</td><td>${r.lat_p50.toFixed(1)}</td></tr>`).join("")}</tbody></table>`;
+
+  const rd = exp("resp_depth");
+  chart("resp-stall", { label: "Responder stall vs response FIFO depth", series: seriesOf(rd, "resp_stall_frac", (s) => s), xlabel: "response FIFO depth", xticks: [1, 4, 8, 12, 16, 24, 32], yfmt: (v) => (v * 100).toFixed(0) + "%", tipfmt: pct });
+  chart("resp-p99", { label: "p99 latency vs response FIFO depth", series: seriesOf(rd, "lat_p99", (s) => s), xlabel: "response FIFO depth", xticks: [1, 4, 8, 12, 16, 24, 32] });
+
+  const bu = exp("burst");
+  const depths = [...new Set(bu.rows.map((r) => r.x))], lens = [...new Set(bu.rows.map((r) => r.series))];
+  document.querySelector('[data-heat="burst"]').innerHTML = `<table><thead><tr><th class="corner">burst ↓ · depth →</th>${depths.map((d) => `<th style="text-align:center">${d}</th>`).join("")}</tr></thead><tbody>${lens.map((L) => `<tr><td>${L}</td>${depths.map((d) => { const r = bu.rows.find((q) => q.series === L && q.x === d); const v = r.drop_frac; const p = Math.round(8 + v * 92); return `<td class="cell${v > 0.45 ? " hi" : ""}" style="background:color-mix(in oklab, var(--seq) ${v === 0 ? 0 : p}%, var(--surface))" title="burst ${L}, depth ${d}: ${pct(v)} dropped, p99 ${r.lat_p99.toFixed(0)} cycles">${v === 0 ? "0" : pct(v)}</td>`; }).join("")}</tr>`).join("")}</tbody></table>`;
+
+  const cr = exp("credit");
+  chart("credit-thr", { label: "Throughput vs credit return latency", series: seriesOf(cr, "throughput", (s) => `depth ${s}`), xlabel: "credit return latency (cycles)", yfmt: (v) => v.toFixed(2), tipfmt: (v) => v.toFixed(4) });
+  chart("credit-stall", { label: "Requester stall vs credit return latency", series: seriesOf(cr, "req_stall_frac", (s) => `depth ${s}`), xlabel: "credit return latency (cycles)", yfmt: (v) => (v * 100).toFixed(0) + "%", tipfmt: pct });
+
+  const ou = exp("outstanding");
+  chart("out-ach", { label: "Achieved fraction vs max outstanding", series: seriesOf(ou, "achieved_vs_offered", (s) => `1 per ${s} cycles`), xlabel: "max outstanding", ymin: 0, ymax: 1, yfmt: (v) => (v * 100).toFixed(0) + "%", tipfmt: pct });
+  chart("out-p99", { label: "p99 latency vs max outstanding", series: seriesOf(ou, "lat_p99", (s) => `1 per ${s} cycles`), xlabel: "max outstanding" });
+
+  const ta = exp("tail");
+  document.querySelector('[data-table="tail"]').innerHTML = `<table><thead><tr><th>service distribution</th><th>FIFO depth</th><th>achieved / offered</th><th>p50 latency</th><th>p99 latency</th><th>requester stalled</th><th>req FIFO avg</th></tr></thead><tbody>${ta.rows.map((r) => `<tr><td>${r.x}</td><td>${r.series}</td><td>${pct(r.achieved_vs_offered)}</td><td>${r.lat_p50.toFixed(1)}</td><td>${r.lat_p99.toFixed(1)}</td><td>${pct(r.req_stall_frac)}</td><td>${r.req_fifo_avg.toFixed(2)}</td></tr>`).join("")}</tbody></table>`;
+}
+render();
+</script>

@@ -66,3 +66,11 @@ Every field of `Config` can be passed to `--set` or `--sweep`. Several
 - An almost-full threshold with a registered ready signal (skid buffer) in place of instant ready.
 - Different request and response sizes (bytes per beat) on each link.
 - Clock-domain crossing: a different clock rate for each stage.
+
+## Study report
+
+`run_study.py` runs the full experiment set (7 experiments, 177 configurations × 5 seeds, about 1 minute on 4 cores). It writes `results/study_results.{json,csv}`, and with `--report` it also renders `results/report.html` from `report_template.html`.
+
+```bash
+python studies/backpressure/run_study.py --report
+```

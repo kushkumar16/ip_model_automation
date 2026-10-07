@@ -90,9 +90,15 @@ def _locals(gen) -> dict:
     return gen.gi_frame.f_locals if gen.gi_frame is not None else {}
 
 
+_ID_VARS = ("txn", "pkt", "packet", "item", "cmd", "command", "req")  # locals tried for the logged id
+
+
 def _txn_id(local_vars) -> object:
-    txn = local_vars.get("txn")
-    return getattr(txn, "id", txn) if txn is not None else "-"
+    for var in _ID_VARS:
+        obj = local_vars.get(var)
+        if obj is not None:
+            return getattr(obj, "id", obj)
+    return "-"
 
 
 def _emit(monitor: LatencyMonitor, loc: dict, name_fmt: str, id_fmt: str | None, start: float) -> None:

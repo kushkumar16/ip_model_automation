@@ -14,3 +14,13 @@ budgets:
   # Wait budgets (approach G): time a txn waits for a shared resource, "<ip>.<resource>.wait".
   crypto.sha.wait: 4.0
   codec.dsp.wait: 4.0
+
+  # Packet model (packet_model*.py), per packet:
+  #   <ip>.handle  handling time (approaches A, B, E, F, G)
+  #   <ip>.e2e     rx_q put -> tx_q put, including queue wait (approaches C, D)
+  par.handle: 6.0
+  ser.handle: 4.0
+  par.e2e: 6.0
+  ser.e2e: 8.0
+  ser.rx_q.wait: 4.0
+  par.engines.wait: 2.0

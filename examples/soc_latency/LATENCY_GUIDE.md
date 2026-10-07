@@ -8,6 +8,9 @@ Everything here is runnable code in `examples/soc_latency/`. Every diff below is
 `diff -u` output against a baseline model with no latency code, and each approach is
 cross-checked against the others or against hand-written timestamps.
 
+> Measuring **packet** latency? [`PACKET_LATENCY.md`](PACKET_LATENCY.md) has a worked
+> example of every approach on both a per-packet process and a `while True` loop.
+
 ## Recommendation
 
 For the IPs in `src/ip_model_automation/`, which are built from long-lived `while True`

@@ -1,0 +1,12 @@
+# Latency budgets, in simulation time units (the same units as env.timeout()).
+# Keys are "<ip>.<pipeline>"; approach B also accepts "<ip>.<pipeline>.<stage>".
+# Pipelines not listed use default_budget. Remove default_budget to check only listed ones.
+
+default_budget: 12.0
+
+budgets:
+  dma.read: 8.0
+  dma.write: 9.0
+  crypto.hash: 8.0
+  codec.encode: 10.0
+  codec.encode.transform: 5.0   # per-stage budget: only approach B checks this

@@ -1,0 +1,10 @@
+# Latency budgets for loop_model*.py, in simulation time units.
+# One sample = one loop iteration (one item handled), not counting idle time between items.
+
+default_budget: 10.0
+
+budgets:
+  dma.read: 5.0
+  dma.write: 8.0
+  sched.scheduler: 7.5
+  bridge.bridge: 4.0

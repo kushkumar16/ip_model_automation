@@ -270,8 +270,8 @@ carries it as `env.monitor`. That makes their wiring smaller: `build()` and
 
 This is approach A as a single line. The wrapping happens where the function is defined
 instead of where the pipeline is registered, so `add_pipeline` and `_dispatcher` stay
-untouched. Use it on per-job generators only: on a `while True` loop it would time the
-loop's whole lifetime.
+untouched. It also works on `while True` work loops, where it records one sample per
+iteration; see [`LOOP_CHANGE_POINTS.md`](LOOP_CHANGE_POINTS.md).
 
 ### Approach F: `TracedEnvironment`, with no IP edits (the note's option B)
 
@@ -362,6 +362,7 @@ take items out of order, which would pair up the wrong timestamps.
 | End-to-end across IPs | no | no | yes, by probing the outer stores | **yes** | no | no | no |
 | Interrupted or failed transactions recorded | yes | yes | no | no | yes | yes | yes |
 | Covers new processes automatically | registered ones | **yes** | yes | yes | decorated ones | **yes**, if listed in `names` | **yes** |
+| `while True` work loops ([details](LOOP_CHANGE_POINTS.md)) | **yes**, one sample per iteration | no, needs hook methods | in → out time only, including queue wait | ingress → completion time only | **yes**, one sample per iteration | **yes**, one sample per iteration | **yes**, plus queue wait |
 
 The line counts include the docstring's first line and `Run:` line, which change in
 every file.

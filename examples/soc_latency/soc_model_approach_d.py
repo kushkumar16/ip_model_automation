@@ -7,7 +7,7 @@ so pipelines in the same IP contend with each other.
 Per pipeline:  submit() -> in_q -> _dispatcher -> _process (stages) -> out_q -> _drain
 
 The soc_model_approach_*.py files are copies of this file with the latency checker
-applied; CHANGE_POINTS.md shows the exact diff for each.
+applied; LATENCY_GUIDE.md shows the exact diff for each.
 
 Run: python examples/soc_latency/soc_model_approach_d.py
 """

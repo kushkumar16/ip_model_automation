@@ -1,9 +1,9 @@
-"""Run the baseline and all four approaches, print each report, and cross-check them.
+"""Run the baseline and every approach (A-G), print each report, and cross-check them.
 
 Checks that:
 - every approach completes exactly the same transactions as the baseline (the checker
   does not change model behaviour), and
-- every approach measures identical per-pipeline latencies.
+- every approach measures identical per-pipeline latencies (stage and wait rows excluded).
 
 Run: python examples/soc_latency/run_all.py        (reports only)
      python examples/soc_latency/run_all.py -v     (also print every ERROR line)
@@ -19,12 +19,18 @@ import soc_model_approach_a
 import soc_model_approach_b
 import soc_model_approach_c
 import soc_model_approach_d
+import soc_model_approach_e
+import soc_model_approach_f
+import soc_model_approach_g
 
 APPROACHES = [
     ("A: wrap the handler at registration", soc_model_approach_a),
     ("B: mixin overrides the IP's hooks", soc_model_approach_b),
     ("C: probed input/output Stores", soc_model_approach_c),
     ("D: timestamp on the transaction", soc_model_approach_d),
+    ("E: @latency_traced decorator", soc_model_approach_e),
+    ("F: TracedEnvironment, no IP edits", soc_model_approach_f),
+    ("G: F + TracedResource/TracedStore waits", soc_model_approach_g),
 ]
 
 

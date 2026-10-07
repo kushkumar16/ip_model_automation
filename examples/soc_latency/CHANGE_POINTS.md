@@ -29,6 +29,13 @@ Each approach hooks into a different point on this path:
 | **B** | the template methods `_process` and `_run_stage`, through a subclass |
 | **C** | the `in_q` and `out_q` stores |
 | **D** | `submit()` at ingress and `_drain` at egress |
+| **E** | `_process`, through a `@latency_traced` decorator |
+| **F** | `env.process()` itself, through a `TracedEnvironment`; no `IPBlock` edits |
+| **G** | F, plus the resources and `in_q`, to measure waiting time |
+
+Approaches E, F and G come from the note "Recording pipeline latency in SimPy without
+per-job code". Its options A, B and C correspond to E, F and G here. They are covered in
+their own section below.
 
 ## New files, the same for every approach
 
@@ -36,12 +43,14 @@ Each approach hooks into a different point on this path:
 |---|---|
 | [`latency_monitor.py`](latency_monitor.py) | `LatencyMonitor` records latency and logs an `ERROR` when a budget is exceeded. It also holds the helper for each approach: `wrap` (A), `LatencyCheckedMixin` (B) and `LatencyProbe` (C). |
 | [`latency_budgets.yaml`](latency_budgets.yaml) | The configurable budgets: a `default_budget` plus overrides keyed `ip.pipeline`, or `ip.pipeline.stage` for approach B. |
-| [`run_all.py`](run_all.py) | Runs the baseline and all four approaches, then checks that none of them changes the model's behaviour and that all four measure identical latencies. |
+| [`latency_trace.py`](latency_trace.py) | The tracing helpers for E, F and G: `MonitoredEnvironment`, `latency_traced`, `TracedEnvironment`, `TracedStore` and `TracedResource`. They report into the same `LatencyMonitor`. |
+| [`test_latency_trace.py`](test_latency_trace.py) | Edge-case tests for `latency_trace.py`: interrupts, failed events, return values, work-loop spans, and queue and resource waits. |
+| [`run_all.py`](run_all.py) | Runs the baseline and every approach (A–G), then checks that none of them changes the model's behaviour and that all of them measure identical pipeline latencies. |
 
-## Wiring, the same for every approach
+## Wiring for approaches A–D
 
-Every approach needs the monitor created and passed in. These changes are the same in
-all four files, so they are shown once here and left out of the per-approach sections:
+Approaches A–D need the monitor created and passed in. These changes are the same in all
+four files, so they are shown once here and left out of the per-approach sections:
 
 ```diff
 +import logging
@@ -214,23 +223,157 @@ IP's `_drain`.
 
 ---
 
+## Approaches E–G: tracing at the SimPy level
+
+These approaches don't pass a monitor through the model. Instead, the environment
+carries it as `env.monitor`. That makes their wiring smaller: `build()` and
+`IPBlock.__init__` keep their signatures.
+
+```diff
++import logging
+ import random
+ ...
+ import simpy
++
++from latency_trace import ...                       # the helpers each approach uses
+
+ def run():
+     random.seed(SEED)
+-    env = simpy.Environment()
++    env = MonitoredEnvironment()                    # E; F and G use TracedEnvironment(...)
+     blocks = build(env)
+     env.run(until=SIM_TIME)
+-    return blocks, None
++    return blocks, env.monitor
+
+ if __name__ == "__main__":
+-    blocks, _ = run()
++    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
++    blocks, monitor = run()
+     ...
++    monitor.report()
+```
+
+### Approach E: `@latency_traced` decorator (the note's option A)
+
+**File:** [`soc_model_approach_e.py`](soc_model_approach_e.py)
+
+| # | Where (baseline line) | Change |
+|---|---|---|
+| E1 | above `IPBlock._process` (L100) | Add one decorator line. The name is formatted from the call's arguments. |
+| E2 | `run()` (L137) | Create a `MonitoredEnvironment` instead of a plain `simpy.Environment`. |
+
+```diff
++    @latency_traced("{self.name}.{pname}")
+     def _process(self, pname: str, txn: Txn):
+```
+
+This is approach A as a single line. The wrapping happens where the function is defined
+instead of where the pipeline is registered, so `add_pipeline` and `_dispatcher` stay
+untouched. Use it on per-job generators only: on a `while True` loop it would time the
+loop's whole lifetime.
+
+### Approach F: `TracedEnvironment`, with no IP edits (the note's option B)
+
+**File:** [`soc_model_approach_f.py`](soc_model_approach_f.py)
+
+| # | Where (baseline line) | Change |
+|---|---|---|
+| F1 | `run()` (L137) | Create a `TracedEnvironment` instead of a `simpy.Environment`. |
+
+```diff
+-    env = simpy.Environment()
++    env = TracedEnvironment(names={"IPBlock._process": "{self.name}.{pname}"})
+```
+
+This is the **only** change to the model. `TracedEnvironment.process()` wraps every
+generator in a proxy that passes each yield, value, interrupt and failed event through
+unchanged, and records a latency sample for it:
+
+- A **per-job process** gives one sample from start to return.
+- A **`while True: x = yield store.get()` loop** gives one sample per trip round the loop.
+  Idle time waiting for input is not counted.
+
+`names` maps a process's `__qualname__` to a per-instance name built from its arguments.
+Without `names`, every process is traced under its bare `__qualname__`. That works, but
+it aggregates all 7 pipelines into one row, so per-pipeline budgets can't be applied:
+
+```
+names=None             n     avg      max
+IPBlock._dispatcher  350    0.00     0.00    <- loop iterations: hand-off only
+IPBlock._drain       350    0.00     0.00
+IPBlock._process     350    7.38    25.03    <- all 7 pipelines mixed together
+traffic                7  431.67   573.70    <- whole traffic-generator lifetime
+```
+
+Limits:
+- Only processes started through `env.process()` are seen.
+- A loop that never calls `get()` on a `Store` is only reported when it returns.
+- Each yield goes through one extra generator, which slows the simulation down slightly.
+
+### Approach G: F plus waiting time on resources and queues (the note's option C)
+
+**File:** [`soc_model_approach_g.py`](soc_model_approach_g.py)
+
+| # | Where (baseline line) | Change |
+|---|---|---|
+| G1 | `run()` (L137) | Same as F1. |
+| G2 | `IPBlock.__init__` (L79) | Create resources as `TracedResource`, which records `<ip>.<resource>.wait` from request to grant. |
+| G3 | `IPBlock.add_pipeline` (L87) | Create `in_q` as a `TracedStore`, which records `<ip>.<pipeline>.in_q.wait`, the time an item sits in the queue. |
+
+```diff
+-        self.resources = {k: simpy.Resource(env, capacity=c) for k, c in resources.items()}
++        self.resources = {k: TracedResource(env, c, name=f"{name}.{k}") for k, c in resources.items()}
+ ...
+-        self.in_q[pname] = simpy.Store(self.env)
++        self.in_q[pname] = TracedStore(self.env, name=f"{self.name}.{pname}.in_q")
+```
+
+F shows **how long** each pipeline takes, and G shows **where the time goes**. In this
+model, the queueing happens at the shared resources and not in the stores:
+
+```
+                    n    avg    p95    max  budget  viol
+codec.dsp.wait    100   3.61   9.70  12.14     4.0    41   <- bottleneck: codec.encode/decode miss budget
+crypto.sha.wait   100   2.51   8.81  12.64     4.0    24   <- bottleneck: crypto.hash misses budget
+crypto.aes.wait   200   0.53   3.28   4.80    12.0     0
+dma.bus.wait      300   0.37   1.97   3.14    12.0     0
+codec.mem.wait    200   0.05   0.33   1.62    12.0     0
+*.in_q.wait        50   0.00   0.00   0.00    12.0     0   <- _dispatcher takes items immediately
+```
+
+The `in_q` waits are all 0 because `_dispatcher` starts a process for every transaction
+as soon as it arrives. In an IP whose worker loop handles one item at a time, such as
+the AXI-style `*_process` loops, the Store wait is where backpressure shows up.
+`TracedStore` only works with a plain FIFO `Store`. `PriorityStore` and `FilterStore`
+take items out of order, which would pair up the wrong timestamps.
+
+---
+
 ## Summary
 
-| | A: wrapper | B: mixin | C: store probe | D: txn timestamp |
-|---|---|---|---|---|
-| Approach's own change points (excluding wiring) | 2 (`add_pipeline`, `_dispatcher`) | 2 (new class, instantiation) | **1** (`add_pipeline`) | 3 (`Txn`, `submit`, `_drain`) |
-| Lines changed in the model (including wiring) | 31 | **21** | 28 | 28 |
-| `IPBlock` processing code touched | dispatcher only | **none** | **none** | ingress and egress |
-| Per-stage budgets | no | **yes** | no | no |
-| End-to-end across IPs | no | no | yes, by probing the outer stores | **yes** |
-| Interrupted or failed transactions recorded | yes | yes | no | no |
+| | A: wrapper | B: mixin | C: store probe | D: txn timestamp | E: decorator | F: TracedEnvironment | G: F + waits |
+|---|---|---|---|---|---|---|---|
+| Approach's own change points (excluding wiring) | 2 | 2 | 1 | 3 | 1 | **0** | 2 |
+| Lines changed in the model (including wiring) | 31 | 21 | 28 | 28 | 16 | **15** | 19 |
+| `IPBlock` code touched | `add_pipeline`, `_dispatcher` | **none** | `__init__`, `add_pipeline` | `__init__`, `submit`, `_drain` | decorator line | **none** | `__init__`, `add_pipeline` |
+| Per-stage budgets | no | **yes** | no | no | no | no | no |
+| Resource and queue wait time | no | no | no | no | no | no | **yes** |
+| End-to-end across IPs | no | no | yes, by probing the outer stores | **yes** | no | no | no |
+| Interrupted or failed transactions recorded | yes | yes | no | no | yes | yes | yes |
+| Covers new processes automatically | registered ones | **yes** | yes | yes | decorated ones | **yes**, if listed in `names` | **yes** |
 
 The line counts include the docstring's first line and `Run:` line, which change in
 every file.
 
 **Which one to pick:**
+- **F** for the fewest edits. It needs one line where the environment is created, plus
+  a `names` entry for each kind of process you want reported per instance.
+- **G** when a pipeline misses its budget and you need to know which resource or queue
+  is the cause.
 - **B** if your IP blocks share a base class with hook methods. It doesn't touch `IPBlock`
   at all, and it is the only option with per-stage budgets.
+- **E** if you want to choose explicitly which methods are measured, with one line each.
 - **C** if your pipelines are connected by `Store`s. It is a single change point inside
   the IP.
 - **A** if pipelines are registered through a central `add_pipeline`-style hook.
@@ -242,7 +385,8 @@ every file.
 cd examples/soc_latency
 python soc_model.py               # baseline: completion counts only
 python soc_model_approach_b.py    # one approach: ERROR lines plus the latency report
-python run_all.py                 # all four reports, plus the cross-check
+python run_all.py                 # every report (A-G), plus the cross-check
+python -m unittest test_latency_trace   # edge-case tests for E/F/G
 python run_all.py -v              # same, plus every ERROR line
 ```
 
@@ -253,7 +397,7 @@ ERROR [t=12.20] LATENCY BUDGET EXCEEDED pipeline=dma.write txn=1 latency=10.56 b
 ERROR [t=14.82] LATENCY BUDGET EXCEEDED pipeline=codec.encode.transform txn=1 latency=9.35 budget=5.00 (+4.35)
 ```
 
-Report from every approach, with the extra `codec.encode.transform` row only from B:
+Report from every approach. B adds the `codec.encode.transform` row, and G adds the `*.wait` rows shown above:
 
 ```
 pipeline                        n     avg     p95     max  budget  viol

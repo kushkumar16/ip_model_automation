@@ -10,3 +10,7 @@ budgets:
   crypto.hash: 8.0
   codec.encode: 10.0
   codec.encode.transform: 5.0   # per-stage budget: only approach B checks this
+
+  # Wait budgets (approach G): time a txn waits for a shared resource, "<ip>.<resource>.wait".
+  crypto.sha.wait: 4.0
+  codec.dsp.wait: 4.0
